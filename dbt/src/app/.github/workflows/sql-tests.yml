@@ -1,0 +1,33 @@
+name: SQL Tests and Slack Notification
+
+on: [push]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.11.6'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt # Assuming you have a requirements.txt with needed packages
+    
+    - name: Run SQL Tests
+      run: |
+        # Add your command to run SQL tests here. It might be a Python script, for example.
+        python /Users/kevin/Dropbox/applications/ELT/dbt/tests/run_sql_tests.py
+    
+    # - name: Notify Slack on Failure
+    #   if: ${{ failure() }}
+    #   uses: 8398a7/action-slack@v3
+    #   with:
+    #     status: ${{ job.status }}
+    #     fields: repo,message,commit,author,action,eventName,ref,workflow,job,took # Customize fields as needed
+    #   env:
+    #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} # Ensure you have this secret set in your GitHub repo settings
