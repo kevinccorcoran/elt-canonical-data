@@ -1,0 +1,34 @@
+# Project Metadata
+name: 'dbt_project'
+version: '1.0.0'
+config-version: 2
+
+# Profile Configuration
+profile: 'dbt_project'
+
+# File Paths Configuration
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+# Clean Targets Configuration
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Model Configuration
+models:
+  dbt_project:
+    +database: "{{ env_var('DB_DATABASE') }}"
+
+    # Schema Overrides for Specific Model Folders
+    app:
+      metrics:
+        +schema: metrics         # Models in the 'metrics' folder use the 'metrics' schema
+      quality_checks:
+        +schema: quality_checks  # Models in the 'quality_checks' folder use the 'quality_checks' schema
+      data_governance:
+        +schema: data_governance  # Models in the 'data_governance' folder use the 'data_governance' schema
