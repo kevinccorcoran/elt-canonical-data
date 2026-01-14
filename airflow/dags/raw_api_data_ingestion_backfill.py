@@ -66,7 +66,7 @@ exec /Users/kevin/repos/ELT_private/airflow_venv/bin/python \
     env_vars = {
         "DATABASE_URL": db_connection_string,
         "DB_DATABASE": env,
-        "POLYGON_API_KEY": Variable.get("POLYGON_API_KEY"),
+        "MASSIVE_API_KEY": Variable.get("MASSIVE_API_KEY"),
     }
     return bash, env_vars
 
