@@ -77,3 +77,12 @@ config/*.cfg
 
 # Archived or backup folders
 .archive/
+
+# Local environment / secrets
+.envrc
+src/datapipeline/config/env.py
+
+# Local Airflow config
+airflow/airflow.cfg
+airflow/webserver_config.py
+
