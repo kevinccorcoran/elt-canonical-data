@@ -1,3 +1,10 @@
+# Airflow local artifacts
+airflow-webserver.pid
+airflow.db
+
+# Local backups
+*_backup.txt
+
 # Logs & diagnostics
 *.log
 *.diag
