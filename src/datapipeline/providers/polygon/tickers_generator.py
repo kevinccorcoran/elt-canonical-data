@@ -3,10 +3,10 @@ import string
 import os
 import re
 
-POLYGON_API_KEY = os.getenv('POLYGON_API_KEY')
+MASSIVE_API_KEY = os.getenv('MASSIVE_API_KEY')
 polygon_base_url = os.getenv('POLYGON_BASE_URL')  # e.g. https://api.polygon.io/v3/reference/tickers
-if not POLYGON_API_KEY or not polygon_base_url:
-    raise EnvironmentError("Please set the POLYGON_API_KEY and POLYGON_BASE_URL environment variables.")
+if not MASSIVE_API_KEY or not polygon_base_url:
+    raise EnvironmentError("Please set the MASSIVE_API_KEY and POLYGON_BASE_URL environment variables.")
 
 
 def is_clean_common(result: dict) -> bool:
@@ -48,7 +48,7 @@ def fetch_tickers(exchange_code):
         "active": "true",
         "type": "CS",          # common stock only
         "limit": 1000,
-        "apiKey": POLYGON_API_KEY,
+        "apiKey": MASSIVE_API_KEY,
     }
 
     for letter in string.ascii_uppercase:
@@ -134,12 +134,12 @@ print(f"Rejected tickers logged to {rejects_path}")
 # import os
 
 # # Retrieve API key and base URL from environment variables
-# POLYGON_API_KEY = os.getenv('POLYGON_API_KEY')
+# MASSIVE_API_KEY = os.getenv('MASSIVE_API_KEY')
 # polygon_base_url = os.getenv('POLYGON_BASE_URL')
 
 # # Ensure the API key and URL are set
-# if not POLYGON_API_KEY or not polygon_base_url:
-#     raise EnvironmentError("Please set the POLYGON_API_KEY and POLYGON_BASE_URL environment variables.")
+# if not MASSIVE_API_KEY or not polygon_base_url:
+#     raise EnvironmentError("Please set the MASSIVE_API_KEY and POLYGON_BASE_URL environment variables.")
 
 # # Function to fetch tickers for a given exchange
 # def fetch_tickers(exchange_code):
@@ -149,7 +149,7 @@ print(f"Rejected tickers logged to {rejects_path}")
 #         'exchange': exchange_code,  # Specifies the exchange code
 #         'active': 'true',      # Fetches only active tickers
 #         'limit': 1000,         # Maximum limit per request
-#         'apiKey': POLYGON_API_KEY
+#         'apiKey': MASSIVE_API_KEY
 #     }
 
 #     # Loop through each letter in the alphabet to fetch batches
