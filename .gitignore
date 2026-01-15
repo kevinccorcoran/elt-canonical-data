@@ -101,6 +101,3 @@ dbt/logs/
 # Project-specific config
 # =========================
 config/*.cfg
-# profiles.yml  # intentionally excluded if needed
-.env
-.envrc
