@@ -1,0 +1,29 @@
+# Airflow (pin carefully)
+apache-airflow[amazon]==2.9.3
+
+# dbt (CORRECT pairing)
+dbt-core==1.11.2
+dbt-postgres==1.10.0
+
+# Data
+pandas==2.3.1
+polars==1.32.2
+pyarrow==21.0.0
+numpy==2.3.2
+
+# Database
+psycopg2-binary==2.9.10
+adbc-driver-postgresql==1.7.0
+adbc-driver-manager==1.7.0
+SQLAlchemy==1.4.52
+
+# APIs / HTTP
+requests==2.31.0
+polygon-api-client==1.15.3
+
+# ML
+scikit-learn
+
+# dbt hard constraints (REQUIRED)
+pathspec<0.13
+sqlparse<0.5.5
