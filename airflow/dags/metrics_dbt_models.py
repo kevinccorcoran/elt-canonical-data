@@ -1,12 +1,34 @@
 from datetime import timedelta
-import pendulum
+from pathlib import Path
 
+import pendulum
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.bash import BashOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 from utils.dbt_helpers import get_dbt_bash_command
+
+
+# ──────────────────────────────────────────────
+# PATHS (repo-safe)
+# ──────────────────────────────────────────────
+
+DAG_DIR = Path(__file__).resolve().parent          # airflow/dags
+REPO_ROOT = DAG_DIR.parents[1]                     # elt-canonical-data
+
+ANALYSIS_SCRIPT = (
+    REPO_ROOT
+    / "src"
+    / "datapipeline"
+    / "analysis"
+    / "ticker_cluster_segments.py"
+)
+
+
+# ──────────────────────────────────────────────
+# CONFIG
+# ──────────────────────────────────────────────
 
 runtime_env = Variable.get("ENV", default_var="dev")
 
@@ -18,6 +40,11 @@ default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
 }
+
+
+# ──────────────────────────────────────────────
+# DAG
+# ──────────────────────────────────────────────
 
 with DAG(
     dag_id="metrics_dbt_models",
@@ -32,7 +59,9 @@ with DAG(
     # ------------------------------------------------------------------
     # 1. Base + observation dates
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "intermediate_fibonacci_base")
+    bash_command, env_vars = get_dbt_bash_command(
+        runtime_env, "intermediate_fibonacci_base"
+    )
     dbt_run_intermediate_fibonacci_base = BashOperator(
         task_id="dbt_run_intermediate_fibonacci_base",
         bash_command=bash_command,
@@ -41,7 +70,9 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "fibonacci_offset_observation_dates")
+    bash_command, env_vars = get_dbt_bash_command(
+        runtime_env, "fibonacci_offset_observation_dates"
+    )
     dbt_run_fibonacci_offset_observation_dates = BashOperator(
         task_id="dbt_run_metrics_fibonacci_offset_observation_dates",
         bash_command=bash_command,
@@ -53,7 +84,9 @@ with DAG(
     # ------------------------------------------------------------------
     # 2. Weighted growth ranking + clustering
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "ticker_weighted_growth_ranking")
+    bash_command, env_vars = get_dbt_bash_command(
+        runtime_env, "ticker_weighted_growth_ranking"
+    )
     dbt_run_ticker_weighted_growth_ranking = BashOperator(
         task_id="dbt_run_metrics_ticker_weighted_growth_ranking",
         bash_command=bash_command,
@@ -66,14 +99,16 @@ with DAG(
         task_id="python_run_analysis_ticker_cluster_segments",
         bash_command=(
             "echo 'Running Python clustering analysis...' && "
-            "python /Users/kevin/repos/ELT_private/src/datapipeline/analysis/ticker_cluster_segments.py"
+            f"python {ANALYSIS_SCRIPT}"
         ),
         env=env_vars,
         append_env=True,
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "ticker_cluster_volatility_summary")
+    bash_command, env_vars = get_dbt_bash_command(
+        runtime_env, "ticker_cluster_volatility_summary"
+    )
     dbt_run_ticker_cluster_volatility_summary = BashOperator(
         task_id="dbt_run_metrics_ticker_cluster_volatility_summary",
         bash_command=bash_command,
@@ -85,7 +120,9 @@ with DAG(
     # ------------------------------------------------------------------
     # 3. Past / future avg prices
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "fibonacci_past_offset_avg_prices")
+    bash_command, env_vars = get_dbt_bash_command(
+        runtime_env, "fibonacci_past_offset_avg_prices"
+    )
     dbt_run_metrics_fibonacci_past_offset_avg_prices = BashOperator(
         task_id="dbt_run_metrics_fibonacci_past_offset_avg_prices",
         bash_command=bash_command,
@@ -94,7 +131,9 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "fibonacci_future_offset_avg_prices")
+    bash_command, env_vars = get_dbt_bash_command(
+        runtime_env, "fibonacci_future_offset_avg_prices"
+    )
     dbt_run_metrics_fibonacci_future_offset_avg_prices = BashOperator(
         task_id="dbt_run_metrics_fibonacci_future_offset_avg_prices",
         bash_command=bash_command,
@@ -106,7 +145,9 @@ with DAG(
     # ------------------------------------------------------------------
     # 4. Growth + excess return chain
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "fibonacci_offset_growth_rates")
+    bash_command, env_vars = get_dbt_bash_command(
+        runtime_env, "fibonacci_offset_growth_rates"
+    )
     dbt_run_metrics_fibonacci_offset_growth_rates = BashOperator(
         task_id="dbt_run_metrics_fibonacci_offset_growth_rates",
         bash_command=bash_command,
@@ -154,7 +195,9 @@ with DAG(
     # ------------------------------------------------------------------
     # 5. Downstream metrics model
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "return_likelihood_matrix")
+    bash_command, env_vars = get_dbt_bash_command(
+        runtime_env, "return_likelihood_matrix"
+    )
     dbt_run_metrics_return_likelihood_matrix = BashOperator(
         task_id="dbt_run_metrics_return_likelihood_matrix",
         bash_command=bash_command,
@@ -177,14 +220,11 @@ with DAG(
     # DEPENDENCIES
     # ------------------------------------------------------------------
 
-    # Fibonacci base → observation dates
     dbt_run_intermediate_fibonacci_base >> dbt_run_fibonacci_offset_observation_dates
 
-    # Weighted growth → clustering → volatility summary
     dbt_run_ticker_weighted_growth_ranking >> python_run_ticker_cluster_segments
     python_run_ticker_cluster_segments >> dbt_run_ticker_cluster_volatility_summary
 
-    # Observation dates + ranking → past/future prices
     dbt_run_fibonacci_offset_observation_dates >> [
         dbt_run_metrics_fibonacci_past_offset_avg_prices,
         dbt_run_metrics_fibonacci_future_offset_avg_prices,
@@ -195,7 +235,6 @@ with DAG(
         dbt_run_metrics_fibonacci_future_offset_avg_prices,
     ]
 
-    # Growth → excess return chain
     (
         [
             dbt_run_metrics_fibonacci_past_offset_avg_prices,
@@ -208,11 +247,9 @@ with DAG(
         >> dbt_run_excess_return_scored
     )
 
-    # 🚨 HARD GATE before likelihood matrix
     [
         dbt_run_excess_return_scored,
         dbt_run_ticker_cluster_volatility_summary,
     ] >> dbt_run_metrics_return_likelihood_matrix
 
-    # Matrix → inference
     dbt_run_metrics_return_likelihood_matrix >> trigger_inference_dbt_models
