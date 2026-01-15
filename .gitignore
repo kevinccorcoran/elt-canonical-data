@@ -101,3 +101,8 @@ dbt/logs/
 # Project-specific config
 # =========================
 config/*.cfg
+
+# =========================
+# dbt local config
+# =========================
+.dbt/profiles.yml
