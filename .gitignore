@@ -1,21 +1,53 @@
+# =========================
+# Environment & secrets (first line of defense)
+# =========================
+.env
+.env.*
+.envrc
+
+*.pem
+*.key
+*.crt
+
+# Local config overrides
+config/local.*
+src/datapipeline/config/env.py
+
+# =========================
 # Airflow local artifacts
+# =========================
 airflow-webserver.pid
 airflow.db
+airflow/airflow.cfg
+airflow/webserver_config.py
 
-# Local backups
-*_backup.txt
-
+# =========================
 # Logs & diagnostics
+# =========================
 *.log
 *.diag
 logs/
 scheduler.log
 zsh_trace.log
 
-# SQLite files
+# =========================
+# Local backups & temp files
+# =========================
+*_backup.txt
+*.bak
+z_delete/
+clean_tree.txt
+pytest_tests/matrix_notify/
+.archive/
+
+# =========================
+# SQLite
+# =========================
 *.sqlite
 
-# Python cache & compiled files
+# =========================
+# Python cache & tooling
+# =========================
 __pycache__/
 *.py[cod]
 *.pyo
@@ -23,66 +55,52 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
+# =========================
 # Virtual environments
+# =========================
 .venv/
 venv/
 env/
 airflow_venv/
 airflow_env/
 
+# =========================
 # Editors & IDEs
+# =========================
 .vscode/
 .idea/
 *.swp
 *~
 
-# Node (if used)
+# =========================
+# Node / vendor
+# =========================
 node_modules/
 vendor/
 
-# Compiled binaries
-*.com
-*.class
-*.dll
-*.exe
-*.o
-
-# Dist/build
+# =========================
+# Build artifacts
+# =========================
 dist/
 build/
 *.egg-info/
 
-# Environment files
-.env
-
+# =========================
 # System files
+# =========================
 .DS_Store
 Thumbs.db
 
+# =========================
 # dbt artifacts
+# =========================
 dbt/target/
 dbt/logs/
 
-# Airflow DAG & test temp files
-z_delete/
-clean_tree.txt
-pytest_tests/matrix_notify/
-*.bak
-
-# Optional local config
-# profiles.yml
-
+# =========================
 # Project-specific config
+# =========================
 config/*.cfg
-
-# Archived or backup folders
-.archive/
-
-# Local environment / secrets
+# profiles.yml  # intentionally excluded if needed
+.env
 .envrc
-src/datapipeline/config/env.py
-
-# Local Airflow config
-airflow/airflow.cfg
-airflow/webserver_config.py
-
