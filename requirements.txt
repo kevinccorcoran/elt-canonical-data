@@ -13,9 +13,7 @@ adbc-driver-postgresql==1.7.0
 aiohappyeyeballs==2.6.1
     # via aiohttp
 aiohttp==3.13.3
-    # via
-    #   apache-airflow-providers-http
-    #   connexion
+    # via apache-airflow-providers-http
 aiosignal==1.4.0
     # via aiohttp
 alembic==1.17.2
@@ -248,6 +246,8 @@ jmespath==1.0.1
     #   apache-airflow-providers-fab
     #   boto3
     #   botocore
+joblib==1.5.3
+    # via scikit-learn
 jsonpath-ng==1.7.0
     # via apache-airflow-providers-amazon
 jsonschema==4.26.0
@@ -313,6 +313,8 @@ numpy==2.3.2
     # via
     #   -r requirements.in
     #   pandas
+    #   scikit-learn
+    #   scipy
 opentelemetry-api==1.39.1
     # via
     #   apache-airflow
@@ -358,8 +360,10 @@ pandas==2.3.1
     # via -r requirements.in
 pathlib-abc==0.5.2
     # via universal-pathlib
-pathspec==1.0.2
-    # via apache-airflow
+pathspec==0.12.1
+    # via
+    #   -r requirements.in
+    #   apache-airflow
 pendulum==3.1.0
     # via apache-airflow
 pluggy==1.6.0
@@ -467,6 +471,10 @@ s3transfer==0.16.0
     # via boto3
 sagemaker-studio==1.0.23
     # via apache-airflow-providers-amazon
+scikit-learn==1.8.0
+    # via -r requirements.in
+scipy==1.17.0
+    # via scikit-learn
 scramp==1.4.8
     # via redshift-connector
 setproctitle==1.3.7
@@ -493,8 +501,10 @@ sqlalchemy-jsonfield==1.0.2
     # via apache-airflow
 sqlalchemy-utils==0.42.1
     # via flask-appbuilder
-sqlparse==0.5.5
-    # via apache-airflow-providers-common-sql
+sqlparse==0.5.4
+    # via
+    #   -r requirements.in
+    #   apache-airflow-providers-common-sql
 tabulate==0.9.0
     # via apache-airflow
 tenacity==9.1.2
@@ -505,6 +515,8 @@ termcolor==3.3.0
     # via apache-airflow
 text-unidecode==1.3
     # via python-slugify
+threadpoolctl==3.6.0
+    # via scikit-learn
 typing-extensions==4.15.0
     # via
     #   adbc-driver-manager
