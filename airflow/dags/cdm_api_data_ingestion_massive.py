@@ -1,4 +1,6 @@
 from datetime import timedelta
+from pathlib import Path
+
 import pendulum
 from airflow import DAG
 from airflow.models import Variable
@@ -8,17 +10,28 @@ from airflow.utils.task_group import TaskGroup
 
 from utils.dbt_helpers import get_dbt_bash_command
 
+
+# ──────────────────────────────────────────────
+# PATHS (repo-safe)
+# ──────────────────────────────────────────────
+
+DAG_DIR = Path(__file__).resolve().parent          # airflow/dags
+REPO_ROOT = DAG_DIR.parents[1]                     # repo root
+
+INGESTION_SCRIPT = (
+    REPO_ROOT
+    / "src"
+    / "datapipeline"
+    / "transform"
+    / "api_data_ingestion_massive.py"
+)
+
+
 # ──────────────────────────────────────────────
 # CONFIG
 # ──────────────────────────────────────────────
 
 runtime_env = Variable.get("ENV", default_var="dev")
-
-PYTHON_VENV = "/Users/kevin/repos/ELT_private/airflow_venv/bin/python"
-INGESTION_SCRIPT = (
-    "/Users/kevin/repos/ELT_private/src/datapipeline/transform/api_data_ingestion_massive.py"
-)
-
 NUM_BATCHES = 6
 
 local_tz = pendulum.timezone("Europe/Amsterdam")
@@ -34,17 +47,25 @@ default_args = {
 }
 
 
-# Helper for ingestion env vars
+# ──────────────────────────────────────────────
+# Helper: DB env vars for ingestion scripts
+# ──────────────────────────────────────────────
+
 def get_db_env_vars(env: str) -> dict:
+    """
+    Ingestion scripts expect DATABASE_URL.
+    dbt uses DB_* vars from .envrc.
+    """
     if env == "staging":
         db_url = Variable.get("DATABASE_URL_STAGING")
-    elif env == "heroku_postgres":
-        db_url = Variable.get("DATABASE_URL")
+    elif env == "prod":
+        db_url = Variable.get("DATABASE_URL_PROD")
     else:
         db_url = Variable.get("DATABASE_URL_DEV")
 
     return {
         "DATABASE_URL": db_url,
+        "ENV": env,
         "DB_DATABASE": env,
     }
 
@@ -64,20 +85,19 @@ with DAG(
     tags=["cdm", "parallel"],
 ) as dag:
 
-
     # ──────────────────────────────────────────
-    # Parallel ingestion batches
+    # Parallel ingestion
     # ──────────────────────────────────────────
 
     with TaskGroup(group_id="parallel_ingestion") as ingestion_group:
         for batch in range(1, NUM_BATCHES + 1):
 
             bash_cmd = (
-                f"set -euo pipefail && "
+                "set -euo pipefail && "
                 f'echo "=== Ingestion batch {batch}/{NUM_BATCHES} ===" && '
-                f"{PYTHON_VENV} {INGESTION_SCRIPT} "
-                f'--start_date \"1950-01-01\" '
-                f'--end_date \"{{{{ ds }}}}\" '
+                f"python {INGESTION_SCRIPT} "
+                f'--start_date "1950-01-01" '
+                f'--end_date "{{{{ ds }}}}" '
                 f"--batch {batch} "
                 f"--num_batches {NUM_BATCHES}"
             )
@@ -90,14 +110,14 @@ with DAG(
                 do_xcom_push=False,
             )
 
-
     # ──────────────────────────────────────────
-    # DBT: ticker_index_summary (runs in parallel with ingestion)
+    # DBT: ticker_index_summary
     # ──────────────────────────────────────────
 
     bash_command, env_vars = get_dbt_bash_command(
         runtime_env, "ticker_index_summary"
     )
+
     dbt_run_ticker_index_summary = BashOperator(
         task_id="dbt_run_ticker_index_summary",
         bash_command=bash_command,
@@ -106,15 +126,14 @@ with DAG(
         do_xcom_push=False,
     )
 
-
     # ──────────────────────────────────────────
     # DBT staging models
     # ──────────────────────────────────────────
 
-    # 1. Massive staging
     bash_command, env_vars = get_dbt_bash_command(
         runtime_env, "api_data_ingestion_massive_staging"
     )
+
     dbt_run_massive_staging = BashOperator(
         task_id="dbt_run_api_data_ingestion_massive_staging",
         bash_command=bash_command,
@@ -123,10 +142,10 @@ with DAG(
         do_xcom_push=False,
     )
 
-    # 2. Yfinance staging
     bash_command, env_vars = get_dbt_bash_command(
         runtime_env, "api_data_ingestion_yfinance_staging"
     )
+
     dbt_run_yfinance_staging = BashOperator(
         task_id="dbt_run_api_data_ingestion_yfinance_staging",
         bash_command=bash_command,
@@ -135,28 +154,28 @@ with DAG(
         do_xcom_push=False,
     )
 
-
     # ──────────────────────────────────────────
-    # DBT excluded tickers (depends only on massive staging)
+    # DBT exclusions
     # ──────────────────────────────────────────
 
     bash_command, env_vars = get_dbt_bash_command(
         runtime_env, "excluded_tickers_massive"
     )
+
     dbt_run_excluded_massive = BashOperator(
-        task_id="dbt_run_data_quality_excluded_tickers_massive",
+        task_id="dbt_run_excluded_tickers_massive",
         bash_command=bash_command,
         env=env_vars,
         append_env=True,
         do_xcom_push=False,
     )
 
-        # 2. Yfinance excluded tickers
     bash_command, env_vars = get_dbt_bash_command(
         runtime_env, "excluded_tickers_yfinance"
     )
+
     dbt_run_excluded_yfinance = BashOperator(
-        task_id="dbt_run_data_quality_excluded_tickers_yfinance",
+        task_id="dbt_run_excluded_tickers_yfinance",
         bash_command=bash_command,
         env=env_vars,
         append_env=True,
@@ -164,20 +183,20 @@ with DAG(
     )
 
     # ──────────────────────────────────────────
-    # DBT downstream: api_data_ingestion_y_p
+    # DBT downstream aggregation
     # ──────────────────────────────────────────
 
     bash_command, env_vars = get_dbt_bash_command(
         runtime_env, "api_data_ingestion_y_p"
     )
+
     dbt_run_api_data_ingestion_y_p = BashOperator(
-        task_id="dbt_run_cdm_api_data_ingestion_y_p",
+        task_id="dbt_run_api_data_ingestion_y_p",
         bash_command=bash_command,
         env=env_vars,
         append_env=True,
         do_xcom_push=False,
     )
-
 
     # ──────────────────────────────────────────
     # Trigger metrics DAG
@@ -189,27 +208,21 @@ with DAG(
         wait_for_completion=False,
     )
 
-
     # ──────────────────────────────────────────
     # Dependencies
     # ──────────────────────────────────────────
 
-    # parallel ingestion AND index summary must finish before staging starts
     [ingestion_group, dbt_run_ticker_index_summary] >> dbt_run_massive_staging
     [ingestion_group, dbt_run_ticker_index_summary] >> dbt_run_yfinance_staging
 
-    # exclusions:
     dbt_run_massive_staging >> dbt_run_excluded_massive
     dbt_run_yfinance_staging >> dbt_run_excluded_yfinance
 
-    # api_data_ingestion_y_p waits for ALL FOUR
     [
         dbt_run_massive_staging,
         dbt_run_yfinance_staging,
         dbt_run_excluded_massive,
-        dbt_run_excluded_yfinance
+        dbt_run_excluded_yfinance,
     ] >> dbt_run_api_data_ingestion_y_p
 
-    # final step
     dbt_run_api_data_ingestion_y_p >> trigger_metrics
-
