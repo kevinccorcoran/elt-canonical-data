@@ -1,0 +1,4 @@
+packages:
+  - local: ../../../../elt-inference-models
+    name: elt_inference_models
+sha1_hash: 156bf748ac6b216e5850f51919557948f7503cb2
