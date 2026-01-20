@@ -22,13 +22,21 @@ clean-targets:
 # Model Configuration
 models:
   dbt_project:
+    # All models use the database defined via environment variables
     +database: "{{ env_var('DB_DATABASE') }}"
 
-    # Schema Overrides for Specific Model Folders
     app:
+      # Default schema for application models (canonical data model)
+      +schema: cdm
+
+      # Analytical and aggregate models
       metrics:
-        +schema: metrics         # Models in the 'metrics' folder use the 'metrics' schema
-      quality_checks:
-        +schema: quality_checks  # Models in the 'quality_checks' folder use the 'quality_checks' schema
-      data_governance:
-        +schema: data_governance  # Models in the 'data_governance' folder use the 'data_governance' schema
+        +schema: metrics
+
+      # Model outputs, predictions, and inference-related tables
+      inference:
+        +schema: inference
+
+      # Data validation, checks, and quality-related models
+      data_quality:
+        +schema: data_quality

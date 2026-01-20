@@ -1,1 +1,2 @@
+# pyenv version pin for this project (ensures Python 3.11 is used locally)
 3.11

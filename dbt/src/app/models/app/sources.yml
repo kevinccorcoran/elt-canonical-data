@@ -5,16 +5,16 @@ sources:
     database: "{{ env_var('DB_DATABASE') }}"
     schema: raw
     tables:
-      - name: api_data_ingestion_polygon
       - name: fib_seq
       - name: ticker_index_summary
+      - name: api_data_ingestion_massive
 
   - name: cdm
     database: "{{ env_var('DB_DATABASE') }}"
     schema: cdm
     tables:
-      - name: api_data_ingestion_massive
       - name: api_data_ingestion_yfinance
+      - name: api_data_ingestion_massive
 
   - name: analysis
     database: "{{ env_var('DB_DATABASE') }}"

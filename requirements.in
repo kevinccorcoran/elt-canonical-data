@@ -1,3 +1,5 @@
+# Source dependency list for Airflow, dbt, and data tooling (used to generate a pinned requirements.txt)
+
 # Airflow (pin carefully)
 apache-airflow[amazon]==2.9.3
 

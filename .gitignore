@@ -1,3 +1,6 @@
+# .gitignore for ELT canonical data project:
+# excludes secrets, local configs, Airflow/dbt artifacts, venvs, logs, and build outputs
+
 # =========================
 # Environment & secrets (first line of defense)
 # =========================
@@ -101,3 +104,8 @@ dbt/logs/
 # Project-specific config
 # =========================
 config/*.cfg
+
+# =========================
+# dbt local config
+# =========================
+.dbt/profiles.yml

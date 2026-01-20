@@ -1,3 +1,5 @@
+# System-level dependencies required for XML processing and cryptographic signing
+# (used by Python libraries that depend on libxml2 / xmlsec)
 libxml2-dev
 libxmlsec1-dev
 libxmlsec1-openssl

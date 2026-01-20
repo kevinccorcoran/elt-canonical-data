@@ -1,11 +1,14 @@
-{% do log("Current ENV: " ~ env_var('DB_DATABASE'), info=true) %}
+{# Log the active target database at compile/run time for quick debugging #}
+{% do log("Current ENV / DB_DATABASE: " ~ env_var('DB_DATABASE'), info=true) %}
 
 {{
   config(
     materialized = 'table',
+
     database = env_var('DB_DATABASE'),
-    schema = 'cdm',
+
     on_schema_change = 'sync_all_columns',
+
     post_hook = [
       """
       CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_date_desc_ticker
@@ -23,24 +26,19 @@
   )
 }}
 
-
-
-/* --------------------------------------------------------------
-   ENRICHED: Massive YFinance Data + Index Membership
-   - Filters: NVDA, SPY, INR only
-   - Excludes tickers in quality.excluded_tickers_massive
-   - Joins index membership (S&P, NASDAQ, etc.)
-   - Adds query runtime
-   - Only includes tickers with known indices
-   Output: cdm.api_data_ingestion_massive_enriched
-   -------------------------------------------------------------- */
+-- --------------------------------------------------------------
+-- Enriched: Massive data filtered to tickers that have index membership
+-- Adds: source tag + query runtime (query_run_time)
+-- Output: cdm.<model_name> (materialized table)
+-- --------------------------------------------------------------
 
 WITH run_time AS (
+    -- Captures when the query ran (same value for every row in this run)
     SELECT NOW() AS query_run_time
 ),
 
--- Base: filtered massive data with source tag
 massive_base AS (
+    -- Base: massive ingestion table filtered for non-null essentials
     SELECT
         "date",
         ticker,
@@ -54,14 +52,14 @@ massive_base AS (
       AND adj_close IS NOT NULL
 ),
 
--- Index membership lookup
 ticker_index_summary AS (
+    -- Keep only tickers that appear in your index membership summary
+    -- (this is what enforces "only tickers with known indices")
     SELECT
         ticker
     FROM {{ ref('ticker_index_summary') }}
 )
 
--- Final enriched result
 SELECT
     mb."date",
     mb.ticker,
@@ -72,7 +70,7 @@ SELECT
     mb.date_type,
     rt.query_run_time
 FROM massive_base mb
-JOIN ticker_index_summary tis 
+JOIN ticker_index_summary tis
     ON mb.ticker = tis.ticker
 CROSS JOIN run_time rt
 ORDER BY mb."date" DESC, mb.ticker

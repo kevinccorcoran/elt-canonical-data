@@ -1,3 +1,5 @@
+# Defines the datapipeline Python package, build system, and source layout (src/ structure)
+
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"

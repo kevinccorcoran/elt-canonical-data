@@ -1,11 +1,15 @@
 import logging
 from datapipeline.config.env import ENV
 
-TICKERS_SUB = ["SPY", "AAPL", "NET"]
-#TICKERS_FULL = ["NVDA", "SPY"]
 
+# Small ticker subset for local development
+TICKERS_SUB = ["SPY", "AAPL", "NET"]
+
+
+# Full ticker universe for staging / production ingestion
 TICKERS_FULL = [
-   "CL=F", "BZ=F", "NG=F", "HO=F", "RB=F", "GC=F", "SI=F", "HG=F", "PL=F", "PA=F", "ZC=F", "ZW=F", "ZS=F", "ZL=F", "ZM=F", "KC=F", "SB=F", "CC=F", "CT=F", "LE=F", "GF=F", "HE=F",
+   "CL=F", "BZ=F", "NG=F", "HO=F", "RB=F", "GC=F", "SI=F", "HG=F", "PL=F", "PA=F", "ZC=F", "ZW=F", 
+   "ZS=F", "ZL=F", "ZM=F", "KC=F", "SB=F", "CC=F", "CT=F", "LE=F", "GF=F", "HE=F",
    "VCR", "VDC", "VDE", "VFH", "VHT", "VIS", "VGT", "VAW", "VOX", "VPU", "VNQ",
    "SPY","A","AA","AAL","AAON","AAP","AAPL","AAT","ABBV","ABCB","ABG","ABM","ABNB","ABR",
     "ABSI","ABT","ACA","ACAD","ACGL","ACHC","ACHR","ACI","ACIW","ACLS","ACM","ACN","ACT",
@@ -135,13 +139,18 @@ TICKERS_FULL = [
     "WEN","WERN","WEX","WFC","WFRD","WGO","WGS","WH","WHD","WHR","WING","WKC","WLK",
     "WLY","WM","WMB","WMG","WMS","WMT","WOR","WPC","WRB","WRLD","WS","WSC","WSFS",
     "WSM","WSO","WSR","WST","WT","WTFC","WTM","WTRG","WTS","WTW","WU","WWD","WWW",
-    "WY","WYNN","X:ADAUSD","X:ATOMUSD","X:AVAXUSD","X:BCHUSD","X:BTCUSD","X:DOGEUSD","X:DOTUSD","X:ETCUSD","X:ETHUSD","X:LINKUSD","X:LTCUSD",
-    "X:MATICUSD","X:SHIBUSD","X:SOLUSD","X:UNIUSD","X:XLMUSD","XEL","XHR","XNCR","XOM","XP","XPEL","XPO","XRAY",
+    "WY","WYNN","X:ADAUSD","X:ATOMUSD","X:AVAXUSD","X:BCHUSD","X:BTCUSD","X:DOGEUSD", 
+    "X:DOTUSD","X:ETCUSD","X:ETHUSD","X:LINKUSD","X:LTCUSD","X:MATICUSD","X:SHIBUSD",
+    "X:SOLUSD","X:UNIUSD","X:XLMUSD","XEL","XHR","XNCR","XOM","XP","XPEL","XPO","XRAY",
     "XYL","YELP","YETI","YOU","YUM","Z","ZBH","ZBRA","ZD","ZG","ZION","ZM","ZS","ZTS","ZWS"
     ]
 
+
+# Select ticker universe based on environment
 TICKERS = TICKERS_SUB if ENV == "dev" else TICKERS_FULL
 
+
+# Explicitly log resolved ingestion targets
 logging.error(
     "INGESTION_TARGETS: ENV=%r | TICKERS_SUB=%s | TICKERS_FULL=%s | TICKERS=%s",
     ENV, TICKERS_SUB, TICKERS_FULL, TICKERS
