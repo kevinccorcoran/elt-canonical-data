@@ -1,4 +1,4 @@
-# Procfile used by Heroku to define how to run each process type (web UI, scheduler, worker, release script)
+# Heroku Procfile defining how Airflow components are started in the platform environment
 
 # Commands to run during a release phase, before starting the app
 release: ./release.sh

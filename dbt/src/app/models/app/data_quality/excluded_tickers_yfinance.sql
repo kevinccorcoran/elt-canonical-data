@@ -4,7 +4,6 @@
   config(
     materialized = 'table',
     database = env_var('DB_DATABASE'),
-    schema = 'quality',
     post_hook = [
       """
         CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_ticker

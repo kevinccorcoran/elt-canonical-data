@@ -23,15 +23,16 @@
   )
 }}
 
-
 /* --------------------------------------------------------------
-   ENRICHED Yfinance + YFinance Data WITH Index Membership
+   Enriched YFinance data restricted to tickers in your index universe
    -------------------------------------------------------------- */
 
+-- One shared timestamp for the entire run (useful for auditing/debugging)
 WITH run_time AS (
     SELECT NOW() AS query_run_time
 ),
 
+-- Base YFinance data, filtered to valid rows only
 yfinance_base AS (
     SELECT
         "date",
@@ -46,6 +47,7 @@ yfinance_base AS (
       AND adj_close IS NOT NULL
 ),
 
+-- Universe of tickers that are considered "in scope"
 ticker_index_summary AS (
     SELECT
         ticker
@@ -62,6 +64,9 @@ SELECT
     mb.date_type,
     rt.query_run_time
 FROM yfinance_base mb
-JOIN ticker_index_summary tis 
+
+-- Keep only tickers that are in your index/universe list
+JOIN ticker_index_summary tis
        ON mb.ticker = tis.ticker
+
 CROSS JOIN run_time rt
