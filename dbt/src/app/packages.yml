@@ -1,2 +1,4 @@
+# Also load models, macros, and logic from the inference repository
+# so they can be referenced and run alongside canonical models.
 packages:
   - local: ../../../../elt-inference-models
