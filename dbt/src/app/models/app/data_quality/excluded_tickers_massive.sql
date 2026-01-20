@@ -4,7 +4,6 @@
   config(
     materialized = 'table',
     database = env_var('DB_DATABASE'),
-    schema = 'data_quality',
     post_hook = [
       """
         CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_ticker
@@ -15,15 +14,16 @@
 }}
 
 /* --------------------------------------------------------------
-   PRICE STAGNATION + FIRST ADJ_CLOSE = 0 DETECTION
-   Detects:
-     1) Tickers whose price stays flat ≥ 20 consecutive days
-     2) Tickers whose first adj_close value = 0 (bad data)
-   Output: DISTINCT tickers flagged by either test.
+   PRICE STAGNATION + FIRST adj_close = 0 DETECTION
+
+   Flags tickers that exhibit suspicious price behavior:
+     1) Price does not change for ≥ 20 consecutive trading days
+     2) First observed adj_close value equals 0 (invalid starting price)
+
+   Output: DISTINCT list of affected tickers.
    -------------------------------------------------------------- */
 
--- 1. Detect flat price runs (stagnation)
-
+-- 1) Prepare price history with previous-day comparison
 WITH prices AS (
     SELECT
         ticker,
@@ -35,15 +35,20 @@ WITH prices AS (
     FROM {{ ref('api_data_ingestion_massive_staging') }}
 ),
 
+-- 2) Mark boundaries where a new price run begins
 runs AS (
     SELECT
         ticker,
         date,
         adj_close,
-        CASE WHEN adj_close = prev_close THEN 0 ELSE 1 END AS new_run_flag
+        CASE
+            WHEN adj_close = prev_close THEN 0
+            ELSE 1
+        END AS new_run_flag
     FROM prices
 ),
 
+-- 3) Assign a unique run ID per uninterrupted price sequence
 run_groups AS (
     SELECT
         ticker,
@@ -56,6 +61,7 @@ run_groups AS (
     FROM runs
 ),
 
+-- 4) Measure how long each price run lasts
 run_lengths AS (
     SELECT
         ticker,
@@ -65,14 +71,14 @@ run_lengths AS (
     GROUP BY ticker, run_id
 ),
 
+-- 5) Flag tickers with long flat-price runs
 stagnation_flag AS (
     SELECT DISTINCT ticker
     FROM run_lengths
     WHERE run_length >= 20   -- stagnation threshold
 ),
 
--- 2. Detect tickers whose first adj_close = 0
-
+-- 6) Detect tickers whose first recorded adj_close is zero
 first_adj_close_0 AS (
     SELECT DISTINCT ticker
     FROM (
@@ -86,8 +92,7 @@ first_adj_close_0 AS (
     WHERE first_adj_close = 0
 )
 
--- 3. Final output: union of both tests
-
+-- 7) Final result: union of all detected issues
 SELECT DISTINCT ticker
 FROM stagnation_flag
 

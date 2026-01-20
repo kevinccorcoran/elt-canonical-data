@@ -1,10 +1,7 @@
-{% do log("Current ENV: " ~ env_var('DB_DATABASE'), info=true) %}
-
 {{
   config(
     materialized='table',
     database=env_var('DB_DATABASE'),
-    schema='cdm',
     on_schema_change='sync_all_columns',
     post_hook=[
       """
@@ -31,12 +28,15 @@
   )
 }}
 
--- shared runtime timestamp for ALL rows
+{% do log("Current ENV: " ~ env_var('DB_DATABASE'), info=true) %}
+
+
+-- One shared timestamp for the entire run (so processed_at is consistent across all rows)
 WITH run_time AS (
     SELECT NOW() AS ts
 ),
 
--- PRIMARY PROVIDER: MASSIVE
+-- PRIMARY PROVIDER: Massive (preferred source when available and not excluded)
 massive AS (
     SELECT
         "date",
@@ -48,7 +48,7 @@ massive AS (
     FROM {{ ref('api_data_ingestion_massive_staging') }}
 ),
 
--- EXCLUSION LISTS
+-- Exclusion lists allow you to explicitly force a provider choice per ticker
 excluded_massive AS (
     SELECT ticker FROM {{ ref('excluded_tickers_massive') }}
 ),
@@ -56,13 +56,19 @@ excluded_yfinance AS (
     SELECT ticker FROM {{ ref('excluded_tickers_yfinance') }}
 ),
 
--- SECONDARY PROVIDER: YFINANCE (with SPY adjustment)
+-- SECONDARY PROVIDER: YFinance (with special-case mapping for ^GSPC → SPY)
 yfinance AS (
     SELECT
         "date",
+
+        -- Normalize ticker names for downstream consistency
         CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END AS ticker,
+
+        -- Adjust ^GSPC pricing to match SPY scale (domain-specific normalization)
         CASE WHEN ticker = '^GSPC' THEN adj_close / 10.0 ELSE adj_close END AS adj_close,
+
         'yfinance' AS source,
+
         (CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END || '_' || "date") AS ticker_date_id
     FROM {{ ref('api_data_ingestion_yfinance_staging') }} yf
     WHERE NOT EXISTS (SELECT 1 FROM excluded_yfinance ey WHERE ey.ticker = yf.ticker)
@@ -70,7 +76,7 @@ yfinance AS (
 
 combined AS (
 
-    -- 1. Use Massive where the ticker is NOT excluded from Massive
+    -- 1) Use Massive when allowed (ticker not excluded from Massive)
     SELECT
         m."date",
         m.ticker,
@@ -84,7 +90,7 @@ combined AS (
 
     UNION ALL
 
-    -- 2. Massive excluded → fallback to YFinance (if YF not excluded)
+    -- 2) Massive excluded → use YFinance for that ticker (if YFinance not excluded)
     SELECT
         y."date",
         y.ticker,
@@ -99,7 +105,8 @@ combined AS (
 
     UNION ALL
 
-    -- 3. Not in Massive at all → use YFinance (only if not excluded from either provider)
+    -- 3) Missing from Massive entirely → use YFinance
+    -- (only if the ticker is not excluded from either provider)
     SELECT
         y."date",
         y.ticker,
@@ -110,9 +117,9 @@ combined AS (
     FROM yfinance y
     CROSS JOIN run_time rt
     WHERE NOT EXISTS (
-              SELECT 1 
-              FROM massive m 
-              WHERE m.ticker = y.ticker 
+              SELECT 1
+              FROM massive m
+              WHERE m.ticker = y.ticker
                 AND m."date" = y."date"
           )
       AND NOT EXISTS (SELECT 1 FROM excluded_yfinance ey WHERE ey.ticker = y.ticker)
@@ -121,4 +128,3 @@ combined AS (
 
 SELECT *
 FROM combined
---WHERE date < DATE '2012-01-01'
