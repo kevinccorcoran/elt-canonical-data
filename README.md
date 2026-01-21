@@ -13,11 +13,33 @@ Mac (macOS)
 │       ├── .venv        (local Python env: dbt, scripts)
 │       └── source code
 │
-└── Docker Desktop
-    └── Linux Virtual Machine
+└── DigitalOcean
+    └── Ubuntu Droplet
         └── Docker containers
             ├── Airflow
             └── Postgres (Airflow metadata database)
+
+flowchart LR
+  subgraph Mac["Mac (macOS)"]
+    repo1["elt-canonical-data
+    • .venv (dbt, scripts)
+    • source code"]
+
+    repo2["elt-inference-models
+    • .venv (dbt, scripts)
+    • source code"]
+  end
+
+  subgraph Docker["Docker Desktop"]
+    subgraph VM["Linux VM"]
+      airflow["Airflow"]
+      postgres["Postgres
+      (Airflow metadata DB)"]
+    end
+  end
+
+  repo1 -->|code| airflow
+  repo2 -->|code| airflow
 
 Key points:
 - Airflow runs entirely in Docker.
@@ -140,3 +162,38 @@ The token is:
 - Infrastructure credentials are intentionally kept outside the repository
 - Droplet creation and lifecycle management are decoupled from Airflow and dbt
 - Airflow itself runs in Docker; provisioned hosts are used for runtime workloads only
+
+## Runtime Architecture (Local vs Remote)
+
+This project distinguishes clearly between **development environments** and **runtime environments**.
+
+### Local (macOS)
+- Used for development only
+- Python runs inside repo-scoped `.venv` environments
+- dbt and ingestion scripts are executed locally
+- No long-running services are expected to persist when the laptop is closed
+
+### Remote Runtime (DigitalOcean)
+- A single Ubuntu-based DigitalOcean Droplet acts as the runtime host
+- Docker is installed directly on the Droplet
+- Airflow runs as long-lived Docker containers on the Droplet
+- Airflow metadata is stored in a Postgres container with persistent volumes
+- The runtime remains active when the local machine is offline
+
+Local repositories **do not execute Airflow**.  
+They only produce code and artifacts that are deployed to the runtime host.
+
+## DAG Deployment
+
+Airflow DAGs do not execute directly from local repositories.
+
+Deployment flow:
+1. DAG code is developed locally
+2. DAGs are synced or deployed to the runtime host
+3. Airflow containers mount the runtime DAG directory
+4. Changes require redeploy or sync to take effect
+
+The runtime host is the single source of truth for executed DAGs.
+
+
+
