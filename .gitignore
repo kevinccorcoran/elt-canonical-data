@@ -1,28 +1,41 @@
-# .gitignore for ELT canonical data project:
-# excludes secrets, local configs, Airflow/dbt artifacts, venvs, logs, and build outputs
-
 # =========================
-# Environment & secrets (first line of defense)
+# Environment & secrets
 # =========================
 .env
-.env.*
+.env.local
+.env.production
+
 .envrc
+.envrc.prod
+.envrc.local
 
 *.pem
 *.key
 *.crt
+*.p12
 
+# =========================
+# Generated data / exports
+# =========================
+*.dump
+*.sql
+*.csv
+*.parquet
+
+# =========================
 # Local config overrides
+# =========================
 config/local.*
 src/datapipeline/config/env.py
 
 # =========================
-# Airflow local artifacts
+# Airflow runtime artifacts
 # =========================
+docker/airflow/airflow.cfg
+docker/airflow/webserver_config.py
+docker/airflow/logs/
 airflow-webserver.pid
 airflow.db
-airflow/airflow.cfg
-airflow/webserver_config.py
 
 # =========================
 # Logs & diagnostics
@@ -106,6 +119,6 @@ dbt/logs/
 config/*.cfg
 
 # =========================
-# dbt local config
+# dbtT local config
 # =========================
 .dbt/profiles.yml
