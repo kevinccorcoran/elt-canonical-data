@@ -1,37 +1,68 @@
 # ELT – Technical Setup
 
+## One-Minute Overview
+
+This project implements a production-grade data pipeline with a strict separation
+between development and runtime.
+
+Code is written and tested locally on macOS.  
+All scheduling and execution runs on a remote Linux server using Airflow in Docker.  
+All persistent data is stored in a managed PostgreSQL database.
+
+The runtime server is disposable — it can be destroyed and rebuilt without data loss
+because all important data and code live in managed PostgreSQL and GitHub.
+
+---
+
 ## Architecture
 
-This project has a **strict separation between development and runtime**.
+Mac (Development)
 
-Mac (macOS) — Development  
-├── Git repositories (source code)  
-└── Docker Desktop (optional, local Airflow testing / debugging)  
+Application layer:
+└── elt-canonical-data (Git repo)
+    ├── dbt models
+    ├── ingestion scripts
+    └── DAG definitions
+    (.venv)
 
-Runtime Host (Linux VM) — Production  
-└── Docker containers  
-    ├── Airflow  
-    └── Postgres (Airflow metadata database)  
+Infrastructure layer:
+└── infra/docker/airflow (Git repo)
+    └── Docker Compose
+        └── Airflow (local)
+            ├── webserver
+            ├── scheduler
+            └── workers
+
+Data layer:
+└── Local PostgreSQL
+    ├── dev database
+    └── staging database
+
+        ↓ deploy (rsync)
+
+Linux Server (Runtime)
+
+Infrastructure layer:
+└── /opt/elt-canonical-data (infra copy)
+    └── Docker Compose
+        └── Airflow (production)
+            ├── webserver
+            ├── scheduler
+            └── workers
+
+        ↓ SQL
+
+Managed PostgreSQL (Production)
+└── business data
+└── airflow metadata
+
+
+This separation ensures local machines are used only for authoring and testing,
+while all scheduling and execution happens in a controlled production environment.
 
 Key points:
-- Airflow runs entirely in Docker on the runtime host.
+- Airflow runs entirely in Docker on the runtime server.
 - Local `.venv` environments are for development only.
-- The runtime host is disposable; the database and GitHub repo are the real assets.
-
-Local (macOS)
-  Git repositories
-    - ingestion scripts
-    - dbt models
-    - DAG definitions
-  deploy / sync
-      ↓
-Runtime Host (Linux VM)
-  Docker
-    Airflow Webserver ↔ Scheduler
-        |
-        SQLAlchemy
-        |
-Managed PostgreSQL (durable state)
 
 ---
 
@@ -67,7 +98,8 @@ Not used for:
 
 ## Airflow (Runtime Only)
 
-Airflow runs **only** on the runtime host.
+Airflow runs **only** on the runtime server to avoid coupling development
+machines with production scheduling and state.
 
 Start services:
 
@@ -83,7 +115,7 @@ Check status:
 
 Airflow UI:
 
-    http://<RUNTIME_HOST_IP>:8080
+    http://<RUNTIME_SERVER_IP>:8080
 
 ---
 
@@ -92,15 +124,15 @@ Airflow UI:
 - PostgreSQL is provided by **DigitalOcean Managed Database**
 - Airflow metadata is stored in managed Postgres
 - The database is not containerized
-- Credentials are provided via `.env` on the runtime host
+- Credentials are provided via `.env` on the runtime server
 
-The database persists even if the runtime host is destroyed.
+The database persists even if the runtime server is destroyed.
 
 ---
 
 ## Configuration & Secrets
 
-Runtime configuration is provided via a `.env` file on the runtime host.
+Runtime configuration is provided via a `.env` file on the runtime server.
 
 Required variables include:
 
@@ -110,7 +142,7 @@ Required variables include:
 - AIRFLOW__WEBSERVER__SECRET_KEY  
 
 Secrets are:
-- Stored only on the runtime host  
+- Stored only on the runtime server  
 - Never committed to Git  
 - Retrieved from DigitalOcean DB console when rebuilding  
 
@@ -131,36 +163,24 @@ Airflow only reads DAGs from:
 
 Therefore DAGs must be explicitly deployed from source to runtime.
 
-The runtime DAG folder is treated as a deploy artifact, not a working directory.  
+This ensures production only runs code that has been intentionally shipped,
+not whatever happens to exist on a developer’s laptop.
+
+The runtime DAG folder is treated as a deployment output, not a working directory.  
 It can be deleted and rebuilt at any time.
 
-### Real Deployment Command (Mac → Runtime Host)
+### Real Deployment Command (Mac → Runtime Server)
 
 This is the only supported way to deploy DAGs:
 
     rsync -av --delete airflow/dags/ $ELT_SERVER_USER@$ELT_SERVER_IP:/opt/elt-canonical-data/docker/airflow/dags/
 
-No DAGs are ever edited directly on the runtime host.
+No DAGs are ever edited directly on the runtime server.
 
 This prevents:
 - accidental execution of unfinished DAGs  
-- implicit coupling between development and runtime  
+- unintended dependency between development and runtime  
 - hidden state inside containers  
-
----
-
-## Filesystem Invariant (Critical)
-
-Airflow runs inside Docker as user **UID 50000**.
-
-All mounted directories must be writable by UID 50000 or Airflow will crash.
-
-Required ownership on the runtime host:
-
-    chown -R 50000:0 /opt/elt-canonical-data/docker/airflow/logs
-    chmod -R 775 /opt/elt-canonical-data/docker/airflow/logs
-
-If Airflow cannot write to `/opt/airflow/logs`, the webserver will start and immediately crash.
 
 ---
 
@@ -189,7 +209,7 @@ Example:
     ssh $ELT_SERVER_USER@$ELT_SERVER_IP
     cd $ELT_SERVER_PATH
 
-No development work is performed directly on the runtime host.
+No development work is performed directly on the runtime server.
 
 ---
 
@@ -198,18 +218,18 @@ No development work is performed directly on the runtime host.
 - Do not install Airflow into `.venv`
 - Do not run `airflow webserver` manually
 - Do not run schedulers locally
-- Do not debug broken servers for hours
 - Do not edit DAGs inside docker/airflow/dags directly
+- Do not debug broken servers for hours — rebuild instead
 
 ---
 
 ## Design Philosophy
 
 - Local = development only  
-- Runtime host = production only  
-- Docker = orchestration boundary  
-- Managed Postgres = durable state  
-- Runtime host = disposable  
+- Runtime server = production only  
+- Docker = execution boundary  
+- Managed Postgres = durable data  
+- Runtime server = disposable  
 
 If something breaks badly, rebuild.
 

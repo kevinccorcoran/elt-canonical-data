@@ -1,0 +1,24 @@
+# Local STAGING environment (TEMPLATE)
+
+unset AIRFLOW_HOME
+unset AIRFLOW_CONFIG
+unset PYTHONPATH
+
+source .venv/bin/activate
+export PYTHONNOUSERSITE=1
+
+export ENV=staging
+
+export DB_HOST=localhost
+export DB_PORT=5432
+export DB_USER=postgres
+export DB_PASSWORD=CHANGEME
+export DB_DATABASE=staging
+
+export DB_CONNECTION_STRING="postgresql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_DATABASE"
+
+export DBT_TARGET=staging
+export ELT_SERVER_PATH=/opt/elt-canonical-data
+
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+export NO_PROXY="*"
