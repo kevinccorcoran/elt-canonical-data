@@ -5,9 +5,7 @@
 .env.local
 .env.production
 
-.envrc
-.envrc.prod
-.envrc.local
+.envrc*
 
 *.pem
 *.key
