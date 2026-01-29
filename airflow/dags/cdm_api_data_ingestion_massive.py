@@ -1,4 +1,5 @@
 from datetime import timedelta
+import os
 from pathlib import Path
 
 import pendulum
@@ -18,7 +19,11 @@ from utils.dbt_helpers import get_dbt_bash_command
 # Resolve paths dynamically so the DAG works regardless of
 # where Airflow is launched from (local, CI, container, etc.)
 DAG_DIR = Path(__file__).resolve().parent          # airflow/dags
-REPO_ROOT = DAG_DIR.parents[1]                     # repo root
+
+if "PROJECT_ROOT" in os.environ:
+    REPO_ROOT = Path(os.environ["PROJECT_ROOT"])
+else:
+    REPO_ROOT = DAG_DIR.parents[1]                     # repo root
 
 INGESTION_SCRIPT = (
     REPO_ROOT
@@ -73,7 +78,11 @@ def get_db_env_vars(env: str) -> dict:
     elif env == "prod":
         db_url = Variable.get("DATABASE_URL_PROD")
     else:
-        db_url = Variable.get("DATABASE_URL_DEV")
+        # Fallback to OS Env var for dev if Airflow Variable is not set
+        db_url = Variable.get("DATABASE_URL_DEV", default_var=os.getenv("DATABASE_URL"))
+    
+    if not db_url:
+         raise ValueError(f"No DATABASE_URL found for env: {env}")
 
     return {
         "DATABASE_URL": db_url,

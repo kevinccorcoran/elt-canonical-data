@@ -12,9 +12,21 @@ def get_dbt_bash_command(
     for use with an Airflow BashOperator.
     """
 
+    import os
+    from pathlib import Path
+
     # Absolute path to the dbt project directory.
     # Kept explicit to avoid ambiguity when Airflow runs in different contexts.
-    dbt_project_dir = "/Users/kevin/repos/elt-canonical-data/dbt/src/app"
+    
+    if "PROJECT_ROOT" in os.environ:
+        project_root = Path(os.environ["PROJECT_ROOT"])
+    else:
+        # Fallback for local execution: calculate from this file
+        # this file is in airflow/dags/utils
+        # repo root is 3 levels up
+        project_root = Path(__file__).resolve().parents[3]
+
+    dbt_project_dir = project_root / "dbt" / "src" / "app"
 
     # Fail fast on any error, unset variable, or pipeline failure,
     # then run dbt from the correct project directory.

@@ -14,11 +14,23 @@ from utils.dbt_helpers import get_dbt_bash_command
 # PATHS (repo-safe)
 # ──────────────────────────────────────────────
 
+import os
+
 DAG_DIR = Path(__file__).resolve().parent          # airflow/dags
-REPO_ROOT = DAG_DIR.parents[1]                     # elt-canonical-data
+
+if "PROJECT_ROOT" in os.environ:
+    REPO_ROOT = Path(os.environ["PROJECT_ROOT"])
+else:
+    REPO_ROOT = DAG_DIR.parents[1]                     # elt-canonical-data
+
+if "PROJECT_ROOT" in os.environ:
+    INFERENCE_ROOT = Path("/opt/elt-inference-models")
+else:
+    # Fallback for local execution: assume sibling repo
+    INFERENCE_ROOT = DAG_DIR.parents[1].parent / "elt-inference-models"
 
 ANALYSIS_SCRIPT = (
-    REPO_ROOT
+    INFERENCE_ROOT
     / "src"
     / "datapipeline"
     / "analysis"

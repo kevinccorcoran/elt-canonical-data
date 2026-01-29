@@ -2,15 +2,21 @@
 set -e
 cd docker/airflow
 
+# Airflow metadata DB (ALWAYS the docker postgres)
+POSTGRES_USER=${AIRFLOW_POSTGRES_USER:-postgres}
+POSTGRES_PASSWORD=${AIRFLOW_POSTGRES_PASSWORD:-postgres}
+POSTGRES_DB=${AIRFLOW_POSTGRES_DB:-airflow}
+AIRFLOW_DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
 cat > .env <<EOF
 # Environment
 ENV=$ENV
 
 # Airflow metadata DB (ALWAYS the docker postgres)
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_DB=airflow
-AIRFLOW_DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/airflow
+POSTGRES_USER=$POSTGRES_USER
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+POSTGRES_DB=$POSTGRES_DB
+AIRFLOW_DATABASE_URL=$AIRFLOW_DATABASE_URL
 
 # Trading DB (switches dev/staging)
 DB_HOST=$DB_HOST

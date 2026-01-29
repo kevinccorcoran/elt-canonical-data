@@ -14,7 +14,7 @@ services:
     volumes:
       - ./airflow-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h localhost"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h localhost" ]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -52,6 +52,10 @@ services:
     volumes:
       - ../../airflow/dags:/opt/airflow/dags
       - ../../src:/opt/elt-canonical-data/src
+      - ../../airflow/logs:/opt/airflow/logs
+      - ../../dbt:/opt/elt-canonical-data/dbt
+      - ../../.dbt:/home/airflow/.dbt
+      - ../../../elt-inference-models:/opt/elt-inference-models
 
     ports:
       - "8080:8080"
