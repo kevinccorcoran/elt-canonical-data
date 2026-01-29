@@ -3,10 +3,11 @@
 ## One-Minute Overview
 
 This project implements a production-grade data pipeline with a strict separation
-between development and runtime.
+between **development**, **local testing**, and **runtime execution**.
 
 Code is written and tested locally on macOS.  
-All scheduling and execution runs on a remote Linux server using Airflow in Docker.  
+Airflow can be run locally (via Docker) for **dev / staging testing only**.  
+Authoritative scheduling and execution run on a remote Linux server using Airflow in Docker.  
 All persistent data is stored in a managed PostgreSQL database.
 
 The runtime server is disposable — it can be destroyed and rebuilt without data loss
@@ -16,53 +17,60 @@ because all important data and code live in managed PostgreSQL and GitHub.
 
 ## Architecture
 
-Mac (Development)
+### Mac (Development + Local Testing)
 
 Application layer:
 └── elt-canonical-data (Git repo)
+    ├── airflow/dags/        # DAG source code
     ├── dbt models
     ├── ingestion scripts
-    └── DAG definitions
+    ├── src/                # shared Python code
+    └── docker/airflow/     # Local Airflow runtime (Docker Compose)
+        └── docker-compose.yml
     (.venv)
 
-Infrastructure layer:
-└── infra/docker/airflow (Git repo)
-    └── Docker Compose
-        └── Airflow (local)
-            ├── webserver
-            ├── scheduler
-            └── workers
+Infrastructure layer (local):
+└── Docker Desktop
+    └── Airflow (local dev / staging)
+        ├── webserver
+        ├── scheduler
+        └── metadata Postgres (container)
 
-Data layer:
+Data layer (local):
 └── Local PostgreSQL
     ├── dev database
     └── staging database
 
-        ↓ deploy (rsync)
+        ↓ deploy (git / rsync)
 
-Linux Server (Runtime)
+---
+
+### Linux Server (Runtime)
+
+Application checkout:
+└── /opt/elt-canonical-data
+    ├── code (git pull)
+    └── docker/airflow/dags (rsync target)
 
 Infrastructure layer:
-└── /opt/elt-canonical-data (infra copy)
-    └── Docker Compose
-        └── Airflow (production)
-            ├── webserver
-            ├── scheduler
-            └── workers
+└── Docker
+    └── Airflow (authoritative runtime)
+        ├── webserver
+        ├── scheduler
+        └── workers
 
         ↓ SQL
 
-Managed PostgreSQL (Production)
+Managed PostgreSQL
 └── business data
 └── airflow metadata
 
+---
 
-This separation ensures local machines are used only for authoring and testing,
-while all scheduling and execution happens in a controlled production environment.
-
-Key points:
-- Airflow runs entirely in Docker on the runtime server.
-- Local `.venv` environments are for development only.
+This separation ensures:
+- local machines are used for authoring and testing
+- local Airflow is safe and non-authoritative
+- all real execution happens in a controlled runtime environment
 
 ---
 
@@ -71,8 +79,8 @@ Key points:
 - macOS  
 - Python 3.11  
 - dbt  
-- Docker Desktop (optional)  
-- direnv (recommended)  
+- Docker Desktop (required for local Airflow)  
+- direnv (recommended)
 
 ---
 
@@ -85,24 +93,59 @@ Each repository that uses Python has its own virtual environment.
     pip install -r requirements.txt
 
 Used for:
-- dbt  
-- ingestion scripts  
-- helpers and experimentation  
+- dbt
+- ingestion scripts
+- helpers and experimentation
 
 Not used for:
-- Airflow  
-- scheduling  
-- orchestration  
+- Airflow
+- scheduling
+- orchestration
 
 ---
 
-## Airflow (Runtime Only)
+## Airflow (Local Dev / Staging)
 
-Airflow runs **only** on the runtime server to avoid coupling development
-machines with production scheduling and state.
+Airflow can be run locally via Docker for testing DAGs
+against local dev or staging databases.
+
+Location:
+
+    docker/airflow/
+
+Start:
+
+    cd docker/airflow
+    docker compose up -d
+
+Stop:
+
+    docker compose down
+
+Status:
+
+    docker compose ps
+
+UI:
+
+    http://localhost:8080
+
+Local Airflow is **never** used for production workloads.
+
+See `06_airflow_local.md` for full details.
+
+---
+
+## Airflow (Runtime Server)
+
+The runtime Airflow:
+- runs on a Linux server
+- is authoritative
+- executes real workloads only
 
 Start services:
 
+    cd /opt/elt-canonical-data
     docker compose up -d
 
 Stop services:
@@ -113,7 +156,7 @@ Check status:
 
     docker compose ps
 
-Airflow UI:
+Airflow UI (private):
 
     http://<RUNTIME_SERVER_IP>:8080
 
@@ -142,9 +185,9 @@ Required variables include:
 - AIRFLOW__WEBSERVER__SECRET_KEY  
 
 Secrets are:
-- Stored only on the runtime server  
-- Never committed to Git  
-- Retrieved from DigitalOcean DB console when rebuilding  
+- stored only on the runtime server
+- never committed to Git
+- retrieved from the DigitalOcean DB console when rebuilding
 
 ---
 
@@ -153,34 +196,22 @@ Secrets are:
 There is a strict separation between DAG source code and the Airflow runtime.
 
 Source of truth:
-- airflow/dags/ (development repository)
+- airflow/dags/
 
 Runtime mount:
-- docker/airflow/dags/ (mounted into Airflow containers)
+- docker/airflow/dags/
 
-Airflow only reads DAGs from:
+Airflow reads DAGs from:
 - /opt/airflow/dags (inside container)
 
-Therefore DAGs must be explicitly deployed from source to runtime.
+DAGs must be explicitly deployed.
 
-This ensures production only runs code that has been intentionally shipped,
-not whatever happens to exist on a developer’s laptop.
+### Supported deployment command (Mac → Runtime Server)
 
-The runtime DAG folder is treated as a deployment output, not a working directory.  
-It can be deleted and rebuilt at any time.
-
-### Real Deployment Command (Mac → Runtime Server)
-
-This is the only supported way to deploy DAGs:
-
-    rsync -av --delete airflow/dags/ $ELT_SERVER_USER@$ELT_SERVER_IP:/opt/elt-canonical-data/docker/airflow/dags/
+    rsync -av --delete airflow/dags/ \
+      $ELT_SERVER_USER@$ELT_SERVER_IP:/opt/elt-canonical-data/docker/airflow/dags/
 
 No DAGs are ever edited directly on the runtime server.
-
-This prevents:
-- accidental execution of unfinished DAGs  
-- unintended dependency between development and runtime  
-- hidden state inside containers  
 
 ---
 
@@ -191,8 +222,8 @@ Runtime infrastructure is created manually or via scripts.
 Rebuild is the default recovery strategy.
 
 See:
-- docs/05_recovery.md  
-- docs/runtime-provisioning.md  
+- docs/11_recovery.md
+- docs/05_runtime_provisioning.md
 
 ---
 
@@ -200,9 +231,9 @@ See:
 
 Runtime access uses environment variables defined locally:
 
-- ELT_SERVER_IP  
-- ELT_SERVER_USER  
-- ELT_SERVER_PATH  
+- ELT_SERVER_IP
+- ELT_SERVER_USER
+- ELT_SERVER_PATH
 
 Example:
 
@@ -217,19 +248,20 @@ No development work is performed directly on the runtime server.
 
 - Do not install Airflow into `.venv`
 - Do not run `airflow webserver` manually
-- Do not run schedulers locally
-- Do not edit DAGs inside docker/airflow/dags directly
+- Do not run schedulers locally for production
+- Do not edit DAGs inside runtime directories
 - Do not debug broken servers for hours — rebuild instead
 
 ---
 
 ## Design Philosophy
 
-- Local = development only  
-- Runtime server = production only  
-- Docker = execution boundary  
-- Managed Postgres = durable data  
-- Runtime server = disposable  
+- Local = development and testing only
+- Local Airflow = dev / staging safety net
+- Runtime server = authoritative execution
+- Docker = execution boundary
+- Managed Postgres = durable state
+- Runtime server = disposable
 
 If something breaks badly, rebuild.
 
