@@ -120,3 +120,7 @@ config/*.cfg
 # dbtT local config
 # =========================
 .dbt/profiles.yml
+
+# Postgres runtime data (must never be in Git)
+docker/airflow/airflow-postgres/
+
