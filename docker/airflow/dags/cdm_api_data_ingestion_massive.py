@@ -1,4 +1,5 @@
 from datetime import timedelta
+import os
 from pathlib import Path
 
 import pendulum
@@ -73,7 +74,11 @@ def get_db_env_vars(env: str) -> dict:
     elif env == "prod":
         db_url = Variable.get("DATABASE_URL_PROD")
     else:
-        db_url = Variable.get("DATABASE_URL_DEV")
+        # Fallback to OS Env var for dev if Airflow Variable is not set
+        db_url = Variable.get("DATABASE_URL_DEV", default_var=os.getenv("DATABASE_URL"))
+    
+    if not db_url:
+         raise ValueError(f"No DATABASE_URL found for env: {env}")
 
     return {
         "DATABASE_URL": db_url,

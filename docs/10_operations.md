@@ -53,7 +53,7 @@ Status:
 Logs:
     docker compose logs -f airflow
 
-See `06_airflow_local.md` for full local Airflow setup, users, and variables.
+See `airflow.md` for full local Airflow setup, users, and variables.
 
 ---
 
