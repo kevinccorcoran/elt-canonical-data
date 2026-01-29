@@ -56,7 +56,7 @@ def _env_override(key_base: str, env: str, default: Optional[str] = None):
 def _build_dsn(env: str) -> str:
     user = _env_override("DB_USER", env, "postgres")
     password = _env_override("DB_PASSWORD", env, "")
-    host = _env_override("DB_HOST", env, "localhost")
+    host = _env_override("DB_HOST", env, "postgres")
     port = _env_override("DB_PORT", env, "5432")
     name = _env_override("DB_NAME", env, "dev")
     return (
@@ -74,11 +74,14 @@ def _safe_dsn(dsn: str) -> str:
 
 
 # Resolve DATABASE_URL based on environment
-if ENV == "heroku_postgres":
-    DATABASE_URL = get_var("DATABASE_URL")
-else:
-    key = "DATABASE_URL_STAGING" if ENV == "staging" else "DATABASE_URL_DEV"
-    DATABASE_URL = get_var(key) or _build_dsn(ENV)
+# Resolve DATABASE_URL based on environment
+DATABASE_URL = get_var("DATABASE_URL")
+if not DATABASE_URL:
+    if ENV == "heroku_postgres":
+        pass  # Should have been caught above
+    else:
+        key = "DATABASE_URL_STAGING" if ENV == "staging" else "DATABASE_URL_DEV"
+        DATABASE_URL = get_var(key) or _build_dsn(ENV)
 
 # Normalize legacy postgres scheme
 if DATABASE_URL.startswith("postgres://"):

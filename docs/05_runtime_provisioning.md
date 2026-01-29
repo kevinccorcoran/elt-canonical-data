@@ -100,4 +100,4 @@ At this point the machine is:
 - Ready to run the ELT runtime stack  
 
 Next step:  
-Proceed to `docs/01_runtime_bootstrap.md`
+Proceed to `docs/04_runtime_bootstrap.md`

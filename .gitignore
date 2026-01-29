@@ -124,3 +124,6 @@ config/*.cfg
 # Postgres runtime data (must never be in Git)
 docker/airflow/airflow-postgres/
 
+
+# Docker Airflow local envs (Secrets)
+docker/airflow/.env*

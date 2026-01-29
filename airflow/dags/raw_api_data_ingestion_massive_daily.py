@@ -1,5 +1,6 @@
 from datetime import timedelta
 import pendulum
+import os
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
@@ -9,7 +10,8 @@ from airflow.operators.python import PythonOperator
 # Constants
 # ──────────────────────────────────────────────
 
-PROJECT_ROOT = "/Users/kevin/repos/elt-canonical-data"
+# Never hard-fail at DAG import time
+PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/opt/elt-canonical-data")
 
 LOCAL_TZ = pendulum.timezone("Europe/Amsterdam")
 NY_TZ = pendulum.timezone("America/New_York")
@@ -28,6 +30,7 @@ def compute_prev_trading_day(**context):
 
     d = (ny_now - timedelta(days=1)).date()
 
+    # Skip weekends
     while d.weekday() >= 5:
         d -= timedelta(days=1)
 
@@ -60,43 +63,53 @@ with DAG(
     tags=["massive", "raw", "daily"],
 ) as dag:
 
+    # ──────────────────────────────────────────
+    # Compute previous trading day
+    # ──────────────────────────────────────────
+
     compute_day = PythonOperator(
         task_id="compute_prev_trading_day",
         python_callable=compute_prev_trading_day,
     )
 
+    # ──────────────────────────────────────────
+    # Fetch Massive API data
+    # ──────────────────────────────────────────
+
     fetch_massive_data = BashOperator(
         task_id="fetch_massive_data",
-
         bash_command=f"""
         set -euxo pipefail
+
+        export PYTHONPATH="{PROJECT_ROOT}/src"
+
         cd "{PROJECT_ROOT}"
         python -m datapipeline.ingestion.massive_to_raw_etl \
           --start_date "{{{{ ti.xcom_pull(task_ids='compute_prev_trading_day')['date'] }}}}" \
           --end_date   "{{{{ ti.xcom_pull(task_ids='compute_prev_trading_day')['date'] }}}}"
         """,
-
-        env={
-            "DB_DATABASE": "{{ var.value.get('DB_DATABASE', 'dev') }}",
-            "DATABASE_URL": "{{ var.value.get('DATABASE_URL_' ~ (var.value.get('DB_DATABASE', 'dev') | upper)) }}",
-            "MASSIVE_API_KEY": "{{ var.value.get('MASSIVE_API_KEY') }}",
-        },
-
-        append_env=True,
         do_xcom_push=False,
     )
+
+    # ──────────────────────────────────────────
+    # Run dbt incremental model
+    # ──────────────────────────────────────────
 
     run_dbt = BashOperator(
         task_id="run_dbt_api_data_ingestion_massive_inc",
-
         bash_command=f"""
         set -euxo pipefail
+
+        export PYTHONPATH="{PROJECT_ROOT}/src"
+
         cd "{PROJECT_ROOT}/dbt/src/app"
         dbt run --select api_data_ingestion_massive_inc
         """,
-
-        append_env=True,
         do_xcom_push=False,
     )
+
+    # ──────────────────────────────────────────
+    # Task dependencies
+    # ──────────────────────────────────────────
 
     compute_day >> fetch_massive_data >> run_dbt

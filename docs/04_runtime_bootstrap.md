@@ -164,7 +164,7 @@ Check:
 Do not debug deeply.
 
 Destroy the runtime host.  
-Re-run from `docs/05_recovery.md`.  
+Re-run from `docs/11_recovery.md`.  
 
 The runtime host is disposable.  
 The database is the system.
