@@ -13,6 +13,7 @@ def get_dbt_bash_command(
     """
 
     import os
+    import logging
     from pathlib import Path
 
     # Absolute path to the dbt project directory.
@@ -28,6 +29,9 @@ def get_dbt_bash_command(
 
     dbt_project_dir = project_root / "dbt" / "src" / "app"
 
+    logging.info(f"dbt_helpers: Resolved project_root to {project_root}")
+    logging.info(f"dbt_helpers: Using dbt_project_dir at {dbt_project_dir}")
+
     # Fail fast on any error, unset variable, or pipeline failure,
     # then run dbt from the correct project directory.
     bash_command = (
@@ -35,6 +39,8 @@ def get_dbt_bash_command(
         f"cd {dbt_project_dir} && "
         f"dbt run --select {selector}"
     )
+
+    logging.info(f"dbt_helpers: Generated bash_command: {bash_command}")
 
     # Minimal environment overrides:
     # - ENV controls application-level environment awareness

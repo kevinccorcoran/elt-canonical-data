@@ -15,8 +15,8 @@ default_args = {
 }
 
 with DAG(
-    dag_id="raw_api_data_ingestion_bulk_massive",
-    description="Bulk Massive load (full history for all tickers)",
+    dag_id="raw_ingest_massive_bulk",
+    description="Bulk Massive load (Initial History)",
     default_args=default_args,
 
     # No schedule — run manually only
@@ -28,11 +28,11 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     is_paused_upon_creation=False,
-    tags=["massive", "raw", "bulk"],
+    tags=["raw", "ingest", "massive", "bulk"],
 ) as dag:
 
     fetch_massive_data = BashOperator(
-        task_id="fetch_massive_data",
+        task_id="ingest_massive_bulk",
         bash_command=f"""
         set -euxo pipefail
 
@@ -46,14 +46,14 @@ with DAG(
     )
 
     run_dbt = BashOperator(
-        task_id="run_dbt_api_data_ingestion_massive_inc",
+        task_id="dbt_run_massive_inc",
         bash_command=f"""
         set -euxo pipefail
 
         export PYTHONPATH="{PROJECT_ROOT}/src"
         cd "{PROJECT_ROOT}/dbt/src/app"
 
-        dbt run --select api_data_ingestion_massive_inc
+        dbt run --select ingest_massive_inc
         """,
         append_env=True,
         do_xcom_push=False,

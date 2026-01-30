@@ -96,14 +96,14 @@ def get_db_env_vars(env: str) -> dict:
 # ──────────────────────────────────────────────
 
 with DAG(
-    dag_id="cdm_api_data_ingestion_massive_parallel",
+    dag_id="cdm_ingest_massive",
     default_args=default_args,
-    description="Parallel ingestion → DBT staging → metrics trigger",
+    description="Massive ingestion → DBT Staging → Metrics (Backfill)",
     schedule_interval=None,     # Manually triggered / externally orchestrated
     catchup=False,
     max_active_runs=1,          # Prevent overlapping runs against the same data
     is_paused_upon_creation=False,
-    tags=["cdm", "parallel"],
+    tags=["cdm", "ingest", "massive"],
 ) as dag:
 
     # ──────────────────────────────────────────
@@ -154,11 +154,11 @@ with DAG(
     # ──────────────────────────────────────────
 
     bash_command, env_vars = get_dbt_bash_command(
-        runtime_env, "api_data_ingestion_massive_staging"
+        runtime_env, "ingest_massive_staging"
     )
 
     dbt_run_massive_staging = BashOperator(
-        task_id="dbt_run_api_data_ingestion_massive_staging",
+        task_id="dbt_run_massive_staging",
         bash_command=bash_command,
         env=env_vars,
         append_env=True,
@@ -166,11 +166,11 @@ with DAG(
     )
 
     bash_command, env_vars = get_dbt_bash_command(
-        runtime_env, "api_data_ingestion_yfinance_staging"
+        runtime_env, "ingest_yfinance_staging"
     )
 
     dbt_run_yfinance_staging = BashOperator(
-        task_id="dbt_run_api_data_ingestion_yfinance_staging",
+        task_id="dbt_run_yfinance_staging",
         bash_command=bash_command,
         env=env_vars,
         append_env=True,
@@ -186,7 +186,7 @@ with DAG(
     )
 
     dbt_run_excluded_massive = BashOperator(
-        task_id="dbt_run_excluded_tickers_massive",
+        task_id="dbt_run_excluded_massive",
         bash_command=bash_command,
         env=env_vars,
         append_env=True,
@@ -198,7 +198,7 @@ with DAG(
     )
 
     dbt_run_excluded_yfinance = BashOperator(
-        task_id="dbt_run_excluded_tickers_yfinance",
+        task_id="dbt_run_excluded_yfinance",
         bash_command=bash_command,
         env=env_vars,
         append_env=True,
@@ -210,11 +210,11 @@ with DAG(
     # ──────────────────────────────────────────
 
     bash_command, env_vars = get_dbt_bash_command(
-        runtime_env, "api_data_ingestion_y_p"
+        runtime_env, "ingest_combined"
     )
 
-    dbt_run_api_data_ingestion_y_p = BashOperator(
-        task_id="dbt_run_api_data_ingestion_y_p",
+    dbt_run_combined = BashOperator(
+        task_id="dbt_run_combined",
         bash_command=bash_command,
         env=env_vars,
         append_env=True,
@@ -251,7 +251,7 @@ with DAG(
         dbt_run_yfinance_staging,
         dbt_run_excluded_massive,
         dbt_run_excluded_yfinance,
-    ] >> dbt_run_api_data_ingestion_y_p
+    ] >> dbt_run_combined
 
     # Trigger metrics computation once canonical data is ready
-    dbt_run_api_data_ingestion_y_p >> trigger_metrics
+    dbt_run_combined >> trigger_metrics
