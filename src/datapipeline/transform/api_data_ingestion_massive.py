@@ -209,11 +209,20 @@ def main() -> None:
         with psycopg2.connect(connection_string) as conn:
             conn.autocommit = False
 
-            # Sanity log: confirm database/user context
+            # Sanity log: confirm database/user context and Read-Write status
             with conn.cursor() as cur:
-                cur.execute("SELECT current_database(), current_user")
-                db_name, db_user = cur.fetchone()
-            logging.info("Connected to DB=%s as user=%s", db_name, db_user)
+                cur.execute("SELECT current_database(), current_user, pg_is_in_recovery()")
+                db_name, db_user, is_recovery = cur.fetchone()
+                
+                cur.execute("SHOW default_transaction_read_only")
+                ro_config = cur.fetchone()[0]
+                
+            logging.info("Connected to DB=%s as user=%s (RecoveryMode=%s, ReadOnlyConfig=%s)", 
+                         db_name, db_user, is_recovery, ro_config)
+            
+            if is_recovery or ro_config == 'on':
+                 logging.critical("!!! DATABASE IS IN READ-ONLY MODE. INGESTION WILL FAIL. !!!")
+                 logging.critical("This usually means Storage is Full or this is a Read Replica.")
 
             # Temp staging table for this run (enables COPY + single merge step)
             with conn.cursor() as cur:
