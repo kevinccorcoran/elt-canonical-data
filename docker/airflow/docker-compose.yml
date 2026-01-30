@@ -52,7 +52,7 @@ services:
     volumes:
       - ../../airflow/dags:/opt/airflow/dags
       - ../../src:/opt/elt-canonical-data/src
-      - ../../airflow/logs:/opt/airflow/logs
+      # - ../../airflow/logs:/opt/airflow/logs
       - ../../dbt:/opt/elt-canonical-data/dbt
       - ../../.dbt:/home/airflow/.dbt
       - ../../../elt-inference-models:/opt/elt-inference-models
