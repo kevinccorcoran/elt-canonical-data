@@ -23,7 +23,7 @@
 WITH invalid_prices AS (
     SELECT DISTINCT
         ticker
-    FROM {{ ref('api_data_ingestion_yfinance_staging') }} a
+    FROM {{ ref('ingest_yfinance_staging') }} a
     WHERE adj_close IS NULL
        OR adj_close = 0
 )

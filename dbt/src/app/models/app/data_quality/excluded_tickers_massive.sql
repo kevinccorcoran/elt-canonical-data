@@ -32,7 +32,7 @@ WITH prices AS (
         LAG(adj_close) OVER (
             PARTITION BY ticker ORDER BY date
         ) AS prev_close
-    FROM {{ ref('api_data_ingestion_massive_staging') }}
+    FROM {{ ref('ingest_massive_staging') }}
 ),
 
 -- 2) Mark boundaries where a new price run begins
@@ -87,7 +87,7 @@ first_adj_close_0 AS (
             FIRST_VALUE(a.adj_close) OVER (
                 PARTITION BY a.ticker ORDER BY a.date
             ) AS first_adj_close
-        FROM {{ ref('api_data_ingestion_massive_staging') }} a
+        FROM {{ ref('ingest_massive_staging') }} a
     ) t
     WHERE first_adj_close = 0
 )
