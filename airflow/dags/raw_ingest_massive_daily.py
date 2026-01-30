@@ -53,14 +53,14 @@ default_args = {
 # ──────────────────────────────────────────────
 
 with DAG(
-    dag_id="raw_api_data_ingestion_massive_daily",
+    dag_id="raw_ingest_massive_daily",
     description="Daily Massive ingestion (previous completed trading day)",
     schedule="30 0 * * 1-5",
     catchup=False,
     default_args=default_args,
     max_active_runs=1,
     is_paused_upon_creation=False,
-    tags=["massive", "raw", "daily"],
+    tags=["raw", "ingest", "massive", "daily"],
 ) as dag:
 
     # ──────────────────────────────────────────
@@ -68,7 +68,7 @@ with DAG(
     # ──────────────────────────────────────────
 
     compute_day = PythonOperator(
-        task_id="compute_prev_trading_day",
+        task_id="calc_target_date",
         python_callable=compute_prev_trading_day,
     )
 
@@ -77,7 +77,7 @@ with DAG(
     # ──────────────────────────────────────────
 
     fetch_massive_data = BashOperator(
-        task_id="fetch_massive_data",
+        task_id="ingest_daily_api",
         bash_command=f"""
         set -euxo pipefail
 
@@ -85,8 +85,8 @@ with DAG(
 
         cd "{PROJECT_ROOT}"
         python -m datapipeline.ingestion.massive_to_raw_etl \
-          --start_date "{{{{ ti.xcom_pull(task_ids='compute_prev_trading_day')['date'] }}}}" \
-          --end_date   "{{{{ ti.xcom_pull(task_ids='compute_prev_trading_day')['date'] }}}}"
+          --start_date "{{{{ ti.xcom_pull(task_ids='calc_target_date')['date'] }}}}" \
+          --end_date   "{{{{ ti.xcom_pull(task_ids='calc_target_date')['date'] }}}}"
         """,
         do_xcom_push=False,
     )
@@ -96,14 +96,14 @@ with DAG(
     # ──────────────────────────────────────────
 
     run_dbt = BashOperator(
-        task_id="run_dbt_api_data_ingestion_massive_inc",
+        task_id="dbt_run_massive_inc",
         bash_command=f"""
         set -euxo pipefail
 
         export PYTHONPATH="{PROJECT_ROOT}/src"
 
         cd "{PROJECT_ROOT}/dbt/src/app"
-        dbt run --select api_data_ingestion_massive_inc
+        dbt run --select ingest_massive_inc
         """,
         do_xcom_push=False,
     )
