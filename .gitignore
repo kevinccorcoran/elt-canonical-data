@@ -16,8 +16,6 @@
 # Generated data / exports
 # =========================
 *.dump
-*.sql
-*.csv
 *.parquet
 
 # =========================
