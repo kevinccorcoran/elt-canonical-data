@@ -19,7 +19,8 @@ with source_data as (
         adj_close,
         volume,
         dividends,
-        stock_splits
+        stock_splits,
+        capital_gains
     from {{ source('raw', 'api_data_ingestion_massive') }}
 
 )
