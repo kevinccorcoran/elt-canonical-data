@@ -103,6 +103,7 @@ with DAG(
         export PYTHONPATH="{PROJECT_ROOT}/src"
 
         cd "{PROJECT_ROOT}/dbt/src/app"
+        dbt deps
         dbt run --select ingest_massive_inc
         """,
         do_xcom_push=False,
