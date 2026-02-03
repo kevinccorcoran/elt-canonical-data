@@ -230,6 +230,10 @@ def fetch_massive_df(ticker: str, start, end) -> pl.DataFrame:
             }
         )
 
+    if not rows:
+        logging.info("%s: No data found in range", tkr)
+        return pl.DataFrame()
+
     df = pl.DataFrame(rows)
 
     # Enforce post-listing data only
