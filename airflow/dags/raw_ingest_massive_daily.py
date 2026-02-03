@@ -95,6 +95,8 @@ with DAG(
             "DB_PASSWORD": os.environ.get("DB_PASSWORD", ""),
             "DB_DATABASE": os.environ.get("DB_DATABASE") or "prod",
             "DATABASE_URL": f"postgresql://{os.environ.get('DB_USER')}:{os.environ.get('DB_PASSWORD')}@{os.environ.get('DB_HOST')}:{os.environ.get('DB_PORT')}/{os.environ.get('DB_DATABASE') or 'prod'}",
+            "MASSIVE_API_KEY": os.environ.get("MASSIVE_API_KEY", ""),
+            "MASSIVE_MAX_WORKERS": os.environ.get("MASSIVE_MAX_WORKERS", "32"),
             "PATH": os.environ.get("PATH", ""),
         },
         do_xcom_push=False,
