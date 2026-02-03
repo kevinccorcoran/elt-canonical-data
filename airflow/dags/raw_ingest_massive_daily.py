@@ -111,7 +111,7 @@ with DAG(
             "DB_PORT": os.environ.get("DB_PORT", ""),
             "DB_USER": os.environ.get("DB_USER", ""),
             "DB_PASSWORD": os.environ.get("DB_PASSWORD", ""),
-            "DB_DATABASE": os.environ.get("DB_DATABASE", ""),
+            "DB_DATABASE": os.environ.get("DB_DATABASE") or "prod",
             "PATH": os.environ.get("PATH", ""),  # Ensure PATH is preserved
         },
         do_xcom_push=False,
