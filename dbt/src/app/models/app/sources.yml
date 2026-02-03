@@ -2,7 +2,7 @@ version: 2
 
 sources:
   - name: raw
-    database: "{{ env_var('DB_DATABASE') }}"
+    database: "{{ env_var('DB_DATABASE', 'prod') }}"
     schema: raw
     tables:
       - name: fib_seq
@@ -10,14 +10,14 @@ sources:
       - name: api_data_ingestion_massive
 
   - name: cdm
-    database: "{{ env_var('DB_DATABASE') }}"
+    database: "{{ env_var('DB_DATABASE', 'prod') }}"
     schema: cdm
     tables:
       - name: api_data_ingestion_yfinance
       - name: api_data_ingestion_massive
 
   - name: analysis
-    database: "{{ env_var('DB_DATABASE') }}"
+    database: "{{ env_var('DB_DATABASE', 'prod') }}"
     schema: analysis
     tables:
       - name: ticker_cluster_segments

@@ -23,7 +23,7 @@ clean-targets:
 models:
   dbt_project:
     # All models use the database defined via environment variables
-    +database: "{{ env_var('DB_DATABASE') }}"
+    +database: "{{ env_var('DB_DATABASE', 'prod') }}"
 
     app:
       # Default schema for application models (canonical data model)
