@@ -32,4 +32,4 @@ dbt_project:
       pass: "{{ env_var('DB_PASSWORD') }}"
       dbname: "prod"
       schema: cdm
-      sslmode: require
+      sslmode: prefer
