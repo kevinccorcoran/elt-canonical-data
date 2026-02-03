@@ -104,7 +104,7 @@ with DAG(
 
         cd "{PROJECT_ROOT}/dbt/src/app"
         dbt deps
-        dbt run --select ingest_massive_inc --target prod
+        dbt run --select ingest_massive_inc
         """,
         env={
             "DB_HOST": os.environ.get("DB_HOST", ""),
