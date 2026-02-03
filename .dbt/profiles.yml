@@ -10,7 +10,7 @@ dbt_project:
       pass: "{{ env_var('DB_PASSWORD') }}"
       dbname: "{{ env_var('DB_DATABASE') }}"
       schema: cdm
-      sslmode: require
+      sslmode: prefer
 
     staging:
       type: postgres
