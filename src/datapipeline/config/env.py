@@ -36,7 +36,7 @@ if RAW_ENV.startswith("dev"):
     ENV = "dev"
 elif RAW_ENV.startswith("stag"):
     ENV = "staging"
-elif RAW_ENV in {"prod", "production", "heroku_postgres"}:
+elif RAW_ENV in {"prod", "production", "heroku_postgres", "defaultdb"}:
     ENV = "prod"
 else:
     ENV = "dev"
