@@ -1,24 +1,24 @@
 dbt_project:
-  # Which environment dbt should use by default.
-  # Can be overridden via:
-  #   export DBT_TARGET=staging
-  target: "{{ env_var('DBT_TARGET', 'dev') }}"
-
+  target: dev
   outputs:
     dev:
-      # Database type
       type: postgres
-
-      # Number of threads dbt will use
       threads: 1
-
-      # Connection details are read from environment variables
-      # so credentials are never stored in Git.
       host: "{{ env_var('DB_HOST') }}"
       port: "{{ env_var('DB_PORT') | int }}"
       user: "{{ env_var('DB_USER') }}"
       pass: "{{ env_var('DB_PASSWORD') }}"
       dbname: "{{ env_var('DB_DATABASE') }}"
-
-      # Schema where dbt models will be built
       schema: cdm
+      sslmode: require
+
+    staging:
+      type: postgres
+      threads: 1
+      host: "{{ env_var('DB_HOST') }}"
+      port: "{{ env_var('DB_PORT') | int }}"
+      user: "{{ env_var('DB_USER') }}"
+      pass: "{{ env_var('DB_PASSWORD') }}"
+      dbname: "{{ env_var('DB_DATABASE') }}"
+      schema: cdm
+      sslmode: require
