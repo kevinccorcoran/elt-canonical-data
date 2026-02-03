@@ -101,16 +101,19 @@ with DAG(
         set -euxo pipefail
 
         export PYTHONPATH="{PROJECT_ROOT}/src"
-        export DB_HOST="{os.environ.get('DB_HOST', '')}"
-        export DB_PORT="{os.environ.get('DB_PORT', '')}"
-        export DB_USER="{os.environ.get('DB_USER', '')}"
-        export DB_PASSWORD="{os.environ.get('DB_PASSWORD', '')}"
-        export DB_DATABASE="{os.environ.get('DB_DATABASE', '')}"
 
         cd "{PROJECT_ROOT}/dbt/src/app"
         dbt deps
         dbt run --select ingest_massive_inc
         """,
+        env={
+            "DB_HOST": os.environ.get("DB_HOST", ""),
+            "DB_PORT": os.environ.get("DB_PORT", ""),
+            "DB_USER": os.environ.get("DB_USER", ""),
+            "DB_PASSWORD": os.environ.get("DB_PASSWORD", ""),
+            "DB_DATABASE": os.environ.get("DB_DATABASE", ""),
+            "PATH": os.environ.get("PATH", ""),  # Ensure PATH is preserved
+        },
         do_xcom_push=False,
     )
 
