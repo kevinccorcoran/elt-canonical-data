@@ -40,3 +40,6 @@ models:
       # Data validation, checks, and quality-related models
       data_quality:
         +schema: data_quality
+
+  elt_inference_models:
+    +database: "{{ env_var('DB_DATABASE', 'prod') }}"
