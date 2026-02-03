@@ -101,11 +101,6 @@ with DAG(
         set -euxo pipefail
 
         export PYTHONPATH="{PROJECT_ROOT}/src"
-        export DB_HOST="{{{{ var.value.get('DB_HOST') }}}}"
-        export DB_PORT="{{{{ var.value.get('DB_PORT') }}}}"
-        export DB_USER="{{{{ var.value.get('DB_USER') }}}}"
-        export DB_PASSWORD="{{{{ var.value.get('DB_PASSWORD') }}}}"
-        export DB_DATABASE="{{{{ var.value.get('DB_DATABASE') }}}}"
 
         cd "{PROJECT_ROOT}/dbt/src/app"
         dbt run --select ingest_massive_inc
