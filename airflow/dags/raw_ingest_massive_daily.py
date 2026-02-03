@@ -88,6 +88,14 @@ with DAG(
           --start_date "{{{{ ti.xcom_pull(task_ids='calc_target_date')['date'] }}}}" \
           --end_date   "{{{{ ti.xcom_pull(task_ids='calc_target_date')['date'] }}}}"
         """,
+        env={
+            "DB_HOST": os.environ.get("DB_HOST", ""),
+            "DB_PORT": os.environ.get("DB_PORT", ""),
+            "DB_USER": os.environ.get("DB_USER", ""),
+            "DB_PASSWORD": os.environ.get("DB_PASSWORD", ""),
+            "DB_DATABASE": os.environ.get("DB_DATABASE") or "prod",
+            "PATH": os.environ.get("PATH", ""),
+        },
         do_xcom_push=False,
     )
 
