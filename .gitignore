@@ -17,6 +17,10 @@
 # =========================
 *.dump
 *.parquet
+*.csv
+*.txt
+yfinance_dump.sql
+chunks_slim/
 
 # =========================
 # Local config overrides

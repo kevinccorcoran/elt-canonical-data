@@ -214,7 +214,7 @@ def fetch_massive_df(ticker: str, start, end) -> pl.DataFrame:
 
     rows = []
     for bar in aggs or []:
-        d = datetime.utcfromtimestamp(bar.timestamp / 1000).date()
+        d = datetime.fromtimestamp(bar.timestamp / 1000, tz=ZoneInfo("UTC")).date()
         rows.append(
             {
                 "ticker_date_id": f"{tkr}_{d}",
@@ -224,11 +224,8 @@ def fetch_massive_df(ticker: str, start, end) -> pl.DataFrame:
                 "high": float(bar.high),
                 "low": float(bar.low),
                 "close": float(bar.close),
+                "volume": int(bar.volume),
                 "adj_close": float(bar.close),
-                "volume": int(bar.volume or 0),
-                "dividends": None,
-                "stock_splits": None,
-                "capital_gains": None,
                 "processed_at": processed_at,
             }
         )
@@ -269,11 +266,8 @@ def main():
         "high",
         "low",
         "close",
-        "adj_close",
         "volume",
-        "dividends",
-        "stock_splits",
-        "capital_gains",
+        "adj_close",
         "processed_at",
     ]
 
