@@ -12,15 +12,10 @@ with source_data as (
         date,
         processed_at,
         ticker || '_' || date as ticker_date_id,
-        open,
-        high,
-        low,
-        close,
         adj_close,
         volume,
         dividends,
-        stock_splits,
-        capital_gains
+        stock_splits
     from {{ source('raw', 'api_data_ingestion_massive') }}
 
 )
