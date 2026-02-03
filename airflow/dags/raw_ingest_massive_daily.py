@@ -101,6 +101,11 @@ with DAG(
         set -euxo pipefail
 
         export PYTHONPATH="{PROJECT_ROOT}/src"
+        export DB_HOST="{os.environ.get('DB_HOST', '')}"
+        export DB_PORT="{os.environ.get('DB_PORT', '')}"
+        export DB_USER="{os.environ.get('DB_USER', '')}"
+        export DB_PASSWORD="{os.environ.get('DB_PASSWORD', '')}"
+        export DB_DATABASE="{os.environ.get('DB_DATABASE', '')}"
 
         cd "{PROJECT_ROOT}/dbt/src/app"
         dbt deps
