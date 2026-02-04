@@ -8,9 +8,9 @@ import argparse
 from datetime import datetime, timedelta, timezone, date
 from decimal import Decimal
 from urllib.parse import urlparse
-
 import psycopg2
 import polars as pl
+from datapipeline.config.ingestion_targets import TICKERS
 
 
 # Logging for batch ETL visibility
@@ -235,16 +235,7 @@ def main() -> None:
             conn.commit()
             logging.info("Created temp table temp_%s", TARGET_TABLE)
 
-            # Load all tickers and assign the slice this batch is responsible for
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT DISTINCT ticker
-                    FROM {SOURCE_SCHEMA}.{SOURCE_TABLE}
-                    ORDER BY ticker
-                    """
-                )
-                all_tickers = [row[0] for row in cur.fetchall()]
+            all_tickers = list(TICKERS)
 
             total_tickers = len(all_tickers)
             if total_tickers == 0:

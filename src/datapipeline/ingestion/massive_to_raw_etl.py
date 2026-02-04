@@ -255,11 +255,26 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--start_date")
     parser.add_argument("--end_date")
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--num_batches", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE)
     args = parser.parse_args()
 
     selected = [t for t in TICKERS if isinstance(t, str)]
-    logging.info("Total tickers: %s", len(selected))
+    total_tickers = len(selected)
+    
+    batch = args.batch
+    num_batches = args.num_batches
+
+    if num_batches > 1:
+        base = total_tickers // num_batches
+        remainder = total_tickers % num_batches
+
+        start_idx = (batch - 1) * base + min(batch - 1, remainder)
+        end_idx = start_idx + base + (1 if batch <= remainder else 0)
+        selected = selected[start_idx:end_idx]
+
+    logging.info("Batch %d/%d handles %d tickers", batch, num_batches, len(selected))
 
     # Explicit column order to match target table schema
     EXPECTED_ORDER = [
