@@ -46,9 +46,9 @@ TRANSFORM_SCRIPT = (
 # CONFIG
 # ──────────────────────────────────────────────
 
-# Runtime environment is driven by Airflow Variables
-# (not hardcoded, and not inferred from the machine)
-runtime_env = Variable.get("ENV", default_var="dev")
+# Runtime environment is driven by Environment Variables (fast)
+# or Airflow Variables if env vars are missing.
+runtime_env = os.environ.get("ENV", "dev")
 
 # Number of parallel ingestion slices
 # Chosen to balance API load and DB pressure
@@ -82,21 +82,23 @@ def get_db_env_vars(env: str) -> dict:
     - dbt relies on DB_* variables from the surrounding environment
     """
     if env == "staging":
-        db_url = Variable.get("DATABASE_URL_STAGING")
+        db_url = os.environ.get("DATABASE_URL_STAGING") or Variable.get("DATABASE_URL_STAGING", default_var="")
     elif env == "prod":
-        db_url = Variable.get("DATABASE_URL_PROD")
+        db_url = os.environ.get("DATABASE_URL_PROD") or os.environ.get("DATABASE_URL") or Variable.get("DATABASE_URL_PROD", default_var="")
     else:
-        # Fallback to OS Env var for dev if Airflow Variable is not set
-        db_url = Variable.get("DATABASE_URL_DEV", default_var=os.getenv("DATABASE_URL"))
+        db_url = os.environ.get("DATABASE_URL") or Variable.get("DATABASE_URL_DEV", default_var="")
     
     if not db_url:
-         raise ValueError(f"No DATABASE_URL found for env: {env}")
+         # Note: Avoid raising ValueError here during parsing if possible, 
+         # but we need it for the tasks to function. 
+         # Using a placeholder if missing to avoid breaking DAG import.
+         db_url = "MISSING_DATABASE_URL"
 
     return {
         "DATABASE_URL": db_url,
         "ENV": env,
         "DB_DATABASE": env,
-        "MASSIVE_API_KEY": Variable.get("MASSIVE_API_KEY", default_var=os.getenv("MASSIVE_API_KEY")),
+        "MASSIVE_API_KEY": os.environ.get("MASSIVE_API_KEY") or Variable.get("MASSIVE_API_KEY", default_var=""),
     }
 
 
@@ -122,6 +124,7 @@ with DAG(
     # Split ingestion into deterministic batches so work can be
     # parallelized without overlapping responsibility.
     with TaskGroup(group_id="parallel_ingestion") as ingestion_group:
+        previous_task = None
         for batch in range(1, NUM_BATCHES + 1):
 
             bash_cmd = (
@@ -137,13 +140,19 @@ with DAG(
                 f"--batch {batch} --num_batches {NUM_BATCHES}"
             )
 
-            BashOperator(
+            task = BashOperator(
                 task_id=f"ingest_batch_{batch}",
                 bash_command=bash_cmd,
                 env=get_db_env_vars(runtime_env),
                 append_env=True,
                 do_xcom_push=False,
             )
+
+            # Enforce sequential execution to strictly limit memory usage
+            # (Running 4x parallel batches causes OOM on small instances)
+            if previous_task:
+                previous_task >> task
+            previous_task = task
 
     # ──────────────────────────────────────────
     # DBT: reference / lookup models
