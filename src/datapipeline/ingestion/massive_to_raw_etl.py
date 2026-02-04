@@ -58,7 +58,9 @@ def _build_dsn(env: str) -> str:
     password = _env_override("DB_PASSWORD", env, "")
     host = _env_override("DB_HOST", env, "postgres")
     port = _env_override("DB_PORT", env, "5432")
-    name = _env_override("DB_NAME", env, "dev")
+    # Fallback plan: DB_NAME_{ENV} -> DB_NAME -> DB_DATABASE -> 'dev'
+    default_db = get_var("DB_DATABASE", "dev")
+    name = _env_override("DB_NAME", env, default_db)
     return (
         f"postgresql+psycopg2://{user}:{quote_plus(password or '')}"
         f"@{host}:{port}/{name}"
