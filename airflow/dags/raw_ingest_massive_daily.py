@@ -6,6 +6,8 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
 
+from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command
+
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
@@ -20,7 +22,7 @@ NY_TZ = pendulum.timezone("America/New_York")
 # Helpers
 # ──────────────────────────────────────────────
 
-def compute_prev_trading_day(**context):
+def compute_prev_day(**context):
     dag_run = context.get("dag_run")
 
     if dag_run and dag_run.run_type == "manual":
@@ -29,10 +31,6 @@ def compute_prev_trading_day(**context):
         ny_now = context["data_interval_end"].in_timezone(NY_TZ)
 
     d = (ny_now - timedelta(days=1)).date()
-
-    # Skip weekends
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
 
     return {"date": d.isoformat()}
 
@@ -54,8 +52,8 @@ default_args = {
 
 with DAG(
     dag_id="raw_ingest_massive_daily",
-    description="Daily Massive ingestion (previous completed trading day)",
-    schedule="30 0 * * 1-5",
+    description="Daily Massive ingestion (previous day)",
+    schedule="0 4 * * *",
     catchup=False,
     default_args=default_args,
     max_active_runs=1,
@@ -64,12 +62,12 @@ with DAG(
 ) as dag:
 
     # ──────────────────────────────────────────
-    # Compute previous trading day
+    # Compute previous day
     # ──────────────────────────────────────────
 
     compute_day = PythonOperator(
         task_id="calc_target_date",
-        python_callable=compute_prev_trading_day,
+        python_callable=compute_prev_day,
     )
 
     # ──────────────────────────────────────────
@@ -102,29 +100,24 @@ with DAG(
         do_xcom_push=False,
     )
 
-    # ──────────────────────────────────────────
-    # Run dbt incremental model
-    # ──────────────────────────────────────────
+    # Use dbt helpers for consistency and to ensure deps are installed
+    runtime_env = os.environ.get("DB_DATABASE") or "prod"
+    
+    bash_command, env_vars = get_dbt_deps_command(runtime_env)
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=bash_command,
+        env=env_vars,
+        append_env=True,
+        do_xcom_push=False,
+    )
 
+    bash_command, env_vars = get_dbt_bash_command(runtime_env, "ingest_massive_inc")
     run_dbt = BashOperator(
         task_id="dbt_run_massive_inc",
-        bash_command=f"""
-        set -euxo pipefail
-
-        export PYTHONPATH="{PROJECT_ROOT}/src"
-
-        cd "{PROJECT_ROOT}/dbt/src/app"
-        dbt deps
-        dbt run --select ingest_massive_inc
-        """,
-        env={
-            "DB_HOST": os.environ.get("DB_HOST", ""),
-            "DB_PORT": os.environ.get("DB_PORT", ""),
-            "DB_USER": os.environ.get("DB_USER", ""),
-            "DB_PASSWORD": os.environ.get("DB_PASSWORD", ""),
-            "DB_DATABASE": os.environ.get("DB_DATABASE") or "prod",
-            "PATH": os.environ.get("PATH", ""),  # Ensure PATH is preserved
-        },
+        bash_command=bash_command,
+        env=env_vars,
+        append_env=True,
         do_xcom_push=False,
     )
 
@@ -132,4 +125,4 @@ with DAG(
     # Task dependencies
     # ──────────────────────────────────────────
 
-    compute_day >> fetch_massive_data >> run_dbt
+    compute_day >> fetch_massive_data >> dbt_deps >> run_dbt

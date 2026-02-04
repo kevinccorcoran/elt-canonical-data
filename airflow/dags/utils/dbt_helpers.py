@@ -12,13 +12,10 @@ def get_dbt_bash_command(
     for use with an Airflow BashOperator.
     """
 
+def _get_dbt_project_dir() -> Path:
     import os
-    import logging
     from pathlib import Path
 
-    # Absolute path to the dbt project directory.
-    # Kept explicit to avoid ambiguity when Airflow runs in different contexts.
-    
     if "PROJECT_ROOT" in os.environ:
         project_root = Path(os.environ["PROJECT_ROOT"])
     else:
@@ -26,10 +23,48 @@ def get_dbt_bash_command(
         # this file is in airflow/dags/utils
         # repo root is 3 levels up
         project_root = Path(__file__).resolve().parents[3]
+    
+    return project_root / "dbt" / "src" / "app"
 
-    dbt_project_dir = project_root / "dbt" / "src" / "app"
 
-    logging.info(f"dbt_helpers: Resolved project_root to {project_root}")
+def get_dbt_deps_command(
+    env: str,
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Build a dbt deps bash command and environment variables
+    for use with an Airflow BashOperator.
+    """
+    import logging
+    dbt_project_dir = _get_dbt_project_dir()
+
+    bash_command = (
+        "set -euo pipefail && "
+        f"cd {dbt_project_dir} && "
+        "dbt deps"
+    )
+
+    logging.info(f"dbt_helpers: Generated dbt deps command: {bash_command}")
+
+    env_vars = {
+        "ENV": env,
+        "DB_DATABASE": env,
+    }
+
+    return bash_command, env_vars
+
+
+def get_dbt_bash_command(
+    env: str,
+    selector: str,
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Build a dbt CLI bash command and environment variables
+    for use with an Airflow BashOperator.
+    """
+
+    import logging
+    dbt_project_dir = _get_dbt_project_dir()
+
     logging.info(f"dbt_helpers: Using dbt_project_dir at {dbt_project_dir}")
 
     # Fail fast on any error, unset variable, or pipeline failure,

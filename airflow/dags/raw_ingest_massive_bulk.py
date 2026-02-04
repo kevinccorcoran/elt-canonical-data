@@ -2,6 +2,8 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 
+from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command
+
 # IMPORTANT:
 # This path must match what exists *inside the Airflow container*
 # NOT your Mac path.
@@ -45,18 +47,23 @@ with DAG(
         do_xcom_push=False,
     )
 
-    run_dbt = BashOperator(
-        task_id="dbt_run_massive_inc",
-        bash_command=f"""
-        set -euxo pipefail
-
-        export PYTHONPATH="{PROJECT_ROOT}/src"
-        cd "{PROJECT_ROOT}/dbt/src/app"
-
-        dbt run --select ingest_massive_inc
-        """,
+    # Use dbt helpers for consistency and to ensure deps are installed
+    bash_command, env_vars = get_dbt_deps_command("prod") # Bulk is usually prod
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=bash_command,
+        env=env_vars,
         append_env=True,
         do_xcom_push=False,
     )
 
-    fetch_massive_data >> run_dbt
+    bash_command, env_vars = get_dbt_bash_command("prod", "ingest_massive_inc")
+    run_dbt = BashOperator(
+        task_id="dbt_run_massive_inc",
+        bash_command=bash_command,
+        env=env_vars,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    fetch_massive_data >> dbt_deps >> run_dbt
