@@ -76,11 +76,18 @@ def _safe_dsn(dsn: str) -> str:
 # Resolve DATABASE_URL based on environment
 # Resolve DATABASE_URL based on environment
 DATABASE_URL = get_var("DATABASE_URL")
+
+# Detect and discard placeholder credentials (common in prod env vars)
+if DATABASE_URL and "REPLACEME" in DATABASE_URL:
+    logging.warning("DATABASE_URL contains placeholder. Rebuilding from granular vars.")
+    DATABASE_URL = None
+
 if not DATABASE_URL:
     if ENV == "heroku_postgres":
         pass  # Should have been caught above
     else:
         key = "DATABASE_URL_STAGING" if ENV == "staging" else "DATABASE_URL_DEV"
+        # If granular vars are missing, _build_dsn(ENV) will try specific DB_USER/PASS vars
         DATABASE_URL = get_var(key) or _build_dsn(ENV)
 
 # Normalize legacy postgres scheme
