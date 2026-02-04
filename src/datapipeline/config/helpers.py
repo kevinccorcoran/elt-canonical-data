@@ -70,6 +70,7 @@ def save_to_database(
         # Use temp table + COPY for performance and atomicity
         with psycopg2.connect(connection_string) as conn:
             with conn.cursor() as cur:
+                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name};")
                 cur.execute(f"SET search_path TO {schema_name}, public;")
                 cur.execute("DROP TABLE IF EXISTS tmp_ingest;")
                 cur.execute(f"""
