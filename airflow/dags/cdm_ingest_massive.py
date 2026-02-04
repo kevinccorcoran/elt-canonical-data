@@ -52,7 +52,7 @@ runtime_env = Variable.get("ENV", default_var="dev")
 
 # Number of parallel ingestion slices
 # Chosen to balance API load and DB pressure
-NUM_BATCHES = 6
+NUM_BATCHES = 4
 
 # Explicit timezone for scheduling and timestamps
 local_tz = pendulum.timezone("Europe/Amsterdam")
