@@ -9,7 +9,7 @@ from airflow.operators.bash import BashOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.task_group import TaskGroup
 
-from utils.dbt_helpers import get_dbt_bash_command
+from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command
 
 
 # ──────────────────────────────────────────────
@@ -25,7 +25,15 @@ if "PROJECT_ROOT" in os.environ:
 else:
     REPO_ROOT = DAG_DIR.parents[1]                     # repo root
 
-INGESTION_SCRIPT = (
+RAW_INGEST_SCRIPT = (
+    REPO_ROOT
+    / "src"
+    / "datapipeline"
+    / "ingestion"
+    / "massive_to_raw_etl.py"
+)
+
+TRANSFORM_SCRIPT = (
     REPO_ROOT
     / "src"
     / "datapipeline"
@@ -88,6 +96,7 @@ def get_db_env_vars(env: str) -> dict:
         "DATABASE_URL": db_url,
         "ENV": env,
         "DB_DATABASE": env,
+        "MASSIVE_API_KEY": Variable.get("MASSIVE_API_KEY", default_var=os.getenv("MASSIVE_API_KEY")),
     }
 
 
@@ -98,8 +107,8 @@ def get_db_env_vars(env: str) -> dict:
 with DAG(
     dag_id="cdm_ingest_massive",
     default_args=default_args,
-    description="Massive ingestion → DBT Staging → Metrics (Backfill)",
-    schedule_interval=None,     # Manually triggered / externally orchestrated
+    description="Daily Massive ingestion → DBT Staging → Metrics",
+    schedule="0 8 * * *",
     catchup=False,
     max_active_runs=1,          # Prevent overlapping runs against the same data
     is_paused_upon_creation=False,
@@ -117,12 +126,15 @@ with DAG(
 
             bash_cmd = (
                 "set -euo pipefail && "
+                f'export PYTHONPATH="{REPO_ROOT}/src" && '
                 f'echo "=== Ingestion batch {batch}/{NUM_BATCHES} ===" && '
-                f"python {INGESTION_SCRIPT} "
-                f'--start_date "1950-01-01" '
-                f'--end_date "{{{{ ds }}}}" '
-                f"--batch {batch} "
-                f"--num_batches {NUM_BATCHES}"
+                f"python {RAW_INGEST_SCRIPT} "
+                f'--start_date "1950-01-01" --end_date "{{{{ ds }}}}" '
+                f"--batch {batch} --num_batches {NUM_BATCHES} && "
+                f'echo "=== Transformation batch {batch}/{NUM_BATCHES} ===" && '
+                f"python {TRANSFORM_SCRIPT} "
+                f'--start_date "1950-01-01" --end_date "{{{{ ds }}}}" '
+                f"--batch {batch} --num_batches {NUM_BATCHES}"
             )
 
             BashOperator(
@@ -136,6 +148,16 @@ with DAG(
     # ──────────────────────────────────────────
     # DBT: reference / lookup models
     # ──────────────────────────────────────────
+
+    bash_command, env_vars = get_dbt_deps_command(runtime_env)
+
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=bash_command,
+        env=env_vars,
+        append_env=True,
+        do_xcom_push=False,
+    )
 
     bash_command, env_vars = get_dbt_bash_command(
         runtime_env, "ticker_index_summary"
@@ -238,6 +260,7 @@ with DAG(
     # ──────────────────────────────────────────
 
     # Staging depends on both raw ingestion and reference data
+    dbt_deps >> dbt_run_ticker_index_summary
     [ingestion_group, dbt_run_ticker_index_summary] >> dbt_run_massive_staging
     [ingestion_group, dbt_run_ticker_index_summary] >> dbt_run_yfinance_staging
 

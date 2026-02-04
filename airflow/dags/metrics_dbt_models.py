@@ -7,7 +7,7 @@ from airflow.models import Variable
 from airflow.operators.bash import BashOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
-from utils.dbt_helpers import get_dbt_bash_command
+from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command
 
 
 # ──────────────────────────────────────────────
@@ -67,6 +67,18 @@ with DAG(
     catchup=False,
     is_paused_upon_creation=False,
 ) as dag:
+
+    # ------------------------------------------------------------------
+    # 0. DBT deps
+    # ------------------------------------------------------------------
+    bash_command, env_vars = get_dbt_deps_command(runtime_env)
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=bash_command,
+        env=env_vars,
+        append_env=True,
+        do_xcom_push=False,
+    )
 
     # ------------------------------------------------------------------
     # 1. Base + observation dates
@@ -232,6 +244,7 @@ with DAG(
     # DEPENDENCIES
     # ------------------------------------------------------------------
 
+    dbt_deps >> dbt_run_intermediate_fibonacci_base
     dbt_run_intermediate_fibonacci_base >> dbt_run_fibonacci_offset_observation_dates
 
     dbt_run_ticker_weighted_growth_ranking >> python_run_ticker_cluster_segments
