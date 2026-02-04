@@ -25,7 +25,7 @@ with src as (
       adj_close,
       capital_gains,
       ticker_date_id
-  from {{ source('raw', 'api_data_ingestion_polygon') }}
+  from {{ source('raw', 'api_data_ingestion_massive') }}
 )
 
 select
