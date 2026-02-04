@@ -65,6 +65,7 @@ with DAG(
     schedule_interval=None,
     start_date=pendulum.today("UTC").subtract(days=1),
     catchup=False,
+    max_active_runs=1,
     is_paused_upon_creation=False,
 ) as dag:
 
