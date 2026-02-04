@@ -80,11 +80,28 @@ def get_dbt_bash_command(
     # Minimal environment overrides:
     # - ENV controls application-level environment awareness
     # - DB_DATABASE determines the target database for dbt
-    # All other connection details are expected to be inherited
-    # from the Airflow/direnv environment.
+    
+    # Securely fetch credentials (handling Airflow Variable fallback)
+    import os
+    try:
+        from airflow.models import Variable
+        password = Variable.get("DB_PASSWORD_PROD", default_var=os.getenv("DB_PASSWORD"))
+    except ImportError:
+        password = os.getenv("DB_PASSWORD")
+
     env_vars = {
         "ENV": env,
         "DB_DATABASE": env,
+        "DB_PASSWORD": password,
     }
+    
+    if env == "prod":
+        env_vars["DBT_TARGET"] = "prod"
+        env_vars["DB_SSLMODE"] = "require"
+    elif env == "staging":
+        env_vars["DBT_TARGET"] = "staging"
+        env_vars["DB_SSLMODE"] = "require"
+    else:
+        env_vars["DBT_TARGET"] = "dev"
 
     return bash_command, env_vars
