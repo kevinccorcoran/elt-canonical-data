@@ -152,7 +152,7 @@ from datapipeline.config.helpers import save_to_database
 # Ingestion configuration
 TABLE_SCHEMA = "raw"
 TABLE_NAME = "api_data_ingestion_massive"
-DEFAULT_BATCH_SIZE = int(os.getenv("MASSIVE_BATCH_SIZE", "20"))
+DEFAULT_BATCH_SIZE = int(os.getenv("MASSIVE_BATCH_SIZE", "15"))
 EPOCH_START = date(1970, 1, 1)
 
 
@@ -332,6 +332,12 @@ def main():
                 connection_string=PSYCOPG_DSN,
             )
             written_rows += combined.height
+
+            # Free memory immediately
+            del combined
+            del dfs
+            import gc
+            gc.collect()
 
             logging.info(
                 "DB write completed in %.2fs",
