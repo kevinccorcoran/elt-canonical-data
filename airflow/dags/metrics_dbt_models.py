@@ -7,7 +7,7 @@ from airflow.models import Variable
 from airflow.operators.bash import BashOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
-from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command, get_inference_dbt_bash_command
+from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command, get_inference_dbt_bash_command, get_inference_dbt_deps_command
 
 
 # ──────────────────────────────────────────────
@@ -72,7 +72,7 @@ with DAG(
     # ------------------------------------------------------------------
     # 0. DBT deps
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_deps_command(runtime_env)
+    bash_command, env_vars = get_inference_dbt_deps_command(runtime_env)
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=bash_command,
