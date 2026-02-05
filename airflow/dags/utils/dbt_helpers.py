@@ -67,6 +67,32 @@ def get_dbt_deps_command(
     return bash_command, env_vars
 
 
+def get_inference_dbt_deps_command(
+    env: str,
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Build a dbt deps bash command and environment variables
+    for use with an Airflow BashOperator for the inference project.
+    """
+    import logging
+    dbt_project_dir = _get_inference_dbt_project_dir()
+
+    bash_command = (
+        "set -euo pipefail && "
+        f"cd {dbt_project_dir} && "
+        "dbt deps"
+    )
+
+    logging.info(f"dbt_helpers: Generated inference dbt deps command: {bash_command}")
+
+    env_vars = {
+        "ENV": env,
+        "DB_DATABASE": env,
+    }
+
+    return bash_command, env_vars
+
+
 def get_dbt_bash_command(
     env: str,
     selector: str,
