@@ -34,11 +34,11 @@ def _get_inference_dbt_project_dir() -> Path:
 
     if "PROJECT_ROOT" in os.environ:
         # Production: inference repo is at /opt/elt-inference-models
-        return Path("/opt/elt-inference-models") / "dbt" / "src" / "app"
+        return Path("/opt/elt-inference-models")
     else:
         # Local: assume sibling repo
         repo_root = Path(__file__).resolve().parents[3]
-        return repo_root.parent / "elt-inference-models" / "dbt" / "src" / "app"
+        return repo_root.parent / "elt-inference-models"
 
 
 def get_dbt_deps_command(
