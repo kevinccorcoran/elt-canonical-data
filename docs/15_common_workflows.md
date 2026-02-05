@@ -17,6 +17,8 @@ git push origin <your-branch-name>
 
 **[SERVER] - Pull and Refresh**
 ```bash
+ssh $ELT_SERVER_USER@$ELT_SERVER_IP
+
 ssh <your-server-user>@<your-server-ip>
 cd /opt/elt-canonical-data
 

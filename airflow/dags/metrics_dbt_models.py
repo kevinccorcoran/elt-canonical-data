@@ -7,7 +7,7 @@ from airflow.models import Variable
 from airflow.operators.bash import BashOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
-from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command
+from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command, get_inference_dbt_bash_command
 
 
 # ──────────────────────────────────────────────
@@ -84,7 +84,7 @@ with DAG(
     # ------------------------------------------------------------------
     # 1. Base + observation dates
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(
+    bash_command, env_vars = get_inference_dbt_bash_command(
         runtime_env, "intermediate_fibonacci_base"
     )
     dbt_run_intermediate_fibonacci_base = BashOperator(
@@ -95,7 +95,7 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(
+    bash_command, env_vars = get_inference_dbt_bash_command(
         runtime_env, "fibonacci_offset_observation_dates"
     )
     dbt_run_fibonacci_offset_observation_dates = BashOperator(
@@ -109,7 +109,7 @@ with DAG(
     # ------------------------------------------------------------------
     # 2. Weighted growth ranking + clustering
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(
+    bash_command, env_vars = get_inference_dbt_bash_command(
         runtime_env, "ticker_weighted_growth_ranking"
     )
     dbt_run_ticker_weighted_growth_ranking = BashOperator(
@@ -131,7 +131,7 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(
+    bash_command, env_vars = get_inference_dbt_bash_command(
         runtime_env, "ticker_cluster_volatility_summary"
     )
     dbt_run_ticker_cluster_volatility_summary = BashOperator(
@@ -145,7 +145,7 @@ with DAG(
     # ------------------------------------------------------------------
     # 3. Past / future avg prices
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(
+    bash_command, env_vars = get_inference_dbt_bash_command(
         runtime_env, "fibonacci_past_offset_avg_prices"
     )
     dbt_run_metrics_fibonacci_past_offset_avg_prices = BashOperator(
@@ -156,7 +156,7 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(
+    bash_command, env_vars = get_inference_dbt_bash_command(
         runtime_env, "fibonacci_future_offset_avg_prices"
     )
     dbt_run_metrics_fibonacci_future_offset_avg_prices = BashOperator(
@@ -170,7 +170,7 @@ with DAG(
     # ------------------------------------------------------------------
     # 4. Growth + excess return chain
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(
+    bash_command, env_vars = get_inference_dbt_bash_command(
         runtime_env, "fibonacci_offset_growth_rates"
     )
     dbt_run_metrics_fibonacci_offset_growth_rates = BashOperator(
@@ -181,7 +181,7 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "excess_return")
+    bash_command, env_vars = get_inference_dbt_bash_command(runtime_env, "excess_return")
     dbt_run_metrics_excess_return = BashOperator(
         task_id="dbt_run_metrics_excess_return",
         bash_command=bash_command,
@@ -190,7 +190,7 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "excess_return_inc")
+    bash_command, env_vars = get_inference_dbt_bash_command(runtime_env, "excess_return_inc")
     dbt_run_metrics_excess_return_inc = BashOperator(
         task_id="dbt_run_metrics_excess_return_inc",
         bash_command=bash_command,
@@ -199,7 +199,7 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "excess_return_joined")
+    bash_command, env_vars = get_inference_dbt_bash_command(runtime_env, "excess_return_joined")
     dbt_run_excess_return_joined = BashOperator(
         task_id="dbt_run_excess_return_joined",
         bash_command=bash_command,
@@ -208,7 +208,7 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command(runtime_env, "excess_return_scored")
+    bash_command, env_vars = get_inference_dbt_bash_command(runtime_env, "excess_return_scored")
     dbt_run_excess_return_scored = BashOperator(
         task_id="dbt_run_excess_return_scored",
         bash_command=bash_command,
@@ -220,7 +220,7 @@ with DAG(
     # ------------------------------------------------------------------
     # 5. Downstream metrics model
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_dbt_bash_command(
+    bash_command, env_vars = get_inference_dbt_bash_command(
         runtime_env, "return_likelihood_matrix"
     )
     dbt_run_metrics_return_likelihood_matrix = BashOperator(
