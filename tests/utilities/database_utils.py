@@ -1,11 +1,10 @@
-# File: database_utils.py
+
 
 import os
 from psycopg2 import pool
 from dotenv import load_dotenv
 
-# Load environment variables from a specific .env file
-# Adjust the path as necessary for your project
+# Load .env
 load_dotenv('/Users/kevin/Dropbox/applications/ELT/.env.py')
 
 class Database:
