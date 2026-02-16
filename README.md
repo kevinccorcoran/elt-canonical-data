@@ -4,6 +4,12 @@
 
 This repository contains the infrastructure, ingestion pipelines, and canonical data models for the AlphaStream financial data platform.
 
+## Data Lineage
+
+![DBT Lineage Graph](tools/dbt_lineage_graph.png)
+
+*The graph above visualizes the flow from raw data sources through transformations to the final canonical data models.*
+
 ## Project Timeline
 
 *   **2024 — Foundation & Prototype**
