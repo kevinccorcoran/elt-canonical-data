@@ -13,14 +13,14 @@ import polars as pl
 from datapipeline.config.ingestion_targets import TICKERS
 
 
-# Logging for batch ETL visibility
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
 
-# Unified Airflow Variable / env-var accessor
+
 try:
     from airflow.models import Variable
 
@@ -34,7 +34,7 @@ except ModuleNotFoundError:
         return os.getenv(key, default)
 
 
-# Mask credentials for safe connection logging
+
 def _safe_dsn(dsn: str) -> str:
     try:
         p = urlparse(dsn)
@@ -47,7 +47,7 @@ def _safe_dsn(dsn: str) -> str:
         return "***"
 
 
-# Resolve DB connection string based on environment
+
 ENV_DB = (get_var("DB_DATABASE", default="dev") or "dev").lower()
 
 if ENV_DB == "staging":
@@ -64,7 +64,7 @@ if not connection_string:
     logging.error("No connection string found for ENV_DB=%s", ENV_DB)
     sys.exit(1)
 
-# Normalize DSN for psycopg2
+# Normalize DSN
 if connection_string.startswith("postgresql+psycopg2://"):
     connection_string = connection_string.replace(
         "postgresql+psycopg2://", "postgresql://", 1
@@ -75,17 +75,17 @@ elif connection_string.startswith("postgres://"):
 logging.info("ENV_DB=%s; using connection string %s", ENV_DB, _safe_dsn(connection_string))
 
 
-# ETL constants: source → target (raw → cdm)
+# ETL constants
 SOURCE_SCHEMA = "raw"
 SOURCE_TABLE = "api_data_ingestion_massive"
 TARGET_SCHEMA = "cdm"
 TARGET_TABLE = "api_data_ingestion_massive"
 
-# Batch sizes tuned for memory + COPY throughput
+# Batch sizes
 SUB_BATCH_TICKERS = 50
 INSERT_BATCH_ROWS = 400_000
 
-# Explicit column order for COPY consistency
+# Column order for COPY
 COPY_COLUMN_ORDER = [
     "date",
     "ticker",
@@ -105,7 +105,7 @@ COPY_COLUMN_ORDER = [
 ]
 
 
-# Normalize psycopg2 row values into a stable Polars schema
+# Normalize psycopg2 row values into a Polars-safe dict
 def clean_row(row: tuple, colnames: list) -> dict:
     out = {}
     for col, val in zip(colnames, row):
@@ -117,7 +117,7 @@ def clean_row(row: tuple, colnames: list) -> dict:
             out[col] = val.date()
             continue
 
-        # Keep processed_at stringy to avoid dtype conflicts; overwritten later anyway
+        # Keep processed_at as string to avoid dtype conflicts
         if col == "processed_at":
             if isinstance(val, datetime):
                 out[col] = val.replace(microsecond=0).isoformat()
@@ -127,7 +127,7 @@ def clean_row(row: tuple, colnames: list) -> dict:
                 out[col] = str(val)
             continue
 
-        # Keep capital_gains as Utf8 to match target schema and avoid mixed types
+        # Keep capital_gains as Utf8 to match target schema
         if col == "capital_gains" and val is not None and not isinstance(val, str):
             out[col] = str(val)
             continue
@@ -137,7 +137,7 @@ def clean_row(row: tuple, colnames: list) -> dict:
     return out
 
 
-# Expand each ticker into a continuous calendar and label gaps as synthetic
+# Expand each ticker into a full date range, labelling gaps as synthetic
 def generate_full_date_range(df: pl.DataFrame) -> pl.DataFrame:
     if df.is_empty():
         return pl.DataFrame()
@@ -177,7 +177,7 @@ def generate_full_date_range(df: pl.DataFrame) -> pl.DataFrame:
     return pl.concat(results)
 
 
-# Batch ETL entrypoint: assign tickers → build synthetic rows → COPY to temp → merge to target
+# ETL entrypoint
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=int, required=True)
@@ -191,7 +191,7 @@ def main() -> None:
     start_date = date.fromisoformat(args.start_date)
     end_date = date.fromisoformat(args.end_date)
 
-    # Single run timestamp used for consistent processed_at across all inserted rows
+    # Consistent processed_at across all rows in this run
     process_ts = datetime.now(timezone.utc).replace(microsecond=0)
     processed_at = process_ts + timedelta(hours=2)
 
@@ -209,7 +209,7 @@ def main() -> None:
         with psycopg2.connect(connection_string) as conn:
             conn.autocommit = False
 
-            # Sanity log: confirm database/user context and Read-Write status
+            # Log DB context
             with conn.cursor() as cur:
                 cur.execute("SELECT current_database(), current_user, pg_is_in_recovery()")
                 db_name, db_user, is_recovery = cur.fetchone()
@@ -224,7 +224,7 @@ def main() -> None:
                  logging.critical("!!! DATABASE IS IN READ-ONLY MODE. INGESTION WILL FAIL. !!!")
                  logging.critical("This usually means Storage is Full or this is a Read Replica.")
 
-            # Temp staging table for this run (enables COPY + single merge step)
+            # Temp table for this run
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
@@ -267,7 +267,7 @@ def main() -> None:
                 logging.info("No tickers assigned to this batch. Exiting.")
                 return
 
-            # Process tickers in sub-batches to cap memory usage
+            # Process tickers in sub-batches to limit memory
             for sub_start in range(0, len(batch_tickers), SUB_BATCH_TICKERS):
                 sub_tickers = batch_tickers[sub_start : sub_start + SUB_BATCH_TICKERS]
                 logging.info(
@@ -279,7 +279,7 @@ def main() -> None:
 
                 placeholders = ",".join(["%s"] * len(sub_tickers))
 
-                # Pull raw rows for this sub-batch
+                # Pull raw rows
                 with conn.cursor() as cur:
                     cur.execute(
                         f"""
@@ -298,7 +298,7 @@ def main() -> None:
 
                 cleaned = [clean_row(r, col_names) for r in raw_rows]
 
-                # Explicit schema avoids dtype inference surprises during joins/fills
+                # Explicit schema to avoid dtype inference issues
                 df_schema = {
                     "date": pl.Date,
                     "open": pl.Float64,
@@ -317,13 +317,13 @@ def main() -> None:
 
                 raw_df = pl.DataFrame(cleaned, schema=df_schema)
 
-                # Expand to continuous calendar and label missing days as synthetic
+                # Fill gaps with synthetic rows
                 full_df = generate_full_date_range(raw_df)
                 if full_df.is_empty():
                     logging.info("Full DF empty after synthetic expansion.")
                     continue
 
-                # Backfill synthetic rows from the next available natural observation per ticker
+                # Backfill from next natural observation
                 cols_to_fill = [
                     "open",
                     "high",
@@ -357,12 +357,12 @@ def main() -> None:
                     ]
                 )
 
-                # Recast after fill to restore expected numeric types
+                # Recast after fill
                 full_df = full_df.with_columns(
                     pl.col("volume").cast(pl.Int64, strict=False)
                 )
 
-                # Add metadata + stable identifiers for merge/dedupe
+                # Add metadata and identifiers
                 full_df = full_df.with_columns(
                     [
                         pl.when(pl.col("adj_close").is_null())
@@ -384,7 +384,7 @@ def main() -> None:
                     logging.info("No rows to insert for this sub-batch.")
                     continue
 
-                # COPY into temp table in row chunks to avoid oversized buffers
+                # COPY into temp table in chunks
                 for start in range(0, full_df.height, INSERT_BATCH_ROWS):
                     batch_df = full_df[start : start + INSERT_BATCH_ROWS].select(COPY_COLUMN_ORDER)
 
@@ -409,7 +409,7 @@ def main() -> None:
 
                 gc.collect()
 
-            # Merge temp → target with conflict-safe insert
+            # Merge temp → target
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT COUNT(*), MIN(ticker_date_id), MAX(ticker_date_id) "

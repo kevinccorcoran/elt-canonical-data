@@ -8,10 +8,10 @@ import io
 import sys
 import gc
 
-# Basic logging for long-running ETL visibility
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Resolve and normalize database connection string
+
 connection_string = os.getenv("DATABASE_URL")
 if not connection_string:
     logging.error("DATABASE_URL environment variable not set.")
@@ -19,7 +19,7 @@ if not connection_string:
 if connection_string.startswith("postgresql+psycopg2://"):
     connection_string = connection_string.replace("postgresql+psycopg2://", "postgresql://", 1)
 
-# Single run-level timestamps for consistent processed_at values
+# Run-level timestamps
 PROCESS_TS = datetime.now(timezone.utc).replace(microsecond=0)
 PROCESSED_AT_PLUS_2H = PROCESS_TS + timedelta(hours=2)
 logging.info(
@@ -27,7 +27,7 @@ logging.info(
     PROCESS_TS.isoformat(), PROCESSED_AT_PLUS_2H.isoformat()
 )
 
-# Normalize psycopg2 row output into a stable, Polars-safe dict
+# Normalize psycopg2 row to a Polars-safe dict
 def clean_row(row, colnames):
     out = {}
     for col, val in zip(colnames, row):
@@ -51,7 +51,7 @@ def clean_row(row, colnames):
         out[col] = val
     return out
 
-# Expand each ticker into a continuous calendar range and label gaps as synthetic
+# Expand each ticker into a full date range, labelling gaps as synthetic
 def generate_full_date_range(df: pl.DataFrame) -> pl.DataFrame:
     if df.is_empty():
         return pl.DataFrame()
@@ -78,7 +78,7 @@ def generate_full_date_range(df: pl.DataFrame) -> pl.DataFrame:
         full_data.append(joined)
     return pl.concat(full_data) if full_data else pl.DataFrame()
 
-# Main ETL: backfill calendar gaps and append into CDM table
+# ETL: backfill calendar gaps and insert into CDM
 try:
     with psycopg2.connect(connection_string) as conn:
         schema_name = "raw"
@@ -88,7 +88,7 @@ try:
         batch_size = 50
         insert_batch_size = 400_000
 
-        # Load all distinct tickers from source
+        # Load distinct tickers from source
         with conn.cursor() as cursor:
             cursor.execute(f"""
                 SELECT DISTINCT ticker
@@ -98,11 +98,11 @@ try:
             tickers = [row[0] for row in cursor.fetchall()]
             logging.info("Total tickers found: %d", len(tickers))
 
-        # Hard override: restrict processing to a predefined ticker universe
+        # Override: restrict to predefined ticker universe
         tickers = [t for t in tickers if t in TICKERS_FULL]
         logging.info("Filtered tickers (override): %s", tickers)
 
-        # Load existing IDs once to avoid duplicate inserts
+        # Load existing IDs to avoid duplicates
         with conn.cursor() as cursor:
             cursor.execute(f"""
                 SELECT ticker_date_id
@@ -111,12 +111,12 @@ try:
             existing_ids = {row[0] for row in cursor.fetchall()}
             logging.info("Existing IDs in target table: %d", len(existing_ids))
 
-        # Process tickers in manageable batches
+        # Process in batches
         for i in range(0, len(tickers), batch_size):
             ticker_batch = tickers[i:i + batch_size]
             logging.info("Processing batch %d–%d: %s", i + 1, i + len(ticker_batch), ticker_batch)
 
-            # Fetch raw source rows for this batch
+            # Fetch raw rows
             placeholders = ",".join(["%s"] * len(ticker_batch))
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -133,7 +133,7 @@ try:
                 logging.info("No data found for this batch.")
                 continue
 
-            # Clean and materialize into Polars with explicit schema
+            # Clean and build DataFrame
             cleaned = [clean_row(row, colnames) for row in raw_data]
             pl_df = pl.DataFrame(cleaned, schema={
                 "date": pl.Date,
@@ -151,14 +151,14 @@ try:
                 "ticker_date_id": pl.Utf8,
             })
 
-            # Insert synthetic rows for missing dates
+            # Fill missing dates with synthetic rows
             full_df = generate_full_date_range(pl_df)
             if full_df.is_empty():
                 del pl_df
                 gc.collect()
                 continue
 
-            # Add metadata, rounding rules, and identifiers
+            # Add metadata and identifiers
             full_df = full_df.with_columns(
                 [
                     pl.when(pl.col("adj_close").is_null())
@@ -173,7 +173,7 @@ try:
                 ]
             ).sort(["ticker", "date"])
 
-            # Backfill synthetic rows from next natural observation
+            # Backfill synthetic rows
             cols_to_bfill = [
                 "open", "high", "low", "close", "volume",
                 "dividends", "stock_splits", "adj_close", "capital_gains",
@@ -198,7 +198,7 @@ try:
                 ]
             ).with_columns(pl.col("volume").cast(pl.Int64, strict=False))
 
-            # Final selection, deduplication, and exclusion of existing rows
+            # Deduplicate and exclude existing rows
             full_df = (
                 full_df.select(
                     [
@@ -216,7 +216,7 @@ try:
                 gc.collect()
                 continue
 
-            # Bulk insert via COPY in large chunks
+            # Bulk insert via COPY
             for start in range(0, full_df.shape[0], insert_batch_size):
                 insert_batch = full_df[start:start + insert_batch_size]
                 csv_buffer = io.StringIO()
