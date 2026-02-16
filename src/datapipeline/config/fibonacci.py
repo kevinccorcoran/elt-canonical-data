@@ -1,4 +1,4 @@
-from itertools import accumulate  # Optional: not currently used
+from itertools import accumulate
 
 
 def fibonacci(n):
