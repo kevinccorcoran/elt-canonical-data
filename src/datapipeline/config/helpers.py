@@ -11,12 +11,12 @@ def save_to_database(
     connection_string: str,
     conflict_key: str = None,
 ) -> None:
-    # No-op guard to avoid unnecessary DB work
+
     if df.is_empty():
         logging.info("No rows to insert — DataFrame is empty.")
         return
 
-    # Normalize connection string for psycopg2 compatibility
+
     if connection_string.startswith("postgresql+psycopg2://"):
         connection_string = connection_string.replace(
             "postgresql+psycopg2://", "postgresql://", 1
@@ -26,7 +26,7 @@ def save_to_database(
     row_count = df.height
     logging.info(f"Inserting {row_count:,} rows into {schema_name}.{table_name}...")
 
-    # Serialize DataFrame to CSV buffer for fast COPY ingestion
+
     csv_buffer = io.StringIO()
     df.write_csv(
         csv_buffer,
@@ -37,7 +37,7 @@ def save_to_database(
 
     col_list_str = ", ".join([f'"{c}"' for c in columns])
 
-    # Determine conflict handling strategy (explicit > inferred > none)
+
     if conflict_key is not None:
         conflict_clause = f"ON CONFLICT ({conflict_key}) DO NOTHING"
     else:
@@ -49,7 +49,7 @@ def save_to_database(
             conflict_clause = ""
             logging.warning(f"No conflict key detected for {table_name}.")
 
-    # COPY into temp table, then INSERT into target with conflict handling
+
     copy_sql = f"""
         COPY tmp_ingest ({col_list_str})
         FROM STDIN WITH (
@@ -67,7 +67,7 @@ def save_to_database(
     """
 
     try:
-        # Use temp table + COPY for performance and atomicity
+
         with psycopg2.connect(connection_string) as conn:
             with conn.cursor() as cur:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name};")
@@ -85,6 +85,6 @@ def save_to_database(
         logging.info(f"Successfully inserted {row_count:,} rows.")
 
     except Exception as e:
-        # Log and re-raise to fail upstream orchestration (e.g. Airflow)
+
         logging.error(f"Failed to insert into {schema_name}.{table_name}: {e}")
         raise

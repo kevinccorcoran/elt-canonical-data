@@ -1,10 +1,8 @@
-# datapipeline/config/env.py
+
 import os
 import logging
 
-# ──────────────────────────────────────────────
-# Unified accessor: Airflow Variables → env vars
-# ──────────────────────────────────────────────
+# Airflow Variables → env vars
 try:
     from airflow.models import Variable
 
@@ -25,10 +23,7 @@ except ModuleNotFoundError:
         return os.getenv(key, default)
 
 
-# ──────────────────────────────────────────────
-# Resolve environment (dev / staging / prod)
-# Source of truth = DB_DATABASE
-# ──────────────────────────────────────────────
+# Resolve environment from DB_DATABASE
 
 RAW_ENV = (get_var("DB_DATABASE", "dev") or "dev").lower()
 
@@ -44,13 +39,7 @@ else:
 logging.info("Resolved RAW_ENV='%s' → ENV='%s'", RAW_ENV, ENV)
 
 
-# ──────────────────────────────────────────────
 # Resolve database connection
-# Works for:
-#  - Docker
-#  - Airflow
-#  - Local dev (.envrc)
-# ──────────────────────────────────────────────
 
 DATABASE_URL = (
     get_var("DATABASE_URL")
