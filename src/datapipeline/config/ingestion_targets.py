@@ -154,7 +154,7 @@ else:
 
 
 # Explicitly log resolved ingestion targets
-logging.error(
+logging.info(
     "INGESTION_TARGETS: ENV=%r | TICKERS_SUB=%s | TICKERS_FULL=%s | TICKERS=%s",
     ENV, TICKERS_SUB, TICKERS_FULL, TICKERS
 )

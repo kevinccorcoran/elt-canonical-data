@@ -1,6 +1,6 @@
 # Security Design
 
-**Purpose**: To explain the threat model, network security, and access controls for the platform.
+**Purpose**: To explain the threat model, network security, and access controls for the system.
 
 ---
 

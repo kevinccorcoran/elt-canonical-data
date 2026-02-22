@@ -27,21 +27,7 @@ logging.basicConfig(
 )
 
 
-try:
-    from airflow.models import Variable
-
-    def get_var(key: str, default=None):
-        try:
-            return Variable.get(key)
-        except Exception:
-            return os.getenv(key, default)
-
-except ModuleNotFoundError:
-    def get_var(key: str, default=None):
-        return os.getenv(key, default)
-
-
-from datapipeline.config.env import ENV
+from datapipeline.config.env import ENV, get_var
 
 
 def _env_override(key_base: str, env: str, default: Optional[str] = None):
@@ -53,16 +39,23 @@ def _build_dsn(env: str) -> str:
     password = _env_override("DB_PASSWORD", env, "")
     host = _env_override("DB_HOST", env, "postgres")
     port = _env_override("DB_PORT", env, "5432")
+    sslmode = _env_override("DB_SSLMODE", env, "prefer")
 
     default_db = get_var("DB_DATABASE", "dev")
     name = _env_override("DB_NAME", env, default_db)
-    return (
+    
+    dsn = (
         f"postgresql+psycopg2://{user}:{quote_plus(password or '')}"
         f"@{host}:{port}/{name}"
     )
+    if sslmode:
+        dsn += f"?sslmode={sslmode}"
+    return dsn
 
 
 def _safe_dsn(dsn: str) -> str:
+    if not dsn:
+        return "None"
     p = urlparse(dsn)
     return (
         f"{p.scheme}://{p.username or ''}:***@{p.hostname or ''}"
@@ -72,17 +65,15 @@ def _safe_dsn(dsn: str) -> str:
 
 DATABASE_URL = get_var("DATABASE_URL")
 
-if DATABASE_URL and "REPLACEME" in DATABASE_URL:
-    logging.warning("DATABASE_URL contains placeholder. Rebuilding from granular vars.")
-    DATABASE_URL = None
-
 if not DATABASE_URL:
-    if ENV == "heroku_postgres":
-        pass  # Should have been caught above
+    if ENV == "prod":
+        key = "DATABASE_URL_PROD"
+    elif ENV == "staging":
+        key = "DATABASE_URL_STAGING"
     else:
-        key = "DATABASE_URL_STAGING" if ENV == "staging" else "DATABASE_URL_DEV"
+        key = "DATABASE_URL_DEV"
 
-        DATABASE_URL = get_var(key) or _build_dsn(ENV)
+    DATABASE_URL = get_var(key) or _build_dsn(ENV)
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace(
