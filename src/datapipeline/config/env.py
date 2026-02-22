@@ -7,12 +7,26 @@ try:
     from airflow.models import Variable
 
     def get_var(key: str, default=None):
+        """
+        Prioritize OS environment variables, then Airflow variables.
+        Filters out 'REPLACEME' placeholders.
+        """
         val = os.getenv(key)
+
+        # If OS env exists but is a placeholder, treat as None
+        if val and "REPLACEME" in val:
+            logging.debug("Ignoring placeholder OS ENV for '%s'", key)
+            val = None
+
         if val is not None:
             logging.info("Resolved var '%s' from OS ENV", key)
             return val
+
         try:
             val = Variable.get(key)
+            if val and "REPLACEME" in val:
+                logging.info("Ignoring placeholder Airflow Variable for '%s'", key)
+                return default
             logging.info("Resolved var '%s' from Airflow Variable", key)
             return val
         except Exception:
@@ -20,7 +34,10 @@ try:
 
 except ModuleNotFoundError:
     def get_var(key: str, default=None):
-        return os.getenv(key, default)
+        val = os.getenv(key)
+        if val and "REPLACEME" in val:
+            return default
+        return val or default
 
 
 # Resolve environment from DB_DATABASE

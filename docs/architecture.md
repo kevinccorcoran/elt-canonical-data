@@ -2,13 +2,13 @@
 
 ![Production Environment Architecture](../production_environment:_elt_canonical_data.png)
 
-This document explains the system design, data flow, and environment strategy for the AlphaStream platform.
+This document explains the system design, data flow, and environment strategy for the AlphaStream system.
 
 ---
 
 ## 1. System Overview
 
-The platform uses an **ELT (Extract, Load, Transform)** pattern:
+The system uses an **ELT (Extract, Load, Transform)** pattern:
 
 1.  **Extract**: Python scripts fetch data from APIs (Massive, Yahoo, Polygon).
 2.  **Load**: Raw data is saved immediately to PostgreSQL (`raw` schema).
