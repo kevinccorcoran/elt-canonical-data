@@ -39,7 +39,7 @@ edge_cfg = {
     "serve": {"color": "#7B1FA2", "penwidth": "3.0"}
 }
 
-with Diagram("AlphaStream: Data Pipeline Architecture", show=False, direction="LR", 
+with Diagram("AlphaStream System Architecture", show=False, direction="LR", 
              graph_attr=graph_attr, node_attr=node_attr):
 
     # 1. Global Data Sources (Input)
@@ -47,7 +47,7 @@ with Diagram("AlphaStream: Data Pipeline Architecture", show=False, direction="L
         massive = InternetAlt1("Massive Data API")
         yfinance = InternetAlt1("Yahoo Finance API")
 
-    # 2. Production Platform
+    # 2. Production System
     with Cluster("DigitalOcean Production Environment", graph_attr={"bgcolor": "#E1F5FE", "pencolor": "#0288D1", "penwidth": "2.0"}):
         
         # A. COMPUTE RUNTIME
