@@ -1,8 +1,8 @@
 # ELT Canonical Data
 
-![Architecture Diagram](tools/alphastream:_data_pipeline_architecture.png)
+![Architecture Diagram](tools/alphastream_system_architecture.png)
 
-This repository contains the infrastructure, ingestion pipelines, and canonical data models for the AlphaStream financial data platform.
+This repository contains the infrastructure, ingestion pipelines, and canonical data models for the AlphaStream financial data system.
 
 ## Data Lineage
 
