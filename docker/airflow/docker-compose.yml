@@ -58,6 +58,7 @@ services:
       - ../../dbt:/opt/elt-canonical-data/dbt
       - ../../.dbt:/home/airflow/.dbt
       - ../../../elt-inference-models:/opt/elt-inference-models
+      - ../../scripts:/opt/airflow/scripts
 
     ports:
       - "8080:8080"
