@@ -5,7 +5,7 @@ from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.bash import BashOperator
 
-from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command
+from utils.dbt_helpers import get_inference_dbt_bash_command, get_inference_dbt_deps_command
 
 # Runtime environment (dev / staging / prod) is resolved at execution time
 # from Airflow Variables, allowing the same DAG code to run across environments.
@@ -37,7 +37,7 @@ with DAG(
     is_paused_upon_creation=False,
 ) as dag:
 
-    bash_command, env_vars = get_dbt_deps_command(runtime_env)
+    bash_command, env_vars = get_inference_dbt_deps_command(runtime_env)
 
     dbt_deps = BashOperator(
         task_id="dbt_deps",
@@ -49,7 +49,7 @@ with DAG(
 
     # Build the dbt CLI command and environment overrides
     # for the specific inference model being executed.
-    bash_command, env_vars = get_dbt_bash_command(
+    bash_command, env_vars = get_inference_dbt_bash_command(
         runtime_env,
         "return_expectation_decomposition",
     )

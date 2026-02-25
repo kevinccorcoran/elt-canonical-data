@@ -140,7 +140,6 @@ def get_dbt_bash_command(
         env_vars["DB_SSLMODE"] = "require"
     elif env == "staging":
         env_vars["DBT_TARGET"] = "staging"
-        env_vars["DB_SSLMODE"] = "require"
     else:
         env_vars["DBT_TARGET"] = "dev"
 
@@ -186,7 +185,6 @@ def get_inference_dbt_bash_command(
         env_vars["DB_SSLMODE"] = "require"
     elif env == "staging":
         env_vars["DBT_TARGET"] = "staging"
-        env_vars["DB_SSLMODE"] = "require"
     else:
         env_vars["DBT_TARGET"] = "dev"
 

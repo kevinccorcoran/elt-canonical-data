@@ -29,14 +29,6 @@ models:
       # Default schema for application models (canonical data model)
       +schema: cdm
 
-      # Analytical and aggregate models
-      metrics:
-        +schema: metrics
-
-      # Model outputs, predictions, and inference-related tables
-      inference:
-        +schema: inference
-
       # Data validation, checks, and quality-related models
       data_quality:
         +schema: data_quality
