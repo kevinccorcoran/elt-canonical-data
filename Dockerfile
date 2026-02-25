@@ -2,7 +2,7 @@ FROM apache/airflow:2.9.3
 
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git && \
+    apt-get install -y --no-install-recommends git r-base libpq-dev r-cran-dBI r-cran-rpostgres r-cran-shiny r-cran-jsonlite && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
