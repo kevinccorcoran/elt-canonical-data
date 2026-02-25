@@ -1,0 +1,37 @@
+[
+    {
+        "bucket": 1,
+        "pct": 0.11,
+        "returns": 61.65
+    },
+    {
+        "bucket": 2,
+        "pct": 4.0,
+        "returns": 36.45
+    },
+    {
+        "bucket": 3,
+        "pct": 12.0,
+        "returns": 16.32
+    },
+    {
+        "bucket": 4,
+        "pct": 28.0,
+        "returns": 13.23
+    },
+    {
+        "bucket": 5,
+        "pct": 39.0,
+        "returns": 13.75
+    },
+    {
+        "bucket": 6,
+        "pct": 15.0,
+        "returns": -0.44
+    },
+    {
+        "bucket": 7,
+        "pct": 1.0,
+        "returns": 5.84
+    }
+]
