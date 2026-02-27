@@ -23,29 +23,59 @@ if (file.exists(file_path)) {
   stop("data.json not found! Please run export_inference_data.py first to generate the dataset.")
 }
 
-# Open a PNG file to save the plot
-png("bucket_analysis.png", width=800, height=500)
+# To save the interactive plot, we need plotly and htmlwidgets
+if (!requireNamespace("plotly", quietly = TRUE)) {
+  install.packages("plotly", repos = "http://cran.us.r-project.org")
+}
+if (!requireNamespace("htmlwidgets", quietly = TRUE)) {
+  install.packages("htmlwidgets", repos = "http://cran.us.r-project.org")
+}
+library(plotly)
+library(htmlwidgets)
 
-# Set margins to allow for the second y-axis
-par(mar = c(5, 4, 4, 4) + 0.3)  
+# Create the interactive dual-axis plot using plotly
+fig <- plot_ly(df, x = ~bucket)
 
-# Plot the bar chart for Record Percentage (Left Axis)
-barplot(df$pct, names.arg = df$bucket, col = "lightblue", 
-        ylab = "Record Percentage per ID (%)", 
-        xlab = "Past Excess Return Z-Bucket",
-        main = "Excess Returns vs. Distribution by Z-Bucket",
-        ylim = c(0, 45))
+# Add the bar chart for Record Percentage (Left Axis)
+fig <- fig %>% add_bars(y = ~pct, 
+                        name = 'Record Percentage (%)', 
+                        marker = list(color = 'lightblue'),
+                        hovertemplate = "Bucket: %{x}<br>Percentage: %{y:.2f}%<extra></extra>")
 
-# Tell R we want to overlay the next plot
-par(new = TRUE)
+# Add the line chart for Median Returns (Right Axis)
+fig <- fig %>% add_lines(y = ~returns, 
+                         name = 'Median Excess Return (%)', 
+                         yaxis = 'y2',
+                         line = list(color = 'firebrick', width = 3), 
+                         marker = list(color = 'firebrick', size = 8),
+                         hovertemplate = "Bucket: %{x}<br>Return: %{y:.2f}%<extra></extra>")
 
-# Plot the line chart for Median Returns (Right Axis)
-plot(df$bucket, df$returns, type = "b", pch = 16, col = "firebrick", lwd = 3,
-     axes = FALSE, xlab = "", ylab = "", ylim = c(-5, 65))
+# Configure the dual-axis layout and styling
+fig <- fig %>% layout(
+  title = "Excess Returns vs. Distribution by Z-Bucket",
+  xaxis = list(
+    title = "Past Excess Return Z-Bucket",
+    tickmode = "linear",
+    dtick = 1
+  ),
+  yaxis = list(
+    title = "Record Percentage per ID (%)", 
+    range = c(0, max(df$pct) * 1.2)
+  ),
+  yaxis2 = list(
+    title = "Median Future Excess Return vs SPY (%)",
+    tickfont = list(color = "firebrick"),
+    titlefont = list(color = "firebrick"),
+    overlaying = "y",
+    side = "right",
+    range = c(min(df$returns) - 5, max(df$returns) + 5)
+  ),
+  margin = list(l = 50, r = 60, b = 50, t = 50),
+  showlegend = TRUE,
+  hovermode = "x unified" # Shows both values when hovering over a bucket
+)
 
-# Add the Right Axis and its label
-axis(side = 4, at = pretty(range(df$returns)))
-mtext("Median Future Excess Return vs SPY (%)", side = 4, line = 3, col="firebrick")
+# Save the interactive plot as an HTML file
+saveWidget(fig, "bucket_analysis.html", selfcontained = TRUE)
 
-# Close the file
-dev.off()
+cat("Interactive plot successfully saved to 'bucket_analysis.html'\n")
