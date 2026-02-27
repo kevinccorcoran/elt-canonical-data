@@ -48,11 +48,6 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       MASSIVE_API_KEY: ${MASSIVE_API_KEY}
 
-      PROD_DB_HOST: ${PROD_DB_HOST}
-      PROD_DB_PORT: ${PROD_DB_PORT}
-      PROD_DB_USER: ${PROD_DB_USER}
-      PROD_DB_PASSWORD: ${PROD_DB_PASSWORD}
-
       PROJECT_ROOT: /opt/elt-canonical-data
       PYTHONPATH: /opt/elt-canonical-data/src
 

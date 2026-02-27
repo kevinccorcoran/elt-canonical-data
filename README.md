@@ -4,12 +4,6 @@
 
 This repository contains the infrastructure, ingestion pipelines, and canonical data models for the AlphaStream financial data system.
 
-## System Environments
-
-![Environment Architecture](tools/environment_architecture.png)
-
-*The system uses Docker to ensure portable compute environments (Airflow, dbt, Python scripts) across both local development (connected to local DEV/STAGING PostgreSQL databases) and the Cloud DigitalOcean environment (connected to managed PROD PostgreSQL).*
-
 ## Data Lineage
 
 ![DBT Lineage Graph](tools/dbt_lineage_graph.png)
