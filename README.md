@@ -10,6 +10,15 @@ This repository contains the infrastructure, ingestion pipelines, and canonical 
 
 *The graph above visualizes the flow from raw data sources through transformations to the final canonical data models.*
 
+## Interactive Analytics Dashboard
+
+![Dashboard Preview](tools/dashboard_preview.png)
+
+A live, cloud-connected R Shiny and Plotly dashboard used for data analysis and predictive inference visualization.
+*   **Dual-Axis Visualizations:** Translates complex statistical relationships (P05/P95 spreads vs. historical outcomes) into highly interactive floating range bars.
+*   **End-To-End Ownership:** Complete pipeline representation—from extraction via `psycopg2`, complex aggregations in `dbt`, to the final executive-facing UI.
+*   **Data Integrity:** Validated historical datasets connected securely from managed DB infrastructure using real-time parameter injection and `htmlwidgets`.
+
 ## Project Timeline
 
 *   **2024 — Foundation & Prototype**

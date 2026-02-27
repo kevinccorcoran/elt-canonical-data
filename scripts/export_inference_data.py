@@ -37,7 +37,11 @@ def export_data():
     SELECT 
         past_excess_return_z_bucket_num as bucket,
         record_pct_per_id as pct,
-        median_future_excess_return_vs_spy as returns
+        median_future_excess_return_vs_spy as returns,
+        p05_past_excess_return_vs_spy as past_p05,
+        p95_past_excess_return_vs_spy as past_p95,
+        p05_future_excess_return_vs_spy as future_p05,
+        p95_future_excess_return_vs_spy as future_p95
     FROM inference.return_expectation_decomposition
     WHERE fibonacci_lag_value = 4 
       AND future_fibonacci_lag_value = 7
