@@ -47,8 +47,11 @@ with DAG(
         do_xcom_push=False,
     )
 
+    import os
+    runtime_env = os.getenv("ENV", os.getenv("DB_DATABASE", "dev"))
+
     # Use dbt helpers for consistency and to ensure deps are installed
-    bash_command, env_vars = get_dbt_deps_command("prod") # Bulk is usually prod
+    bash_command, env_vars = get_dbt_deps_command(runtime_env)
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=bash_command,
@@ -57,7 +60,7 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_dbt_bash_command("prod", "ingest_massive_inc")
+    bash_command, env_vars = get_dbt_bash_command(runtime_env, "ingest_massive_inc")
     run_dbt = BashOperator(
         task_id="dbt_run_massive_inc",
         bash_command=bash_command,
