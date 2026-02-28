@@ -47,30 +47,48 @@ docker compose down     # Stop
 
 ### D. Switching Airflow Environment (dev / staging / prod)
 
-The Airflow container's environment is controlled by **`docker/airflow/.env`**.
-The key variable is `DB_DATABASE`, which determines:
-
-| `DB_DATABASE` | `ENV` | Database | Tickers |
+| Environment | Database | Tickers | Use case |
 | :--- | :--- | :--- | :--- |
-| `dev` | dev | Local dev DB | `TICKERS_SUB` (3 tickers) |
-| `staging` | staging | Local staging DB | `TICKERS_FULL` (1738 tickers) |
-| `prod` | prod | Production DB | `TICKERS_FULL` (1738 tickers) |
+| **dev** | Local `dev` DB | `TICKERS_SUB` (3) | Fast dev/test cycles |
+| **staging** | Local `staging` DB | `TICKERS_FULL` (1738) | Full backfill locally |
+| **prod** | Remote DigitalOcean DB | `TICKERS_FULL` (1738) | Production (server only) |
 
-**To switch environments:**
+**File to edit:** `docker/airflow/.env`
+
+**Step 1 — Disable direnv** (it overrides `.env` values):
 
 ```bash
 cd docker/airflow
+direnv deny .
+unset DB_HOST DB_PORT DB_USER DB_PASSWORD DB_DATABASE DATABASE_URL ENV
+```
 
-# 1. Edit .env → change DB_DATABASE to dev, staging, or prod
-#    Also update DATABASE_URL to match the target database
+**Step 2 — Edit `.env`**, change these two lines:
 
-# 2. Recreate the container to pick up the new values
+To switch to **dev** (3 tickers, fast):
+```
+DB_DATABASE=dev
+DATABASE_URL=postgresql://postgres:@host.docker.internal:5432/dev
+```
+
+To switch to **staging** (1738 tickers, full backfill):
+```
+DB_DATABASE=staging
+DATABASE_URL=postgresql://postgres:@host.docker.internal:5432/staging
+```
+
+**Step 3 — Recreate the container:**
+
+```bash
 docker compose up -d airflow
 ```
 
-> ⚠️ **Important:** Shell environment variables (e.g. from `direnv`) take priority
-> over `.env` file values. If switching doesn't work, run `unset DB_DATABASE`
-> and `unset DATABASE_URL` in your shell before `docker compose up`.
+**Step 4 — Verify:**
+
+```bash
+docker exec airflow bash -c 'echo DB_HOST=$DB_HOST DB_DATABASE=$DB_DATABASE ENV=$ENV'
+# Should show: DB_HOST=host.docker.internal DB_DATABASE=dev ENV=dev
+```
 
 ---
 
