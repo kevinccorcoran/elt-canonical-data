@@ -1,5 +1,5 @@
 import logging
-from datapipeline.config.env import ENV, get_var
+from datapipeline.config.env import ENV
 
 
 # Small ticker subset for local development
@@ -145,9 +145,7 @@ TICKERS_FULL = [
     ]
 
 # Environment switch
-local_var = get_var("local")
-
-if ENV == "dev" or local_var == "dev":
+if ENV == "dev":
     TICKERS = TICKERS_SUB
 elif ENV in ("staging", "prod"):
     TICKERS = TICKERS_FULL
