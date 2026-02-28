@@ -45,6 +45,33 @@ docker compose down     # Stop
 ```
 **UI:** [http://localhost:8080](http://localhost:8080)
 
+### D. Switching Airflow Environment (dev / staging / prod)
+
+The Airflow container's environment is controlled by **`docker/airflow/.env`**.
+The key variable is `DB_DATABASE`, which determines:
+
+| `DB_DATABASE` | `ENV` | Database | Tickers |
+| :--- | :--- | :--- | :--- |
+| `dev` | dev | Local dev DB | `TICKERS_SUB` (3 tickers) |
+| `staging` | staging | Local staging DB | `TICKERS_FULL` (1738 tickers) |
+| `prod` | prod | Production DB | `TICKERS_FULL` (1738 tickers) |
+
+**To switch environments:**
+
+```bash
+cd docker/airflow
+
+# 1. Edit .env → change DB_DATABASE to dev, staging, or prod
+#    Also update DATABASE_URL to match the target database
+
+# 2. Recreate the container to pick up the new values
+docker compose up -d airflow
+```
+
+> ⚠️ **Important:** Shell environment variables (e.g. from `direnv`) take priority
+> over `.env` file values. If switching doesn't work, run `unset DB_DATABASE`
+> and `unset DATABASE_URL` in your shell before `docker compose up`.
+
 ---
 
 ## 3. Workflow
