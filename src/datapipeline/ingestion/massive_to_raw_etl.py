@@ -103,12 +103,10 @@ client = RESTClient(
 from datapipeline.config.ingestion_targets import (
     TICKERS_SUB,
     TICKERS_FULL,
+    TICKERS as _TICKERS,
 )
 
-if ENV == "dev":
-    TICKERS = list(TICKERS_SUB)
-else:
-    TICKERS = list(TICKERS_FULL)
+TICKERS = list(_TICKERS)
 
 logging.info(
     "Resolved tickers in ETL: ENV=%s → %s (count=%d)",
