@@ -2,7 +2,7 @@
 
 ![Architecture Diagram](tools/alphastream_system_architecture.png)
 
-This repository contains the infrastructure, ingestion pipelines, and canonical data models for the AlphaStream financial data system.
+This repository contains the infrastructure, ingestion pipelines, and canonical data models for the AlphaStream data system.
 
 ## Data Lineage
 
