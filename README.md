@@ -18,7 +18,7 @@ This repository contains the infrastructure, ingestion pipelines, and canonical 
 
 ## Interactive Analytics Dashboard
 
-![Dashboard](tools/dashboard_preview.png)
+![Dashboard](tools/2026-03-04_09-40-17.jpg)
 
 An R Shiny and Plotly dashboard used for visualizing predictive return distributions and statistical spreads.
 
