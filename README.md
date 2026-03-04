@@ -6,9 +6,15 @@ This repository contains the infrastructure, ingestion pipelines, and canonical 
 
 ## Data Lineage
 
-![DBT Lineage Graph](tools/dbt_lineage_graph.png)
+### ELT Canonical Data
+![ELT Canonical Data Lineage](tools/elt_lineage_graph.png)
 
-*The graph above visualizes the flow from raw data sources through transformations to the final canonical data models.*
+*The graph above represents the data lineage for the ELT canonical data repository, showing the flow from ingestion and raw tables to the canonical data models (CDM).*
+
+### ETL Inference
+![ETL Inference Lineage](tools/inference_lineage_graph.png)
+
+*The graph above represents the data lineage for the ETL inference repository, specifically showing the flow for the metrics and inference tables. Table names are voluntarily masked for proprietary reasons.*
 
 ## Interactive Analytics Dashboard
 
