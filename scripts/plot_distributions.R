@@ -42,7 +42,7 @@ fig <- plot_ly(df, x = ~bucket)
 # By making q1=median and q3=median, the "box" flattens into a single median line,
 # and the whiskers stretch to the 5th and 95th percentiles.
 
-# Box plot for Past Excess Returns (P05/P95)
+# Box plot for Past Alpha (P05/P95)
 fig <- fig %>% add_boxplot(
   y = ~past_p05, # We must provide y even if we provide precomputed stats (ignored but required by r-plotly)
   lowerfence = ~past_p05,
@@ -50,13 +50,13 @@ fig <- fig %>% add_boxplot(
   median = ~((past_p05 + past_p95)/2),
   q3 = ~((past_p05 + past_p95)/2),
   upperfence = ~past_p95,
-  name = 'Past Excess Return (5th to 95th)',
+  name = 'Past Alpha (5th to 95th)',
   line = list(color = 'lightblue', width = 3),
   fillcolor = 'rgba(173, 216, 230, 0)', # Transparent box
   hovertemplate = "Bucket: %{x}<br>Past P95: %{upperfence}<br>Past P05: %{lowerfence}<extra></extra>"
 )
 
-# Box plot for Future Excess Returns (P05/P95)
+# Box plot for Future Alpha (P05/P95)
 fig <- fig %>% add_boxplot(
   y = ~returns, 
   lowerfence = ~future_p05,
@@ -72,14 +72,14 @@ fig <- fig %>% add_boxplot(
 
 # Configure the layout and styling
 fig <- fig %>% layout(
-  title = "Spread of Past & Future Excess Returns by Z-Bucket",
+  title = "Past & Future Alpha Distribution by Z-Bucket",
   xaxis = list(
-    title = "Past Excess Return Z-Bucket",
+    title = "Past Alpha Z-Bucket",
     tickmode = "linear",
     dtick = 1
   ),
   yaxis = list(
-    title = "Excess Return vs SPY (%)",
+    title = "Alpha vs Benchmark (%)",
     zeroline = TRUE,
     zerolinecolor = "gray"
   ),

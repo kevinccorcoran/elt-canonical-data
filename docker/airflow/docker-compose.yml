@@ -63,6 +63,7 @@ services:
     ports:
       - "8080:8080"
       - "3838:3838"
+      - "3839:3839"
 
     command: >
       bash -c "

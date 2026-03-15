@@ -44,7 +44,7 @@ fig <- fig %>% add_bars(y = ~pct,
 
 # Add the line chart for Median Returns (Right Axis)
 fig <- fig %>% add_lines(y = ~returns, 
-                         name = 'Median Excess Return (%)', 
+                         name = 'Median Alpha (%)', 
                          yaxis = 'y2',
                          line = list(color = 'firebrick', width = 3), 
                          marker = list(color = 'firebrick', size = 8),
@@ -52,9 +52,9 @@ fig <- fig %>% add_lines(y = ~returns,
 
 # Configure the dual-axis layout and styling
 fig <- fig %>% layout(
-  title = "Excess Returns vs. Distribution by Z-Bucket",
+  title = "Alpha vs. Distribution by Z-Bucket",
   xaxis = list(
-    title = "Past Excess Return Z-Bucket",
+    title = "Past Alpha Z-Bucket",
     tickmode = "linear",
     dtick = 1
   ),
@@ -63,7 +63,7 @@ fig <- fig %>% layout(
     range = c(0, max(df$pct) * 1.2)
   ),
   yaxis2 = list(
-    title = "Median Future Excess Return vs SPY (%)",
+    title = "Median Future Alpha vs Benchmark (%)",
     tickfont = list(color = "firebrick"),
     titlefont = list(color = "firebrick"),
     overlaying = "y",

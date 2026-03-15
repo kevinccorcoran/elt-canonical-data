@@ -4,15 +4,7 @@ library(RPostgres)
 library(plotly)
 
 # Default query string based on the existing python script
-default_query <- "SELECT 
-    past_excess_return_z_bucket_num as bucket,
-    record_pct_per_id as pct,
-    median_future_excess_return_vs_spy as returns
-FROM inference.return_expectation_decomposition
-WHERE fibonacci_lag_value = 4 
-    AND future_fibonacci_lag_value = 7
-    AND id = 4
-ORDER BY past_excess_return_z_bucket_num;"
+# Default query is no longer used since we shifted to the combined pre-joined table.
 
 # Custom CSS matching the returns_analyzer.html dark theme
 custom_css <- "
@@ -239,7 +231,7 @@ table.dataTable tbody tr:hover td {
 
 # Define UI
 ui <- navbarPage(
-  title = "Analysis Dashboard",
+  title = "Return Expectation Decomposition",
   
   tags$head(
     tags$style(HTML(custom_css))
@@ -584,9 +576,10 @@ server <- function(input, output, session) {
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       
       tryCatch({
-        fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_expectation_decomposition_past ORDER BY 1")
-        future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_expectation_decomposition_future ORDER BY 1")
-        id_vals <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_expectation_decomposition_past ORDER BY 1")
+        # Pull everything from the combined table now
+        fib_vals <- dbGetQuery(con, "SELECT DISTINCT past_fibonacci_lag_value FROM inference.return_expectation_decomposition_combined ORDER BY 1")
+        future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_expectation_decomposition_combined ORDER BY 1")
+        id_vals <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_expectation_decomposition_combined ORDER BY 1")
         
         updateSelectInput(session, "fib_lag3", choices = fib_vals[[1]], selected = fib_vals[[1]][1])
         updateSelectInput(session, "future_fib_lag3", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
@@ -615,38 +608,18 @@ server <- function(input, output, session) {
     status_msg3("Running query...")
     
     query <- sprintf("
-      WITH p AS (
-        SELECT 
-            past_excess_return_z_bucket_num as bucket,
-            record_count_in_bucket as past_count,
-            min_past_excess_return_vs_spy as past_min,
-            past_q1_return as past_q1,
-            past_median_return as past_median,
-            past_q3_return as past_q3,
-            max_past_excess_return_vs_spy as past_max
-        FROM inference.return_expectation_decomposition_past
-        WHERE fibonacci_lag_value = %s AND id = %s
-      ),
-      f AS (
-        SELECT 
-            future_excess_return_z_bucket_num as bucket,
-            record_count_in_bucket as future_count,
-            min_future_excess_return_vs_spy as future_min,
-            future_q1_return as future_q1,
-            future_median_return as future_median,
-            future_q3_return as future_q3,
-            max_future_excess_return_vs_spy as future_max
-        FROM inference.return_expectation_decomposition_future
-        WHERE future_fibonacci_lag_value = %s AND id = %s
-      )
       SELECT 
-          COALESCE(p.bucket, f.bucket) as bucket,
-          p.past_count, p.past_min, p.past_q1, p.past_median, p.past_q3, p.past_max,
-          f.future_count, f.future_min, f.future_q1, f.future_median, f.future_q3, f.future_max
-      FROM p 
-      FULL OUTER JOIN f ON p.bucket = f.bucket
-      ORDER BY bucket;
-    ", input$fib_lag3, input$id_val3, input$future_fib_lag3, input$id_val3)
+          bucket_num as bucket,
+          past_record_count as past_count, 
+          past_min, past_q1, past_median, past_q3, past_max,
+          future_record_count as future_count, 
+          future_min, future_q1, future_median, future_q3, future_max
+      FROM inference.return_expectation_decomposition_combined
+      WHERE past_fibonacci_lag_value = %s 
+        AND future_fibonacci_lag_value = %s 
+        AND id = '%s'
+      ORDER BY bucket_num;
+    ", input$fib_lag3, input$future_fib_lag3, input$id_val3)
     
     tryCatch({
       con <- get_con(input, tab = 3)

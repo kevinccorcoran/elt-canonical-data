@@ -3,7 +3,14 @@ from datapipeline.config.env import ENV
 
 
 # Small ticker subset for local development
-TICKERS_SUB = ["SPY", "AAPL", "NET"]
+TICKERS_SUB = [
+    "SPY", "AAPL", "NET", 
+    "MSFT", "GOOG", "AMZN", "NVDA", "META", "TSLA",
+    "JPM", "BAC", "V",
+    "XOM", "CVX", "CAT",
+    "JNJ", "PG", "WMT", "DIS",
+    "X:BTCUSD", "X:ETHUSD"
+]
 
 # Full ticker universe for staging / production ingestion
 TICKERS_FULL = [

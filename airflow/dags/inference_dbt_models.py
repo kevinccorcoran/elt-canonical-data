@@ -47,26 +47,34 @@ with DAG(
         do_xcom_push=False,
     )
 
-    # Build the dbt CLI command and environment overrides
-    # for the specific inference model being executed.
-    bash_command, env_vars = get_inference_dbt_bash_command(
-        runtime_env,
-        "return_expectation_decomposition",
-    )
-
-    dbt_run_return_expectation_decomposition = BashOperator(
-        task_id="dbt_run_return_expectation_decomposition",
-
-        # Executes the dbt run command prepared above
-        bash_command=bash_command,
-
-        # Inject minimal environment overrides while preserving
-        # the existing Airflow worker environment.
-        env=env_vars,
+    # --- return_expectation_decomposition_past ---
+    bash_past, env_past = get_inference_dbt_bash_command(runtime_env, "return_expectation_decomposition_past")
+    dbt_run_past = BashOperator(
+        task_id="dbt_run_return_expectation_decomposition_past",
+        bash_command=bash_past,
+        env=env_past,
         append_env=True,
-
-        # No need to push command output to XCom
         do_xcom_push=False,
     )
 
-    dbt_deps >> dbt_run_return_expectation_decomposition
+    # --- return_expectation_decomposition_future ---
+    bash_future, env_future = get_inference_dbt_bash_command(runtime_env, "return_expectation_decomposition_future")
+    dbt_run_future = BashOperator(
+        task_id="dbt_run_return_expectation_decomposition_future",
+        bash_command=bash_future,
+        env=env_future,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    # --- return_expectation_decomposition_combined ---
+    bash_combined, env_combined = get_inference_dbt_bash_command(runtime_env, "return_expectation_decomposition_combined")
+    dbt_run_combined = BashOperator(
+        task_id="dbt_run_return_expectation_decomposition_combined",
+        bash_command=bash_combined,
+        env=env_combined,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    dbt_deps >> [dbt_run_past, dbt_run_future] >> dbt_run_combined
