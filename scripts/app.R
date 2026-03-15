@@ -231,7 +231,7 @@ table.dataTable tbody tr:hover td {
 
 # Define UI
 ui <- navbarPage(
-  title = "Return Expectation Decomposition",
+  title = "Analysis Dashboard",
   
   tags$head(
     tags$style(HTML(custom_css))

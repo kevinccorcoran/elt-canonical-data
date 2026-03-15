@@ -18,12 +18,12 @@ This repository contains the infrastructure, ingestion pipelines, and canonical 
 
 ## Interactive Analytics Dashboard
 
-![Dashboard](tools/2026-03-04_09-40-17.jpg)
+![Dashboard](tools/decomposition_plot.png)
 
-An R Shiny and Plotly dashboard used for visualizing predictive return distributions and statistical spreads.
+An R Shiny and Plotly dashboard used for visualizing expected return distributions and statistical spreads across multiple look-ahead/look-back horizons.
 
 - **Stack:** R, Shiny, Plotly, PostgreSQL
-- **Features:** Dynamic filtering, live database connection, interactive dual-axis visualizations (P05/P95 spreads).
+- **Features:** Dynamic filtering, interactive dual-axis visualizations (Past vs. Future distributions), and Alpha Z-Bucket analysis.
 
 ## Project Timeline
 
