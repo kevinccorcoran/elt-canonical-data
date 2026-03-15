@@ -685,7 +685,8 @@ server <- function(input, output, session) {
     }
     
     # Calculate Dynamic Colors for Future Median
-    df$future_median_color <- ifelse(df$future_median > df$past_median, "#10b981", "#ef4444")
+    # Using a brighter neon pink/red for better contrast against dark blue
+    df$future_median_color <- ifelse(df$future_median > df$past_median, "#10b981", "#f43f5e")
     
     # Calculate X offsets for side-by-side grouped placement
     # Using categorical plotting in Plotly grouped barmode, the boxes are slightly shifted.
@@ -712,12 +713,12 @@ server <- function(input, output, session) {
       offsetgroup = '1'
     )
     
-    # White Median Overlay (Past)
+    # Light Gray Median Overlay (Past)
     fig <- fig %>% add_markers(
       x = ~x_num - bar_offset,
       y = ~past_median,
       name = 'Past Median',
-      marker = list(color = '#ffffff', symbol = "line-ew", size = 25, line = list(color='#ffffff', width=4)),
+      marker = list(color = '#cbd5e1', symbol = "line-ew", size = 25, line = list(color='#cbd5e1', width=3)),
       hoverinfo = "skip",
       showlegend = FALSE,
       offsetgroup = '1'
