@@ -642,17 +642,27 @@ server <- function(input, output, session) {
 
     max_pct <- max(c(df$past_pct, df$future_pct), na.rm = TRUE)
 
-    # Build score annotations above each bucket
-    y_top <- max(c(df$past_hi, df$future_hi), na.rm = TRUE)
-    score_annotations <- lapply(seq_len(nrow(df)), function(i) {
+    # Build score annotations evenly spaced across plot area
+    n_buckets <- nrow(df)
+    # Evenly space from ~10% to ~90% of plot width to avoid axis labels
+    score_annotations <- lapply(seq_len(n_buckets), function(i) {
+      x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
       list(
-        x = as.character(df$bucket[i]),
-        y = y_top * 1.15,
-        text = sprintf("%.2f", df$conf_score[i]),
+        x = x_pos,
+        y = 1.04,
+        text = sprintf("<b>%s: %.2f</b>", df$bucket[i], df$conf_score[i]),
         font = list(color = df$conf_color[i], size = 12, family = "Inter"),
-        showarrow = FALSE, xref = "x", yref = "y"
+        showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
     })
+    # Add a label for the score row
+    score_label <- list(
+      x = 0.5, y = 1.08,
+      text = "<b>Confidence Score</b>",
+      font = list(color = "#94a3b8", size = 11, family = "Inter"),
+      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+    )
+    all_annotations <- c(list(score_label), score_annotations)
 
     fig %>% layout(
       title = list(text = "Past Distribution vs Future Return Range", font = list(color = "#f8fafc", family = "Inter", size = 18)),
@@ -661,8 +671,8 @@ server <- function(input, output, session) {
       yaxis = list(title = "Excess Return vs SPY (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
-      annotations = score_annotations,
-      margin = list(l = 50, r = 60, b = 50, t = 50),
+      annotations = all_annotations,
+      margin = list(l = 50, r = 60, b = 50, t = 90),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
   })
