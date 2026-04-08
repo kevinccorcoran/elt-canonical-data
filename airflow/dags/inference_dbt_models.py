@@ -360,5 +360,15 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # --- return_cluster_transition_confidence ---
+    bash_conf, env_conf = get_inference_dbt_bash_command(runtime_env, "return_cluster_transition_confidence")
+    dbt_run_transition_confidence = BashOperator(
+        task_id="dbt_run_return_cluster_transition_confidence",
+        bash_command=bash_conf,
+        env=env_conf,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     # DEPENDENCIES
-    dbt_run_feature_set >> batch_transition_scored >> batch_transition_distribution >> [dbt_run_past_bucket_stats, dbt_run_future_bucket_stats] >> dbt_run_combined_bucket_stats
+    dbt_run_feature_set >> batch_transition_scored >> batch_transition_distribution >> [dbt_run_past_bucket_stats, dbt_run_future_bucket_stats] >> dbt_run_combined_bucket_stats >> dbt_run_transition_confidence
