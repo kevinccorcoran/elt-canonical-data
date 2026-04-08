@@ -621,20 +621,20 @@ server <- function(input, output, session) {
     fig <- fig %>% add_trace(type='box', name='Past Return Distribution', x=~as.factor(bucket),
       q1=~past_q1, median=~past_med, q3=~past_q3, lowerfence=~past_lo, upperfence=~past_hi,
       marker=list(color='#a855f7'), line=list(color='#a855f7', width=2),
-      fillcolor='rgba(167,139,250,0.4)', text=~past_hover, hovertemplate="%{text}<extra></extra>", offsetgroup='1')
+      fillcolor='rgba(167,139,250,0.4)', text=~past_hover, hovertemplate="%{text}<extra></extra>", hoveron="boxes", offsetgroup='1')
     fig <- fig %>% add_markers(x=~as.factor(bucket), y=~past_med, name='Past Median',
       marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
-      hoverinfo="skip", showlegend=FALSE, offsetgroup='1')
+      text=~past_hover, hovertemplate="%{text}<extra></extra>", showlegend=FALSE, offsetgroup='1')
 
     # Future range (sky blue) — box body spans min to max
     fig <- fig %>% add_trace(type='box', name='Future Range (Min to Max)', x=~as.factor(bucket),
       q1=~future_lo, median=~future_med, q3=~future_hi,
       lowerfence=~future_lo, upperfence=~future_hi,
       marker=list(color='#0ea5e9'), line=list(color='#0ea5e9', width=2),
-      fillcolor='rgba(14,165,233,0.4)', text=~future_hover, hovertemplate="%{text}<extra></extra>", offsetgroup='2')
+      fillcolor='rgba(14,165,233,0.4)', text=~future_hover, hovertemplate="%{text}<extra></extra>", hoveron="boxes", offsetgroup='2')
     fig <- fig %>% add_markers(x=~as.factor(bucket), y=~future_med, name='Future Median',
       marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
-      hoverinfo="skip", showlegend=FALSE, offsetgroup='2')
+      text=~future_hover, hovertemplate="%{text}<extra></extra>", showlegend=FALSE, offsetgroup='2')
 
     # Past % (yellow dashed)
     fig <- fig %>% add_trace(x=~as.factor(bucket), y=~past_pct, type='scatter', mode='lines+markers',
