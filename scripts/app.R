@@ -3,9 +3,6 @@ library(DBI)
 library(RPostgres)
 library(plotly)
 
-# Default query string based on the existing python script
-# Default query is no longer used since we shifted to the combined pre-joined table.
-
 # Custom CSS matching the returns_analyzer.html dark theme
 custom_css <- "
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -116,70 +113,6 @@ hr {
   font-size: 0.8rem !important;
 }
 
-#statusMessage {
-  color: #10b981 !important;
-  font-weight: 500;
-  font-size: 0.875rem;
-}
-
-/* Data table styling */
-.dataTables_wrapper {
-  color: #94a3b8 !important;
-}
-
-table.dataTable {
-  border-collapse: collapse !important;
-}
-
-table.dataTable thead th {
-  background: rgba(15, 23, 42, 0.5) !important;
-  color: #94a3b8 !important;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 0.75rem !important;
-}
-
-table.dataTable tbody td {
-  background: transparent !important;
-  color: #f8fafc !important;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
-  padding: 0.5rem 0.75rem !important;
-}
-
-table.dataTable tbody tr:hover td {
-  background: rgba(56, 189, 248, 0.05) !important;
-}
-
-.dataTables_info, .dataTables_length, .dataTables_filter {
-  color: #64748b !important;
-}
-
-.dataTables_filter input {
-  background: rgba(15, 23, 42, 0.5) !important;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
-  border-radius: 0.5rem !important;
-  color: #f8fafc !important;
-  padding: 0.25rem 0.5rem !important;
-}
-
-.paginate_button {
-  color: #94a3b8 !important;
-}
-
-.paginate_button.current {
-  background: #38bdf8 !important;
-  color: #000 !important;
-  border-radius: 0.25rem !important;
-}
-
-/* Plot background */
-.shiny-plot-output {
-  border-radius: 0.75rem;
-  overflow: hidden;
-}
-
 /* Select dropdown styling */
 .selectize-input {
   background: rgba(15, 23, 42, 0.5) !important;
@@ -208,588 +141,529 @@ table.dataTable tbody tr:hover td {
 .selectize-dropdown-content .option {
   color: #f8fafc !important;
 }
-
-#connect_btn {
-  background: rgba(16, 185, 129, 0.8) !important;
-  margin-bottom: 1rem;
-}
-
-#connect_btn:hover {
-  background: rgba(16, 185, 129, 1) !important;
-}
-
-.filter-group {
-  opacity: 0.4;
-  pointer-events: none;
-}
-
-.filter-group.active {
-  opacity: 1;
-  pointer-events: auto;
-}
 "
 
-# Define UI
+# ─── Helper: sidebar panel for a given tab suffix ───
+make_sidebar <- function(suffix, title, filter_widgets) {
+  sidebarPanel(
+    h4(title),
+    selectInput(paste0("db_env", suffix), "Environment", choices = c("Production", "Staging", "Dev"), selected = "Dev"),
+    textInput(paste0("db_host", suffix), "Host", value = "host.docker.internal"),
+    textInput(paste0("db_port", suffix), "Port", value = "5432"),
+    textInput(paste0("db_user", suffix), "User", value = "postgres"),
+    passwordInput(paste0("db_pass", suffix), "Password", value = ""),
+    actionButton(paste0("connect_btn", suffix), "Connect & Load Filters", class = "btn-primary"),
+    hr(),
+    h5("Filters"),
+    div(id = paste0("filter_panel", suffix), filter_widgets),
+    hr(),
+    actionButton(paste0("execute_", suffix), "Generate Chart", class = "btn-primary w-100", style = "margin-top: 1rem;"),
+    hr(),
+    textOutput(paste0("statusMessage", suffix))
+  )
+}
+
+# ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
-  
-  tags$head(
-    tags$style(HTML(custom_css))
-  ),
-  
-  # Tab 2: New Visualization
-  tabPanel("New Visualization",
+  tags$head(tags$style(HTML(custom_css))),
+
+  # ── Tab 1: Past Decomposition ──
+  tabPanel("Past Decomposition",
     sidebarLayout(
-      sidebarPanel(
-        h4("Database Connection (Tab 2)"),
-        selectInput("db_env2", "Environment", choices = c("Production", "Staging", "Dev"), selected = "Dev"),
-        textInput("db_host2", "Host", value = "host.docker.internal"),
-        textInput("db_port2", "Port", value = "5432"),
-        textInput("db_user2", "User", value = "postgres"),
-        passwordInput("db_pass2", "Password", value = ""),
-        actionButton("connect_btn2", "Connect & Load Filters", class = "btn-primary"),
-        
-        hr(),
-        h5("Filters"),
-        div(id = "filter_panel2",
-          selectInput("fib_lag2", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
-          selectInput("id_val2", "ID", choices = c("Connect first..." = ""), selected = "")
-        ),
-        hr(),
-        actionButton("execute_2", "Generate Chart", class = "btn-primary w-100", style = "margin-top: 1rem;"),
-        hr(),
-        textOutput("statusMessage2")
-      ),
-      mainPanel(
-        div(class = "main-card",
-            h4("Return Expectation Decomposition 2", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-            plotlyOutput("newPlot", height = "700px")
-        )
-      )
+      make_sidebar("P", "Database Connection (Past)", tagList(
+        selectInput("id_valP", "ID", choices = c("Connect first..." = ""), selected = ""),
+        selectInput("fib_lagP", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = "")
+      )),
+      mainPanel(div(class = "main-card",
+        h4("return_cluster_past_bucket_stats", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        plotlyOutput("pastPlot", height = "700px")
+      ))
     )
   ),
-  
-  # Tab 3: Combined Visualization
-  tabPanel("Combined Visualization",
+
+  # ── Tab 2: Future Decomposition ──
+  tabPanel("Future Decomposition",
     sidebarLayout(
-      sidebarPanel(
-        h4("Database Connection (Combined)"),
-        selectInput("db_env3", "Environment", choices = c("Production", "Staging", "Dev"), selected = "Dev"),
-        textInput("db_host3", "Host", value = "host.docker.internal"),
-        textInput("db_port3", "Port", value = "5432"),
-        textInput("db_user3", "User", value = "postgres"),
-        passwordInput("db_pass3", "Password", value = ""),
-        actionButton("connect_btn3", "Connect & Load Filters", class = "btn-primary"),
-        
-        hr(),
-        h5("Filters"),
-        div(id = "filter_panel3",
-          selectInput("fib_lag3", "Past Fib Lag", choices = c("Connect first..." = ""), selected = ""),
-          selectInput("future_fib_lag3", "Future Fib Lag", choices = c("Connect first..." = ""), selected = ""),
-          selectInput("id_val3", "ID", choices = c("Connect first..." = ""), selected = "")
-        ),
-        hr(),
-        actionButton("execute_3", "Generate Combined Chart", class = "btn-primary w-100", style = "margin-top: 1rem;"),
-        hr(),
-        textOutput("statusMessage3")
-      ),
-      mainPanel(
-        div(class = "main-card",
-            h4("Past vs. Future Expectation Decomposition", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-            plotlyOutput("combinedPlot", height = "700px")
-        )
-      )
+      make_sidebar("F", "Database Connection (Future)", tagList(
+        selectInput("id_valF", "ID", choices = c("Connect first..." = ""), selected = ""),
+        selectInput("fib_lagF", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
+        selectInput("future_fib_lagF", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = "")
+      )),
+      mainPanel(div(class = "main-card",
+        h4("return_cluster_future_bucket_stats", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        plotlyOutput("futurePlot", height = "700px")
+      ))
+    )
+  ),
+
+  # ── Tab 3: Combined Decomposition ──
+  tabPanel("Combined Decomposition",
+    sidebarLayout(
+      make_sidebar("C", "Database Connection (Combined)", tagList(
+        selectInput("id_valC", "ID", choices = c("Connect first..." = ""), selected = ""),
+        selectInput("past_fib_lagC", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
+        selectInput("future_fib_lagC", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = "")
+      )),
+      mainPanel(div(class = "main-card",
+        h4("Past vs Future Bucket Stats", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        plotlyOutput("combinedPlot", height = "700px")
+      ))
+    )
+  ),
+
+  # ── Tab 4: Transition Range ──
+  tabPanel("Transition Range",
+    sidebarLayout(
+      make_sidebar("T", "Database Connection (Transition)", tagList(
+        selectInput("id_valT", "ID", choices = c("Connect first..." = ""), selected = ""),
+        selectInput("past_fib_lagT", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
+        selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = "")
+      )),
+      mainPanel(div(class = "main-card",
+        h4("Past Boxplot + Future Min/Max Range", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        plotlyOutput("transitionPlot", height = "700px")
+      ))
     )
   )
 )
 
-# Helper to create a DB connection from UI inputs
-get_con <- function(input, tab = 1) {
-  if (tab == 1) {
-    db_string <- if (input$db_env == "Production") "prod" else if (input$db_env == "Staging") "staging" else "dev"
-    dbConnect(RPostgres::Postgres(),
-              dbname = db_string,
-              host = input$db_host,
-              port = as.integer(input$db_port),
-              user = input$db_user,
-              password = input$db_pass,
-              sslmode = "prefer")
-  } else if (tab == 2) {
-    db_string <- if (input$db_env2 == "Production") "prod" else if (input$db_env2 == "Staging") "staging" else "dev"
-    dbConnect(RPostgres::Postgres(),
-              dbname = db_string,
-              host = input$db_host2,
-              port = as.integer(input$db_port2),
-              user = input$db_user2,
-              password = input$db_pass2,
-              sslmode = "prefer")
-  } else if (tab == 3) {
-    db_string <- if (input$db_env3 == "Production") "prod" else if (input$db_env3 == "Staging") "staging" else "dev"
-    dbConnect(RPostgres::Postgres(),
-              dbname = db_string,
-              host = input$db_host3,
-              port = as.integer(input$db_port3),
-              user = input$db_user3,
-              password = input$db_pass3,
-              sslmode = "prefer")
-  }
+# ─── Helper: create a DB connection ───
+get_con <- function(input, suffix) {
+  env   <- input[[paste0("db_env", suffix)]]
+  db_string <- if (env == "Production") "prod" else if (env == "Staging") "staging" else "dev"
+  dbConnect(RPostgres::Postgres(),
+    dbname   = db_string,
+    host     = input[[paste0("db_host", suffix)]],
+    port     = as.integer(input[[paste0("db_port", suffix)]]),
+    user     = input[[paste0("db_user", suffix)]],
+    password = input[[paste0("db_pass", suffix)]],
+    sslmode  = "prefer"
+  )
 }
 
-# Define server logic
+# ─── Helper: wire up env-switcher for a given suffix ───
+setup_env_switcher <- function(input, session, suffix) {
+  observeEvent(input[[paste0("db_env", suffix)]], {
+    env <- input[[paste0("db_env", suffix)]]
+    if (env == "Production") {
+      updateTextInput(session, paste0("db_host", suffix), value = "dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com")
+      updateTextInput(session, paste0("db_port", suffix), value = "25060")
+      updateTextInput(session, paste0("db_user", suffix), value = "doadmin")
+      updateTextInput(session, paste0("db_pass", suffix), value = Sys.getenv("PROD_DB_PASSWORD", ""))
+    } else {
+      updateTextInput(session, paste0("db_host", suffix), value = "host.docker.internal")
+      updateTextInput(session, paste0("db_port", suffix), value = "5432")
+      updateTextInput(session, paste0("db_user", suffix), value = "postgres")
+      updateTextInput(session, paste0("db_pass", suffix), value = Sys.getenv("DB_PASSWORD", ""))
+    }
+  })
+}
+
+# ─── Helper: standard boxplot + pct line ───
+render_single_boxplot <- function(df, title, x_title, box_color = '#a855f7', fill_color = 'rgba(167, 139, 250, 0.4)') {
+  df$pct <- (df$count / sum(df$count, na.rm = TRUE)) * 100
+
+  fig <- plot_ly(df)
+
+  fig <- fig %>% add_trace(
+    type = 'box', name = 'Return Distribution',
+    x = ~as.factor(bucket), q1 = ~q1, median = ~med, q3 = ~q3,
+    lowerfence = ~lo, upperfence = ~hi,
+    marker = list(color = box_color), line = list(color = box_color, width = 2),
+    fillcolor = fill_color, hoverinfo = "y", offsetgroup = '1'
+  )
+
+  fig <- fig %>% add_markers(
+    x = ~as.factor(bucket), y = ~med, name = 'Median',
+    marker = list(color = '#ffffff', symbol = "line-ew", size = 45, line = list(color='#ffffff', width=3)),
+    hoverinfo = "skip", showlegend = FALSE, offsetgroup = '1'
+  )
+
+  fig <- fig %>% add_trace(
+    x = ~as.factor(bucket), y = ~pct, type = 'scatter', mode = 'lines+markers',
+    fill = 'tozeroy', yaxis = 'y2', name = 'Record %',
+    line = list(color = '#fbbf24', width = 3), marker = list(color = '#fbbf24', size = 8),
+    fillcolor = 'rgba(251, 191, 36, 0.15)',
+    hovertemplate = "Bucket: %{x}<br>Percentage: %{y:.2f}%<extra></extra>"
+  )
+
+  max_pct <- max(df$pct, na.rm = TRUE)
+  fig %>% layout(
+    title = list(text = title, font = list(color = "#f8fafc", family = "Inter", size = 18)),
+    paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group",
+    xaxis = list(title = x_title, color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
+    yaxis = list(title = "Excess Return vs SPY (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
+    yaxis2 = list(title = "Record Percentage (%)", color = "#fbbf24", gridcolor = "transparent", overlaying = "y", side = "right",
+                  range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
+    margin = list(l = 50, r = 60, b = 50, t = 50),
+    showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
+  )
+}
+
+# ─── Server ───
 server <- function(input, output, session) {
-  
-  # Reactive value to store the parsed dataframe
-  app_data2 <- reactiveVal(NULL)
-  status_msg2 <- reactiveVal("Ready — select Database Environment and click Connect & Load Filters.")
-  app_data3 <- reactiveVal(NULL)
-  status_msg3 <- reactiveVal("Ready — select Database Environment and click Connect & Load Filters.")
-  
-  output$statusMessage2 <- renderText({ status_msg2() })
-  output$statusMessage3 <- renderText({ status_msg3() })
-  
-  observeEvent(input$db_env2, {
-    if (input$db_env2 == "Production") {
-      updateTextInput(session, "db_host2", value = "dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com")
-      updateTextInput(session, "db_port2", value = "25060")
-      updateTextInput(session, "db_user2", value = "doadmin")
-      updateTextInput(session, "db_pass2", value = Sys.getenv("PROD_DB_PASSWORD", ""))
-    } else if (input$db_env2 == "Staging") {
-      updateTextInput(session, "db_host2", value = "host.docker.internal")
-      updateTextInput(session, "db_port2", value = "5432")
-      updateTextInput(session, "db_user2", value = "postgres")
-      updateTextInput(session, "db_pass2", value = "")
-    } else if (input$db_env2 == "Dev") {
-      updateTextInput(session, "db_host2", value = "host.docker.internal")
-      updateTextInput(session, "db_port2", value = "5432")
-      updateTextInput(session, "db_user2", value = "postgres")
-      updateTextInput(session, "db_pass2", value = "")
-    }
-  })
-  
-  observeEvent(input$db_env3, {
-    if (input$db_env3 == "Production") {
-      updateTextInput(session, "db_host3", value = "dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com")
-      updateTextInput(session, "db_port3", value = "25060")
-      updateTextInput(session, "db_user3", value = "doadmin")
-      updateTextInput(session, "db_pass3", value = Sys.getenv("PROD_DB_PASSWORD", ""))
-    } else if (input$db_env3 == "Staging") {
-      updateTextInput(session, "db_host3", value = "host.docker.internal")
-      updateTextInput(session, "db_port3", value = "5432")
-      updateTextInput(session, "db_user3", value = "postgres")
-      updateTextInput(session, "db_pass3", value = "")
-    } else if (input$db_env3 == "Dev") {
-      updateTextInput(session, "db_host3", value = "host.docker.internal")
-      updateTextInput(session, "db_port3", value = "5432")
-      updateTextInput(session, "db_user3", value = "postgres")
-      updateTextInput(session, "db_pass3", value = "")
-    }
-  })
-  
-  # Execute query for Tab 2
-  observeEvent(input$execute_2, {
-    if (input$db_pass2 == "") {
-      status_msg2("Error: Password is not set.")
-      return()
-    }
-    if (input$fib_lag2 == "" || input$id_val2 == "") {
-      status_msg2("Error: Please connect and select filter values first.")
-      return()
-    }
-    
-    status_msg2("Running query...")
-    
-    query <- sprintf(
-      "SELECT 
-          past_excess_return_z_bucket_num as bucket,
-          record_count_in_bucket as count,
-          min_past_excess_return_vs_spy as past_min,
-          past_q1_return as past_q1,
-          past_median_return as median,
-          past_q3_return as past_q3,
-          max_past_excess_return_vs_spy as past_max
-      FROM inference.return_expectation_decomposition_past
-      WHERE fibonacci_lag_value = %s 
-          AND id = %s
-      ORDER BY past_excess_return_z_bucket_num;",
-      input$fib_lag2, input$id_val2
-    )
-    
+
+  # Reactive values
+  app_dataP <- reactiveVal(NULL)
+  status_msgP <- reactiveVal("Ready")
+  app_dataF <- reactiveVal(NULL)
+  status_msgF <- reactiveVal("Ready")
+  app_dataC <- reactiveVal(NULL)
+  status_msgC <- reactiveVal("Ready")
+
+  output$statusMessageP <- renderText({ status_msgP() })
+  output$statusMessageF <- renderText({ status_msgF() })
+  output$statusMessageC <- renderText({ status_msgC() })
+
+  # Env switchers
+  setup_env_switcher(input, session, "P")
+  setup_env_switcher(input, session, "F")
+  setup_env_switcher(input, session, "C")
+
+  # ── PAST: Connect ──
+  observeEvent(input$connect_btnP, {
+    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
+    status_msgP("Connecting...")
     tryCatch({
-      con <- get_con(input, tab = 2)
+      con <- get_con(input, "P")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      res <- dbGetQuery(con, query)
-      
-      if(all(c("bucket", "count", "past_min", "past_q1", "median", "past_q3", "past_max") %in% names(res))) {
-        res$bucket <- as.numeric(res$bucket)
-        res$count <- as.numeric(res$count)
-        res$past_min <- as.numeric(res$past_min)
-        res$past_q1 <- as.numeric(res$past_q1)
-        res$median <- as.numeric(res$median)
-        res$past_q3 <- as.numeric(res$past_q3)
-        res$past_max <- as.numeric(res$past_max)
-        app_data2(res)
-        status_msg2(paste("Successfully loaded", nrow(res), "rows from Table 2."))
-      } else {
-        status_msg2("Error: Query must return (bucket, count, past_min, past_q1, median, past_q3, past_max).")
-        app_data2(NULL)
-      }
-      
-    }, error = function(e) {
-      status_msg2(paste("Database Error:", e$message))
-    })
+      id_vals  <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
+      fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
+      updateSelectInput(session, "id_valP",  choices = id_vals[[1]],  selected = id_vals[[1]][1])
+      updateSelectInput(session, "fib_lagP", choices = fib_vals[[1]], selected = fib_vals[[1]][1])
+      status_msgP("Filters loaded!")
+    }, error = function(e) { status_msgP(paste("Error:", e$message)) })
   })
-  
-  # Connect and populate dropdowns Tab 2
-  observeEvent(input$connect_btn2, {
-    if (input$db_pass2 == "") {
-      status_msg2("Error: Password is not set.")
-      return()
-    }
-    
-    status_msg2("Connecting to database...")
-    
-    tryCatch({
-      con <- get_con(input, tab = 2)
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      
-      # Since `return_expectation_decomposition_past` might not exist yet, handle gracefully
-      tryCatch({
-        fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_expectation_decomposition_past ORDER BY 1")
-        id_vals <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_expectation_decomposition_past ORDER BY 1")
-        
-        updateSelectInput(session, "fib_lag2", choices = fib_vals[[1]], selected = fib_vals[[1]][1])
-        updateSelectInput(session, "id_val2", choices = id_vals[[1]], selected = id_vals[[1]][1])
-        status_msg2("Filters loaded successfully!")
-      }, error = function(e) {
-        status_msg2(paste("Connected, but failed to load filters (check if table 2 is built):", e$message))
-      })
-      
-    }, error = function(e) {
-      status_msg2(paste("Database Connection Error:", e$message))
-    })
-  })
-  
-  output$statusMessage2 <- renderText({
-    status_msg2()
-  })
-  
-  # Render the new visualization for Tab 2
-  output$newPlot <- renderPlotly({
-    req(app_data2())
-    df <- app_data2()
-    
-    if (nrow(df) == 0) {
-      return(plot_ly() %>% layout(title = list(text = "No data found for these filters in Table 2", font = list(color = "#f8fafc", family = "Inter", size = 18)), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
-    }
-    
-    # Calculate record percentage within this specific slice
-    df$pct <- (df$count / sum(df$count, na.rm = TRUE)) * 100
-    
-    fig <- plot_ly(df)
-    
-    # Past Excess Returns (Statistical Boxplot)
-    fig <- fig %>% add_trace(
-      type = 'box',
-      name = 'Past Return Distribution',
-      x = ~as.factor(bucket),
-      q1 = ~past_q1,
-      median = ~median,
-      q3 = ~past_q3,
-      lowerfence = ~past_min,
-      upperfence = ~past_max,
-      marker = list(color = '#a855f7'),
-      line = list(color = '#a855f7', width = 2),
-      fillcolor = 'rgba(167, 139, 250, 0.4)',
-      hoverinfo = "y",
-      offsetgroup = '1'
-    )
-    
-    # White Median Overlay
-    fig <- fig %>% add_markers(
-      x = ~as.factor(bucket),
-      y = ~median,
-      name = 'Median',
-      marker = list(color = '#ffffff', symbol = "line-ew", size = 45, line = list(color='#ffffff', width=3)),
-      hoverinfo = "skip",
-      showlegend = FALSE,
-      offsetgroup = '1'
-    )
-    
-    # Add Record Percentage as a line/area on Secondary Axis
-    fig <- fig %>% add_trace(
-      x = ~as.factor(bucket),
-      y = ~pct,
-      type = 'scatter',
-      mode = 'lines+markers',
-      fill = 'tozeroy',
-      yaxis = 'y2',
-      name = 'Record % per ID',
-      line = list(color = '#fbbf24', width = 3),
-      marker = list(color = '#fbbf24', size = 8),
-      fillcolor = 'rgba(251, 191, 36, 0.15)',
-      hovertemplate = "Bucket: %{x}<br>Percentage: %{y:.2f}%<extra></extra>"
-    )
-    
-    # Configure the layout and styling
-    fig %>% layout(
-      title = list(text = "Past Return Distribution by Alpha Z-Bucket", font = list(color = "#f8fafc", family = "Inter", size = 18)),
-      paper_bgcolor = "rgba(0,0,0,0)",
-      plot_bgcolor = "rgba(0,0,0,0)",
-      barmode = "group",
-      xaxis = list(
-        title = "Past Excess Return Z-Bucket (SD)",
-        color = "#94a3b8",
-        gridcolor = "rgba(255, 255, 255, 0.1)",
-        zerolinecolor = "rgba(255, 255, 255, 0.1)"
-      ),
-      yaxis = list(
-        title = "Excess Return vs SPY (%)",
-        color = "#94a3b8",
-        gridcolor = "rgba(255, 255, 255, 0.1)",
-        zeroline = TRUE,
-        zerolinewidth = 2,
-        zerolinecolor = "rgba(255, 255, 255, 0.2)"
-      ),
-      yaxis2 = list(
-        title = "Record Percentage (%)",
-        color = "#fbbf24",
-        gridcolor = "rgba(255, 255, 255, 0.0)",
-        overlaying = "y",
-        side = "right",
-        range = c(0, ifelse(is.infinite(max(df$pct, na.rm = TRUE)) || is.na(max(df$pct, na.rm = TRUE)), 100, max(df$pct, na.rm = TRUE) * 1.5))
-      ),
-      margin = list(l = 50, r = 60, b = 50, t = 50),
-      showlegend = TRUE,
-      legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
-    )
-  })
-  
-  # Connect and populate dropdowns Tab 3
-  observeEvent(input$connect_btn3, {
-    if (input$db_pass3 == "") {
-      status_msg3("Error: Password is not set.")
-      return()
-    }
-    status_msg3("Connecting to database...")
-    tryCatch({
-      con <- get_con(input, tab = 3)
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      
-      tryCatch({
-        # Pull everything from the combined table now
-        fib_vals <- dbGetQuery(con, "SELECT DISTINCT past_fibonacci_lag_value FROM inference.return_expectation_decomposition_combined ORDER BY 1")
-        future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_expectation_decomposition_combined ORDER BY 1")
-        id_vals <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_expectation_decomposition_combined ORDER BY 1")
-        
-        updateSelectInput(session, "fib_lag3", choices = fib_vals[[1]], selected = fib_vals[[1]][1])
-        updateSelectInput(session, "future_fib_lag3", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
-        updateSelectInput(session, "id_val3", choices = id_vals[[1]], selected = id_vals[[1]][1])
-        status_msg3("Filters loaded successfully!")
-      }, error = function(e) {
-        status_msg3(paste("Connected, but failed to load filters:", e$message))
-      })
-      
-    }, error = function(e) {
-      status_msg3(paste("Database Connection Error:", e$message))
-    })
-  })
-  
-  # Execute query for Tab 3
-  observeEvent(input$execute_3, {
-    if (input$db_pass3 == "") {
-      status_msg3("Error: Password is not set.")
-      return()
-    }
-    if (input$fib_lag3 == "" || input$future_fib_lag3 == "" || input$id_val3 == "") {
-      status_msg3("Error: Please connect and select filter values first.")
-      return()
-    }
-    
-    status_msg3("Running query...")
-    
+
+  # ── PAST: Execute ──
+  observeEvent(input$execute_P, {
+    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
+    if (input$fib_lagP == "" || input$id_valP == "") { status_msgP("Error: Select filters first."); return() }
+    status_msgP("Running query...")
     query <- sprintf("
-      SELECT 
-          bucket_num as bucket,
-          past_record_count as past_count, 
-          past_min, past_q1, past_median, past_q3, past_max,
-          future_record_count as future_count, 
-          future_min, future_q1, future_median, future_q3, future_max
-      FROM inference.return_expectation_decomposition_combined
-      WHERE past_fibonacci_lag_value = %s 
-        AND future_fibonacci_lag_value = %s 
-        AND id = '%s'
-      ORDER BY bucket_num;
-    ", input$fib_lag3, input$future_fib_lag3, input$id_val3)
-    
+      SELECT past_excess_return_z_bucket_num AS bucket,
+             SUM(record_count_in_bucket) AS count,
+             MIN(min_past_excess_return_vs_spy) AS lo,
+             SUM(past_q1_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS q1,
+             SUM(past_median_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS med,
+             SUM(past_q3_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS q3,
+             MAX(max_past_excess_return_vs_spy) AS hi
+      FROM inference.return_cluster_past_bucket_stats
+      WHERE fibonacci_lag_value = %s AND id = %s
+      GROUP BY past_excess_return_z_bucket_num
+      ORDER BY past_excess_return_z_bucket_num;",
+      input$fib_lagP, input$id_valP)
     tryCatch({
-      con <- get_con(input, tab = 3)
+      con <- get_con(input, "P")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       res <- dbGetQuery(con, query)
-      
-      if(nrow(res) > 0) {
-        # Convert numeric columns
-        for(col in names(res)) { res[[col]] <- as.numeric(res[[col]]) }
-        
-        # Safe percentages
-        tot_past <- sum(res$past_count, na.rm = TRUE)
-        tot_future <- sum(res$future_count, na.rm = TRUE)
-        res$past_pct <- if(tot_past > 0) (res$past_count / tot_past) * 100 else 0
-        res$future_pct <- if(tot_future > 0) (res$future_count / tot_future) * 100 else 0
-        
-        app_data3(res)
-        status_msg3(paste("Successfully loaded", nrow(res), "rows from combined tables."))
-      } else {
-        status_msg3("No data found for this combination.")
-        app_data3(NULL)
-      }
-      
-    }, error = function(e) {
-      status_msg3(paste("Database Error:", e$message))
-    })
+      for(col in names(res)) res[[col]] <- as.numeric(res[[col]])
+      app_dataP(res)
+      status_msgP(paste("Loaded", nrow(res), "rows."))
+    }, error = function(e) { status_msgP(paste("Error:", e$message)) })
   })
-  
-  # Render the new visualization for Tab 3
-  output$combinedPlot <- renderPlotly({
-    req(app_data3())
-    df <- app_data3()
-    
-    if (nrow(df) == 0) {
-      return(plot_ly() %>% layout(title = list(text = "No data found for these filters", font = list(color = "#f8fafc", family = "Inter", size = 18)), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+
+  # ── PAST: Render ──
+  output$pastPlot <- renderPlotly({
+    req(app_dataP())
+    df <- app_dataP()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    render_single_boxplot(df, "Past Return Distribution by Alpha Z-Bucket", "Past Excess Return Z-Bucket (SD)", '#a855f7', 'rgba(167, 139, 250, 0.4)')
+  })
+
+  # ── FUTURE: Connect ──
+  observeEvent(input$connect_btnF, {
+    if (input$db_passF == "") { status_msgF("Error: Password is not set."); return() }
+    status_msgF("Connecting...")
+    tryCatch({
+      con <- get_con(input, "F")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      id_vals  <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
+      fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
+      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
+      updateSelectInput(session, "id_valF",  choices = id_vals[[1]],  selected = id_vals[[1]][1])
+      updateSelectInput(session, "fib_lagF", choices = fib_vals[[1]], selected = fib_vals[[1]][1])
+      updateSelectInput(session, "future_fib_lagF", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
+      status_msgF("Filters loaded!")
+    }, error = function(e) { status_msgF(paste("Error:", e$message)) })
+  })
+
+  # ── FUTURE: Execute ──
+  observeEvent(input$execute_F, {
+    if (input$db_passF == "") { status_msgF("Error: Password is not set."); return() }
+    if (input$fib_lagF == "" || input$id_valF == "" || input$future_fib_lagF == "") { status_msgF("Error: Select filters first."); return() }
+    status_msgF("Running query...")
+    query <- sprintf("
+      SELECT future_excess_return_z_bucket_num AS bucket,
+             SUM(record_count_in_bucket) AS count,
+             MIN(min_future_excess_return_vs_spy) AS lo,
+             SUM(future_q1_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS q1,
+             SUM(future_median_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS med,
+             SUM(future_q3_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS q3,
+             MAX(max_future_excess_return_vs_spy) AS hi
+      FROM inference.return_cluster_future_bucket_stats
+      WHERE fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
+      GROUP BY future_excess_return_z_bucket_num
+      ORDER BY future_excess_return_z_bucket_num;",
+      input$fib_lagF, input$future_fib_lagF, input$id_valF)
+    tryCatch({
+      con <- get_con(input, "F")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      res <- dbGetQuery(con, query)
+      for(col in names(res)) res[[col]] <- as.numeric(res[[col]])
+      app_dataF(res)
+      status_msgF(paste("Loaded", nrow(res), "rows."))
+    }, error = function(e) { status_msgF(paste("Error:", e$message)) })
+  })
+
+  # ── FUTURE: Render ──
+  output$futurePlot <- renderPlotly({
+    req(app_dataF())
+    df <- app_dataF()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    render_single_boxplot(df, "Future Return Distribution by Alpha Z-Bucket", "Future Excess Return Z-Bucket (SD)", '#0ea5e9', 'rgba(14, 165, 233, 0.4)')
+  })
+
+  # ── COMBINED: Connect ──
+  observeEvent(input$connect_btnC, {
+    if (input$db_passC == "") { status_msgC("Error: Password is not set."); return() }
+    status_msgC("Connecting...")
+    tryCatch({
+      con <- get_con(input, "C")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      id_vals       <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
+      past_fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
+      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
+      updateSelectInput(session, "id_valC", choices = id_vals[[1]], selected = id_vals[[1]][1])
+      updateSelectInput(session, "past_fib_lagC", choices = past_fib_vals[[1]], selected = past_fib_vals[[1]][1])
+      updateSelectInput(session, "future_fib_lagC", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
+      status_msgC("Filters loaded!")
+    }, error = function(e) { status_msgC(paste("Error:", e$message)) })
+  })
+
+  # ── COMBINED: Execute ──
+  observeEvent(input$execute_C, {
+    if (input$db_passC == "") { status_msgC("Error: Password is not set."); return() }
+    if (input$id_valC == "" || input$past_fib_lagC == "" || input$future_fib_lagC == "") {
+      status_msgC("Error: Select filters first."); return()
     }
-    
-    # Calculate Dynamic Colors for Future Median
-    # Using a brighter neon pink/red for better contrast against dark blue
-    df$future_median_color <- ifelse(df$future_median > df$past_median, "#10b981", "#f43f5e")
-    
-    # Calculate X offsets for side-by-side grouped placement
-    # Using categorical plotting in Plotly grouped barmode, the boxes are slightly shifted.
-    # We will simulate this shift for markers: Past (-0.15), Future (+0.15)
-    bar_offset <- 0.16
-    df$x_num <- as.numeric(as.factor(df$bucket))
-    
+    status_msgC("Running query...")
+    query <- sprintf("
+      SELECT past_excess_return_z_bucket_num AS bucket,
+             MAX(past_record_count) AS past_count,
+             MIN(past_min) AS past_lo,
+             SUM(past_q1 * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_q1,
+             SUM(past_median * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_med,
+             SUM(past_q3 * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_q3,
+             MAX(past_max) AS past_hi,
+             SUM(future_record_count) AS future_count,
+             MIN(future_min) AS future_lo,
+             SUM(future_q1 * future_record_count) / NULLIF(SUM(future_record_count), 0) AS future_q1,
+             SUM(future_median * future_record_count) / NULLIF(SUM(future_record_count), 0) AS future_med,
+             SUM(future_q3 * future_record_count) / NULLIF(SUM(future_record_count), 0) AS future_q3,
+             MAX(future_max) AS future_hi
+      FROM inference.return_cluster_combined_bucket_stats
+      WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
+      GROUP BY past_excess_return_z_bucket_num
+      ORDER BY past_excess_return_z_bucket_num;",
+      input$past_fib_lagC, input$future_fib_lagC, input$id_valC)
+    tryCatch({
+      con <- get_con(input, "C")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      res <- dbGetQuery(con, query)
+      for(col in names(res)) res[[col]] <- as.numeric(res[[col]])
+      app_dataC(res)
+      status_msgC(paste("Loaded", nrow(res), "rows."))
+    }, error = function(e) { status_msgC(paste("Error:", e$message)) })
+  })
+
+  # ── COMBINED: Render ──
+  output$combinedPlot <- renderPlotly({
+    req(app_dataC())
+    df <- app_dataC()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+
+    tot_past <- sum(df$past_count, na.rm = TRUE)
+    tot_future <- sum(df$future_count, na.rm = TRUE)
+    df$past_pct  <- df$past_count * 100
+    df$future_pct <- if(tot_future > 0) (df$future_count / tot_future) * 100 else 0
+
     fig <- plot_ly(df)
-    
-    # PAST EXCESS RETURNS (Purple)
-    fig <- fig %>% add_trace(
-      type = 'box',
-      name = 'Past Return Distribution',
-      x = ~as.factor(bucket),
-      q1 = ~past_q1,
-      median = ~past_median,
-      q3 = ~past_q3,
-      lowerfence = ~past_min,
-      upperfence = ~past_max,
-      marker = list(color = '#a855f7'),
-      line = list(color = '#a855f7', width = 2),
-      fillcolor = 'rgba(167, 139, 250, 0.4)',
-      hoverinfo = "y",
-      offsetgroup = '1'
-    )
-    
-    # Light Gray Median Overlay (Past)
-    fig <- fig %>% add_markers(
-      x = ~x_num - bar_offset,
-      y = ~past_median,
-      name = 'Past Median',
-      marker = list(color = '#cbd5e1', symbol = "line-ew", size = 25, line = list(color='#cbd5e1', width=3)),
-      hoverinfo = "skip",
-      showlegend = FALSE,
-      offsetgroup = '1'
-    )
-    
-    # FUTURE EXCESS RETURNS (Sky Blue)
-    fig <- fig %>% add_trace(
-      type = 'box',
-      name = 'Future Return Distribution',
-      x = ~as.factor(bucket),
-      q1 = ~future_q1,
-      median = ~future_median,
-      q3 = ~future_q3,
-      lowerfence = ~future_min,
-      upperfence = ~future_max,
-      marker = list(color = '#0ea5e9'),
-      line = list(color = '#0ea5e9', width = 2),
-      fillcolor = 'rgba(14, 165, 233, 0.4)',
-      hoverinfo = "y",
-      offsetgroup = '2'
-    )
-    
-    # Traffic Light Median Overlay (Future)
-    fig <- fig %>% add_markers(
-      x = ~x_num + bar_offset,
-      y = ~future_median,
-      name = 'Future Median',
-      marker = list(
-        color = ~future_median_color, 
-        symbol = "line-ew", 
-        size = 25, 
-        line = list(color = ~future_median_color, width = 5)
-      ),
-      hoverinfo = "skip",
-      showlegend = FALSE,
-      offsetgroup = '2'
-    )
-    
-    # Record Percentage (PAST) -> Yellow dashed
-    fig <- fig %>% add_trace(
-      x = ~as.factor(bucket),
-      y = ~past_pct,
-      type = 'scatter',
-      mode = 'lines+markers',
-      name = 'Past % of Records',
-      yaxis = 'y2',
-      line = list(color = '#fbbf24', width = 2, dash = 'dot'),
-      marker = list(color = '#fbbf24', size = 6),
-      hovertemplate = "Bucket: %{x}<br>Past %: %{y:.2f}%<extra></extra>"
-    )
-    
-    # Record Percentage (FUTURE) -> Green solid
-    fig <- fig %>% add_trace(
-      x = ~as.factor(bucket),
-      y = ~future_pct,
-      type = 'scatter',
-      mode = 'lines+markers',
-      name = 'Future % of Records',
-      yaxis = 'y2',
-      line = list(color = '#34d399', width = 3),
-      marker = list(color = '#34d399', size = 8),
-      hovertemplate = "Bucket: %{x}<br>Future %: %{y:.2f}%<extra></extra>"
-    )
-    
-    # Layout configuration
+
+    # Past box (purple)
+    fig <- fig %>% add_trace(type='box', name='Past Return Distribution', x=~as.factor(bucket),
+      q1=~past_q1, median=~past_med, q3=~past_q3, lowerfence=~past_lo, upperfence=~past_hi,
+      marker=list(color='#a855f7'), line=list(color='#a855f7', width=2),
+      fillcolor='rgba(167,139,250,0.4)', hoverinfo="y", offsetgroup='1')
+    fig <- fig %>% add_markers(x=~as.factor(bucket), y=~past_med, name='Past Median',
+      marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
+      hoverinfo="skip", showlegend=FALSE, offsetgroup='1')
+
+    # Future box (sky blue)
+    fig <- fig %>% add_trace(type='box', name='Future Return Distribution', x=~as.factor(bucket),
+      q1=~future_q1, median=~future_med, q3=~future_q3, lowerfence=~future_lo, upperfence=~future_hi,
+      marker=list(color='#0ea5e9'), line=list(color='#0ea5e9', width=2),
+      fillcolor='rgba(14,165,233,0.4)', hoverinfo="y", offsetgroup='2')
+    fig <- fig %>% add_markers(x=~as.factor(bucket), y=~future_med, name='Future Median',
+      marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
+      hoverinfo="skip", showlegend=FALSE, offsetgroup='2')
+
+    # Past % (yellow dashed)
+    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~past_pct, type='scatter', mode='lines+markers',
+      name='Past % of Records', yaxis='y2', line=list(color='#fbbf24', width=2, dash='dot'),
+      marker=list(color='#fbbf24', size=6), hovertemplate="Bucket: %{x}<br>Past %%: %{y:.2f}%<extra></extra>")
+
+    # Future % (green solid)
+    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~future_pct, type='scatter', mode='lines+markers',
+      name='Future % of Records', yaxis='y2', line=list(color='#34d399', width=3),
+      marker=list(color='#34d399', size=8), hovertemplate="Bucket: %{x}<br>Future %%: %{y:.2f}%<extra></extra>")
+
     max_pct <- max(c(df$past_pct, df$future_pct), na.rm = TRUE)
-    
+
     fig %>% layout(
       title = list(text = "Past vs. Future Expected Returns by Alpha Z-Bucket", font = list(color = "#f8fafc", family = "Inter", size = 18)),
-      paper_bgcolor = "rgba(0,0,0,0)",
-      plot_bgcolor = "rgba(0,0,0,0)",
-      barmode = "group",
-      boxmode = "group",
-      xaxis = list(
-        title = "Excess Return Z-Bucket (SD)",
-        color = "#94a3b8",
-        gridcolor = "rgba(255, 255, 255, 0.1)",
-        zerolinecolor = "rgba(255, 255, 255, 0.1)"
-      ),
-      yaxis = list(
-        title = "Excess Return vs SPY (%)",
-        color = "#94a3b8",
-        gridcolor = "rgba(255, 255, 255, 0.1)",
-        zeroline = TRUE,
-        zerolinewidth = 2,
-        zerolinecolor = "rgba(255, 255, 255, 0.2)"
-      ),
-      yaxis2 = list(
-        title = "Record Percentage (%)",
-        color = "#f8fafc",
-        gridcolor = "transparent",
-        overlaying = "y",
-        side = "right",
-        range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))
-      ),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group", boxmode = "group",
+      xaxis = list(title = "Excess Return Z-Bucket (SD)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
+      yaxis = list(title = "Excess Return vs SPY (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
+      yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
+                    range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       margin = list(l = 50, r = 60, b = 50, t = 50),
-      showlegend = TRUE,
-      legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
+      showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
+    )
+  })
+
+  # ── TRANSITION: Reactive values ──
+  app_dataT <- reactiveVal(NULL)
+  status_msgT <- reactiveVal("Ready")
+  output$statusMessageT <- renderText({ status_msgT() })
+  setup_env_switcher(input, session, "T")
+
+  # ── TRANSITION: Connect ──
+  observeEvent(input$connect_btnT, {
+    if (input$db_passT == "") { status_msgT("Error: Password is not set."); return() }
+    status_msgT("Connecting...")
+    tryCatch({
+      con <- get_con(input, "T")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      id_vals       <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
+      past_fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
+      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
+      updateSelectInput(session, "id_valT", choices = id_vals[[1]], selected = id_vals[[1]][1])
+      updateSelectInput(session, "past_fib_lagT", choices = past_fib_vals[[1]], selected = past_fib_vals[[1]][1])
+      updateSelectInput(session, "future_fib_lagT", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
+      status_msgT("Filters loaded!")
+    }, error = function(e) { status_msgT(paste("Error:", e$message)) })
+  })
+
+  # ── TRANSITION: Execute ──
+  observeEvent(input$execute_T, {
+    if (input$db_passT == "") { status_msgT("Error: Password is not set."); return() }
+    if (input$id_valT == "" || input$past_fib_lagT == "" || input$future_fib_lagT == "") {
+      status_msgT("Error: Select filters first."); return()
+    }
+    status_msgT("Running query...")
+    query <- sprintf("
+      SELECT past_excess_return_z_bucket_num AS bucket,
+             MAX(past_record_count) AS past_count,
+             MIN(past_min) AS past_lo,
+             SUM(past_q1 * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_q1,
+             SUM(past_median * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_med,
+             SUM(past_q3 * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_q3,
+             MAX(past_max) AS past_hi,
+             SUM(future_record_count) AS future_count,
+             MIN(future_min) AS future_lo,
+             SUM(future_median * future_record_count) / NULLIF(SUM(future_record_count), 0) AS future_med,
+             MAX(future_max) AS future_hi
+      FROM inference.return_cluster_combined_bucket_stats
+      WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
+      GROUP BY past_excess_return_z_bucket_num
+      ORDER BY past_excess_return_z_bucket_num;",
+      input$past_fib_lagT, input$future_fib_lagT, input$id_valT)
+    tryCatch({
+      con <- get_con(input, "T")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      res <- dbGetQuery(con, query)
+      for(col in names(res)) res[[col]] <- as.numeric(res[[col]])
+      app_dataT(res)
+      status_msgT(paste("Loaded", nrow(res), "rows."))
+    }, error = function(e) { status_msgT(paste("Error:", e$message)) })
+  })
+
+  # ── TRANSITION: Render ──
+  output$transitionPlot <- renderPlotly({
+    req(app_dataT())
+    df <- app_dataT()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+
+    tot_past <- sum(df$past_count, na.rm = TRUE)
+    tot_future <- sum(df$future_count, na.rm = TRUE)
+    df$past_pct  <- df$past_count * 100
+    df$future_pct <- if(tot_future > 0) (df$future_count / tot_future) * 100 else 0
+
+    # Confidence score: Sharpe-like ratio (future_med × 4) / range
+    df$conf_score <- ifelse(
+      (df$future_hi - df$future_lo) == 0, 0,
+      (df$future_med * 4) / (df$future_hi - df$future_lo)
+    )
+    # Color: green if positive, red if negative
+    df$conf_color <- ifelse(df$conf_score >= 0, '#34d399', '#f87171')
+
+    fig <- plot_ly(df)
+
+    # Past boxplot (purple)
+    fig <- fig %>% add_trace(type='box', name='Past Return Distribution', x=~as.factor(bucket),
+      q1=~past_q1, median=~past_med, q3=~past_q3, lowerfence=~past_lo, upperfence=~past_hi,
+      marker=list(color='#a855f7'), line=list(color='#a855f7', width=2),
+      fillcolor='rgba(167,139,250,0.4)', hoverinfo="y", offsetgroup='1')
+    fig <- fig %>% add_markers(x=~as.factor(bucket), y=~past_med, name='Past Median',
+      marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
+      hoverinfo="skip", showlegend=FALSE, offsetgroup='1')
+
+    # Future range (sky blue) — box body spans min to max
+    fig <- fig %>% add_trace(type='box', name='Future Range (Min to Max)', x=~as.factor(bucket),
+      q1=~future_lo, median=~future_med, q3=~future_hi,
+      lowerfence=~future_lo, upperfence=~future_hi,
+      marker=list(color='#0ea5e9'), line=list(color='#0ea5e9', width=2),
+      fillcolor='rgba(14,165,233,0.4)', hoverinfo="y", offsetgroup='2')
+    fig <- fig %>% add_markers(x=~as.factor(bucket), y=~future_med, name='Future Median',
+      marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
+      hoverinfo="skip", showlegend=FALSE, offsetgroup='2')
+
+    # Past % (yellow dashed)
+    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~past_pct, type='scatter', mode='lines+markers',
+      name='Past % of Records', yaxis='y2', line=list(color='#fbbf24', width=2, dash='dot'),
+      marker=list(color='#fbbf24', size=6), hovertemplate="Bucket: %{x}<br>Past %%: %{y:.2f}%<extra></extra>")
+
+    # Future % (green solid)
+    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~future_pct, type='scatter', mode='lines+markers',
+      name='Future % of Records', yaxis='y2', line=list(color='#34d399', width=3),
+      marker=list(color='#34d399', size=8), hovertemplate="Bucket: %{x}<br>Future %%: %{y:.2f}%<extra></extra>")
+
+    max_pct <- max(c(df$past_pct, df$future_pct), na.rm = TRUE)
+
+    # Build score annotations above each bucket
+    y_top <- max(c(df$past_hi, df$future_hi), na.rm = TRUE)
+    score_annotations <- lapply(seq_len(nrow(df)), function(i) {
+      list(
+        x = as.character(df$bucket[i]),
+        y = y_top * 1.15,
+        text = sprintf("%.2f", df$conf_score[i]),
+        font = list(color = df$conf_color[i], size = 12, family = "Inter"),
+        showarrow = FALSE, xref = "x", yref = "y"
+      )
+    })
+
+    fig %>% layout(
+      title = list(text = "Past Distribution vs Future Return Range", font = list(color = "#f8fafc", family = "Inter", size = 18)),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group", boxmode = "group",
+      xaxis = list(title = "Past Excess Return Z-Bucket (SD)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
+      yaxis = list(title = "Excess Return vs SPY (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
+      yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
+                    range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
+      annotations = score_annotations,
+      margin = list(l = 50, r = 60, b = 50, t = 50),
+      showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
   })
 }
