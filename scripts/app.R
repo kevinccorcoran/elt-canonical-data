@@ -606,11 +606,11 @@ server <- function(input, output, session) {
     df$conf_score <- ((0.60 * df$future_med) + (0.30 * df$future_lo) + (0.10 * df$future_hi)) - df$past_med
     # Build custom hover tooltips
     df$past_hover <- sprintf(
-      "<b>Past Distribution</b><br>Max: %.2f%%<br>Q3: %.2f%%<br>Median: %.2f%%<br>Q1: %.2f%%<br>Min: %.2f%%<br>Records: %d",
+      "<b>Past Distribution</b><br>Max: %.2f%%<br>Q3: %.2f%%<br>Median: %.2f%%<br>Q1: %.2f%%<br>Min: %.2f%%<br>Records: %.0f",
       df$past_hi, df$past_q3, df$past_med, df$past_q1, df$past_lo, df$past_count)
 
     df$future_hover <- sprintf(
-      "<b>Future Range</b><br>Max: %.2f%%<br>Median: %.2f%%<br>Min: %.2f%%<br>Records: %d",
+      "<b>Future Range</b><br>Max: %.2f%%<br>Median: %.2f%%<br>Min: %.2f%%<br>Records: %.0f",
       df$future_hi, df$future_med, df$future_lo, df$future_count)
 
     df$conf_color <- ifelse(df$conf_score >= 0, '#34d399', '#f87171')
