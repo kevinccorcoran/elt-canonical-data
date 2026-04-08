@@ -604,7 +604,15 @@ server <- function(input, output, session) {
     # Confidence score: Conservative Expected Future - past_med
     # Weights: 60% Median, 30% Min (Downside Risk), 10% Max (Upside Potential)
     df$conf_score <- ((0.60 * df$future_med) + (0.30 * df$future_lo) + (0.10 * df$future_hi)) - df$past_med
-    # Color: green if positive, red if negative
+    # Build custom hover tooltips
+    df$past_hover <- sprintf(
+      "<b>Past Distribution</b><br>Max: %.2f%%<br>Q3: %.2f%%<br>Median: %.2f%%<br>Q1: %.2f%%<br>Min: %.2f%%<br>Records: %d",
+      df$past_hi, df$past_q3, df$past_med, df$past_q1, df$past_lo, df$past_count)
+
+    df$future_hover <- sprintf(
+      "<b>Future Range</b><br>Max: %.2f%%<br>Median: %.2f%%<br>Min: %.2f%%<br>Records: %d",
+      df$future_hi, df$future_med, df$future_lo, df$future_count)
+
     df$conf_color <- ifelse(df$conf_score >= 0, '#34d399', '#f87171')
 
     fig <- plot_ly(df)
@@ -613,7 +621,7 @@ server <- function(input, output, session) {
     fig <- fig %>% add_trace(type='box', name='Past Return Distribution', x=~as.factor(bucket),
       q1=~past_q1, median=~past_med, q3=~past_q3, lowerfence=~past_lo, upperfence=~past_hi,
       marker=list(color='#a855f7'), line=list(color='#a855f7', width=2),
-      fillcolor='rgba(167,139,250,0.4)', hoverinfo="y", offsetgroup='1')
+      fillcolor='rgba(167,139,250,0.4)', text=~past_hover, hovertemplate="%{text}<extra></extra>", offsetgroup='1')
     fig <- fig %>% add_markers(x=~as.factor(bucket), y=~past_med, name='Past Median',
       marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
       hoverinfo="skip", showlegend=FALSE, offsetgroup='1')
@@ -623,7 +631,7 @@ server <- function(input, output, session) {
       q1=~future_lo, median=~future_med, q3=~future_hi,
       lowerfence=~future_lo, upperfence=~future_hi,
       marker=list(color='#0ea5e9'), line=list(color='#0ea5e9', width=2),
-      fillcolor='rgba(14,165,233,0.4)', hoverinfo="y", offsetgroup='2')
+      fillcolor='rgba(14,165,233,0.4)', text=~future_hover, hovertemplate="%{text}<extra></extra>", offsetgroup='2')
     fig <- fig %>% add_markers(x=~as.factor(bucket), y=~future_med, name='Future Median',
       marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
       hoverinfo="skip", showlegend=FALSE, offsetgroup='2')
@@ -631,12 +639,12 @@ server <- function(input, output, session) {
     # Past % (yellow dashed)
     fig <- fig %>% add_trace(x=~as.factor(bucket), y=~past_pct, type='scatter', mode='lines+markers',
       name='Past % of Records', yaxis='y2', line=list(color='#fbbf24', width=2, dash='dot'),
-      marker=list(color='#fbbf24', size=6), hovertemplate="Bucket: %{x}<br>Past %%: %{y:.2f}%<extra></extra>")
+      marker=list(color='#fbbf24', size=6), hovertemplate="<b>Bucket: %{x}</b><br>Past Records: %{y:.2f}%<extra></extra>")
 
     # Future % (green solid)
     fig <- fig %>% add_trace(x=~as.factor(bucket), y=~future_pct, type='scatter', mode='lines+markers',
       name='Future % of Records', yaxis='y2', line=list(color='#34d399', width=3),
-      marker=list(color='#34d399', size=8), hovertemplate="Bucket: %{x}<br>Future %%: %{y:.2f}%<extra></extra>")
+      marker=list(color='#34d399', size=8), hovertemplate="<b>Bucket: %{x}</b><br>Future Records: %{y:.2f}%<extra></extra>")
 
     max_pct <- max(c(df$past_pct, df$future_pct), na.rm = TRUE)
 
