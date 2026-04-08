@@ -601,10 +601,10 @@ server <- function(input, output, session) {
     df$past_pct  <- df$past_count * 100
     df$future_pct <- if(tot_future > 0) (df$future_count / tot_future) * 100 else 0
 
-    # Confidence score: Sharpe-like ratio (future_med × 4) / range
+    # Confidence score: Sharpe-like ratio ((future_med - past_med) × 4) / range
     df$conf_score <- ifelse(
       (df$future_hi - df$future_lo) == 0, 0,
-      (df$future_med * 4) / (df$future_hi - df$future_lo)
+      ((df$future_med - df$past_med) * 4) / (df$future_hi - df$future_lo)
     )
     # Color: green if positive, red if negative
     df$conf_color <- ifelse(df$conf_score >= 0, '#34d399', '#f87171')
