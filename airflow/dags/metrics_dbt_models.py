@@ -70,7 +70,21 @@ with DAG(
 ) as dag:
 
     # ------------------------------------------------------------------
-    # 0. DBT deps
+    # 0. Disk space guard — fail fast if DB disk is > 85% full
+    # ------------------------------------------------------------------
+    check_disk_space = BashOperator(
+        task_id="check_disk_space",
+        bash_command=(
+            "USAGE=$(df /var/lib/postgresql/data 2>/dev/null | awk 'NR==2 {print $5+0}') && "
+            "echo \"Disk usage: ${USAGE}%\" && "
+            "[ \"${USAGE:-0}\" -lt 85 ] || "
+            "(echo 'FAIL: Disk usage is ${USAGE}% (>85%). Free space before running.' && exit 1)"
+        ),
+        do_xcom_push=False,
+    )
+
+    # ------------------------------------------------------------------
+    # 0b. DBT deps
     # ------------------------------------------------------------------
     bash_command, env_vars = get_inference_dbt_deps_command(runtime_env)
     dbt_deps = BashOperator(
@@ -208,28 +222,9 @@ with DAG(
         do_xcom_push=False,
     )
 
-    bash_command, env_vars = get_inference_dbt_bash_command(runtime_env, "excess_return_scored")
-    dbt_run_excess_return_scored = BashOperator(
-        task_id="dbt_run_excess_return_scored",
-        bash_command=bash_command,
-        env=env_vars,
-        append_env=True,
-        do_xcom_push=False,
-    )
-
     # ------------------------------------------------------------------
-    # 5. Downstream metrics model
+    # Trigger inference DAG
     # ------------------------------------------------------------------
-    bash_command, env_vars = get_inference_dbt_bash_command(
-        runtime_env, "return_likelihood_matrix"
-    )
-    dbt_run_metrics_return_likelihood_matrix = BashOperator(
-        task_id="dbt_run_metrics_return_likelihood_matrix",
-        bash_command=bash_command,
-        env=env_vars,
-        append_env=True,
-        do_xcom_push=False,
-    )
 
     # ------------------------------------------------------------------
     # Trigger inference DAG
@@ -245,7 +240,8 @@ with DAG(
     # DEPENDENCIES
     # ------------------------------------------------------------------
 
-    dbt_deps >> dbt_run_intermediate_fibonacci_base
+    # Disk check first, then deps
+    check_disk_space >> dbt_deps >> dbt_run_intermediate_fibonacci_base
     dbt_run_intermediate_fibonacci_base >> dbt_run_fibonacci_offset_observation_dates
 
     dbt_run_ticker_weighted_growth_ranking >> python_run_ticker_cluster_segments
@@ -270,12 +266,5 @@ with DAG(
         >> dbt_run_metrics_excess_return
         >> dbt_run_metrics_excess_return_inc
         >> dbt_run_excess_return_joined
-        >> dbt_run_excess_return_scored
+        >> trigger_inference_dbt_models
     )
-
-    [
-        dbt_run_excess_return_scored,
-        dbt_run_ticker_cluster_volatility_summary,
-    ] >> dbt_run_metrics_return_likelihood_matrix
-
-    dbt_run_metrics_return_likelihood_matrix >> trigger_inference_dbt_models
