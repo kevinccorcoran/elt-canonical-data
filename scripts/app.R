@@ -601,11 +601,9 @@ server <- function(input, output, session) {
     df$past_pct  <- df$past_count * 100
     df$future_pct <- if(tot_future > 0) (df$future_count / tot_future) * 100 else 0
 
-    # Confidence score: Sharpe-like ratio ((future_med - past_med) × 4) / range
-    df$conf_score <- ifelse(
-      (df$future_hi - df$future_lo) == 0, 0,
-      ((df$future_med - df$past_med) * 4) / (df$future_hi - df$future_lo)
-    )
+    # Confidence score: Conservative Expected Future - past_med
+    # Weights: 60% Median, 30% Min (Downside Risk), 10% Max (Upside Potential)
+    df$conf_score <- ((0.60 * df$future_med) + (0.30 * df$future_lo) + (0.10 * df$future_hi)) - df$past_med
     # Color: green if positive, red if negative
     df$conf_color <- ifelse(df$conf_score >= 0, '#34d399', '#f87171')
 
