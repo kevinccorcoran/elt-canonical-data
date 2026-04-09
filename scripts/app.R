@@ -546,9 +546,9 @@ server <- function(input, output, session) {
     tryCatch({
       con <- get_con(input, "T")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      id_vals       <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
-      past_fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
-      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
+      id_vals         <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_lag_viability WHERE is_viable ORDER BY 1")
+      past_fib_vals   <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_lag_viability WHERE is_viable ORDER BY 1")
+      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_lag_viability WHERE is_viable ORDER BY 1")
       updateSelectInput(session, "id_valT", choices = id_vals[[1]], selected = id_vals[[1]][1])
       updateSelectInput(session, "past_fib_lagT", choices = past_fib_vals[[1]], selected = past_fib_vals[[1]][1])
       updateSelectInput(session, "future_fib_lagT", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
@@ -565,19 +565,14 @@ server <- function(input, output, session) {
     status_msgT("Running query...")
     query <- sprintf("
       SELECT past_excess_return_z_bucket_num AS bucket,
-             MAX(past_record_count) AS past_count,
-             MIN(past_min) AS past_lo,
-             SUM(past_q1 * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_q1,
-             SUM(past_median * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_med,
-             SUM(past_q3 * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_q3,
-             MAX(past_max) AS past_hi,
-             SUM(future_record_count) AS future_count,
-             MIN(future_min) AS future_lo,
-             SUM(future_median * future_record_count) / NULLIF(SUM(future_record_count), 0) AS future_med,
-             MAX(future_max) AS future_hi
-      FROM inference.return_cluster_combined_bucket_stats
+             past_record_count AS past_count,
+             past_lo, past_q1, past_median AS past_med, past_q3, past_hi,
+             future_record_count AS future_count,
+             future_lo, future_median AS future_med, future_hi,
+             n_observations,
+             future_confidence_score AS conf_score
+      FROM inference.return_cluster_transition_confidence
       WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
-      GROUP BY past_excess_return_z_bucket_num
       ORDER BY past_excess_return_z_bucket_num;",
       input$past_fib_lagT, input$future_fib_lagT, input$id_valT)
     tryCatch({
@@ -601,9 +596,7 @@ server <- function(input, output, session) {
     df$past_pct  <- df$past_count * 100
     df$future_pct <- if(tot_future > 0) (df$future_count / tot_future) * 100 else 0
 
-    # Confidence score: Conservative Expected Future - past_med
-    # Weights: 60% Median, 30% Min (Downside Risk), 10% Max (Upside Potential)
-    df$conf_score <- ((0.60 * df$future_med) + (0.30 * df$future_lo) + (0.10 * df$future_hi)) - df$past_med
+    # conf_score comes directly from the DB (future_confidence_score)
     # Build custom hover tooltips
     df$past_hover <- sprintf(
       "<b>Past Distribution</b><br>Max: %.2f%%<br>Q3: %.2f%%<br>Median: %.2f%%<br>Q1: %.2f%%<br>Min: %.2f%%<br>Records: %.0f",
