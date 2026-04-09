@@ -360,6 +360,16 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # --- return_cluster_lag_viability ---
+    bash_viab, env_viab = get_inference_dbt_bash_command(runtime_env, "return_cluster_lag_viability")
+    dbt_run_lag_viability = BashOperator(
+        task_id="dbt_run_return_cluster_lag_viability",
+        bash_command=bash_viab,
+        env=env_viab,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     # --- return_cluster_transition_confidence ---
     bash_conf, env_conf = get_inference_dbt_bash_command(runtime_env, "return_cluster_transition_confidence")
     dbt_run_transition_confidence = BashOperator(
@@ -371,4 +381,6 @@ with DAG(
     )
 
     # DEPENDENCIES
-    dbt_run_feature_set >> batch_transition_scored >> batch_transition_distribution >> [dbt_run_past_bucket_stats, dbt_run_future_bucket_stats] >> dbt_run_combined_bucket_stats >> dbt_run_transition_confidence
+    dbt_run_feature_set >> [batch_transition_scored, dbt_run_lag_viability]
+    batch_transition_scored >> batch_transition_distribution >> [dbt_run_past_bucket_stats, dbt_run_future_bucket_stats] >> dbt_run_combined_bucket_stats
+    [dbt_run_combined_bucket_stats, dbt_run_lag_viability] >> dbt_run_transition_confidence
