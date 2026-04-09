@@ -570,7 +570,8 @@ server <- function(input, output, session) {
              future_record_count AS future_count,
              future_lo, future_median AS future_med, future_hi,
              n_observations,
-             future_confidence_score AS conf_score
+             future_confidence_score AS conf_score,
+             future_improvement_score AS improv_score
       FROM inference.return_cluster_transition_confidence
       WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
       ORDER BY past_excess_return_z_bucket_num;",
@@ -607,6 +608,7 @@ server <- function(input, output, session) {
       df$future_hi, df$future_med, df$future_lo, df$future_count)
 
     df$conf_color <- ifelse(df$conf_score >= 0, '#34d399', '#f87171')
+    df$improv_color <- ifelse(df$improv_score >= 0, '#60a5fa', '#f87171')
 
     fig <- plot_ly(df)
 
@@ -644,24 +646,40 @@ server <- function(input, output, session) {
     # Build score annotations evenly spaced across plot area
     n_buckets <- nrow(df)
     # Evenly space from ~10% to ~90% of plot width to avoid axis labels
-    score_annotations <- lapply(seq_len(n_buckets), function(i) {
+    # Row 1: Expected Return (future median per month)
+    return_annotations <- lapply(seq_len(n_buckets), function(i) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
       list(
-        x = x_pos,
-        y = 1.04,
+        x = x_pos, y = 1.04,
         text = sprintf("<b>%s: %.2f</b>", df$bucket[i], df$conf_score[i]),
-        font = list(color = df$conf_color[i], size = 12, family = "Inter"),
+        font = list(color = df$conf_color[i], size = 11, family = "Inter"),
         showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
     })
-    # Add a label for the score row
-    score_label <- list(
+    # Row 2: Improvement (future - past per month)
+    improv_annotations <- lapply(seq_len(n_buckets), function(i) {
+      x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
+      list(
+        x = x_pos, y = 0.97,
+        text = sprintf("<b>%s: %.2f</b>", df$bucket[i], df$improv_score[i]),
+        font = list(color = df$improv_color[i], size = 11, family = "Inter"),
+        showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+      )
+    })
+    # Labels
+    return_label <- list(
       x = 0.5, y = 1.08,
-      text = "<b>Confidence Score</b>",
-      font = list(color = "#94a3b8", size = 11, family = "Inter"),
+      text = "<b>Expected Return /mo</b>",
+      font = list(color = "#94a3b8", size = 10, family = "Inter"),
       showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
     )
-    all_annotations <- c(list(score_label), score_annotations)
+    improv_label <- list(
+      x = 0.5, y = 1.01,
+      text = "<b>Improvement /mo</b>",
+      font = list(color = "#94a3b8", size = 10, family = "Inter"),
+      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+    )
+    all_annotations <- c(list(return_label), return_annotations, list(improv_label), improv_annotations)
 
     fig %>% layout(
       title = list(text = "Past Distribution vs Future Return Range", font = list(color = "#f8fafc", family = "Inter", size = 18)),
@@ -671,7 +689,7 @@ server <- function(input, output, session) {
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       annotations = all_annotations,
-      margin = list(l = 50, r = 60, b = 50, t = 90),
+      margin = list(l = 50, r = 60, b = 50, t = 110),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
   })
