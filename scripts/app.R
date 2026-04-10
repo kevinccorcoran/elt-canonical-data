@@ -572,7 +572,8 @@ server <- function(input, output, session) {
              n_observations,
              future_confidence_score AS conf_score,
              future_improvement_score AS improv_score,
-             future_risk_score AS risk_score
+             future_risk_score AS risk_score,
+             signal
       FROM inference.return_cluster_transition_confidence
       WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
       ORDER BY past_excess_return_z_bucket_num;",
@@ -581,7 +582,7 @@ server <- function(input, output, session) {
       con <- get_con(input, "T")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       res <- dbGetQuery(con, query)
-      for(col in names(res)) res[[col]] <- as.numeric(res[[col]])
+      for(col in names(res)) { if(col != "signal") res[[col]] <- as.numeric(res[[col]]) }
       app_dataT(res)
       status_msgT(paste("Loaded", nrow(res), "rows."))
     }, error = function(e) { status_msgT(paste("Error:", e$message)) })
@@ -653,7 +654,7 @@ server <- function(input, output, session) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
       list(
         x = x_pos, y = 1.04,
-        text = sprintf("<b>%s: %.2f</b>", df$bucket[i], df$conf_score[i]),
+        text = sprintf("<b>%s · %s: %.2f</b>", df$bucket[i], df$signal[i], df$conf_score[i]),
         font = list(color = df$conf_color[i], size = 11, family = "Inter"),
         showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
