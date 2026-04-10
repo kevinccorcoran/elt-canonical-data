@@ -571,7 +571,8 @@ server <- function(input, output, session) {
              future_lo, future_median AS future_med, future_hi,
              n_observations,
              future_confidence_score AS conf_score,
-             future_improvement_score AS improv_score
+             future_improvement_score AS improv_score,
+             future_risk_score AS risk_score
       FROM inference.return_cluster_transition_confidence
       WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
       ORDER BY past_excess_return_z_bucket_num;",
@@ -609,6 +610,7 @@ server <- function(input, output, session) {
 
     df$conf_color <- ifelse(df$conf_score >= 0, '#34d399', '#f87171')
     df$improv_color <- ifelse(df$improv_score >= 0, '#60a5fa', '#f87171')
+    df$risk_color <- ifelse(df$risk_score <= 10, '#34d399', ifelse(df$risk_score <= 30, '#fbbf24', '#f87171'))
 
     fig <- plot_ly(df)
 
@@ -666,6 +668,16 @@ server <- function(input, output, session) {
         showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
     })
+    # Row 3: Risk (spread per month)
+    risk_annotations <- lapply(seq_len(n_buckets), function(i) {
+      x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
+      list(
+        x = x_pos, y = 0.90,
+        text = sprintf("<b>%s: %.1f</b>", df$bucket[i], df$risk_score[i]),
+        font = list(color = df$risk_color[i], size = 11, family = "Inter"),
+        showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+      )
+    })
     # Labels
     return_label <- list(
       x = 0.5, y = 1.08,
@@ -679,7 +691,13 @@ server <- function(input, output, session) {
       font = list(color = "#94a3b8", size = 10, family = "Inter"),
       showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
     )
-    all_annotations <- c(list(return_label), return_annotations, list(improv_label), improv_annotations)
+    risk_label <- list(
+      x = 0.5, y = 0.94,
+      text = "<b>Risk /mo</b>",
+      font = list(color = "#94a3b8", size = 10, family = "Inter"),
+      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+    )
+    all_annotations <- c(list(return_label), return_annotations, list(improv_label), improv_annotations, list(risk_label), risk_annotations)
 
     fig %>% layout(
       title = list(text = "Past Distribution vs Future Return Range", font = list(color = "#f8fafc", family = "Inter", size = 18)),
@@ -689,7 +707,7 @@ server <- function(input, output, session) {
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       annotations = all_annotations,
-      margin = list(l = 50, r = 60, b = 50, t = 110),
+      margin = list(l = 50, r = 60, b = 50, t = 130),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
   })
