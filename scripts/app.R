@@ -546,9 +546,9 @@ server <- function(input, output, session) {
     tryCatch({
       con <- get_con(input, "T")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      id_vals         <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_lag_viability WHERE is_viable ORDER BY 1")
-      past_fib_vals   <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_lag_viability WHERE is_viable ORDER BY 1")
-      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_lag_viability WHERE is_viable ORDER BY 1")
+      id_vals         <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_lag_viability ORDER BY 1")
+      past_fib_vals   <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_lag_viability ORDER BY 1")
+      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_lag_viability ORDER BY 1")
       updateSelectInput(session, "id_valT", choices = id_vals[[1]], selected = id_vals[[1]][1])
       updateSelectInput(session, "past_fib_lagT", choices = past_fib_vals[[1]], selected = past_fib_vals[[1]][1])
       updateSelectInput(session, "future_fib_lagT", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
