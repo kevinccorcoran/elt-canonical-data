@@ -648,13 +648,25 @@ server <- function(input, output, session) {
 
     # Build score annotations evenly spaced across plot area
     n_buckets <- nrow(df)
-    # Evenly space from ~10% to ~90% of plot width to avoid axis labels
+    # Signal color mapping
+    signal_colors <- c('BUY' = '#34d399', 'HOLD' = '#fbbf24', 'WATCH' = '#60a5fa', 'SELL' = '#f87171')
+    # Row 0: Signal (BUY/HOLD/WATCH/SELL)
+    signal_annotations <- lapply(seq_len(n_buckets), function(i) {
+      x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
+      sig <- df$signal[i]
+      list(
+        x = x_pos, y = 1.12,
+        text = sprintf("<b>%s: %s</b>", df$bucket[i], sig),
+        font = list(color = signal_colors[sig], size = 13, family = "Inter"),
+        showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+      )
+    })
     # Row 1: Expected Return (future median per month)
     return_annotations <- lapply(seq_len(n_buckets), function(i) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
       list(
         x = x_pos, y = 1.04,
-        text = sprintf("<b>%s · %s: %.2f</b>", df$bucket[i], df$signal[i], df$conf_score[i]),
+        text = sprintf("<b>%s: %.2f</b>", df$bucket[i], df$conf_score[i]),
         font = list(color = df$conf_color[i], size = 11, family = "Inter"),
         showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
@@ -680,6 +692,12 @@ server <- function(input, output, session) {
       )
     })
     # Labels
+    signal_label <- list(
+      x = 0.5, y = 1.16,
+      text = "<b>Signal</b>",
+      font = list(color = "#94a3b8", size = 10, family = "Inter"),
+      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+    )
     return_label <- list(
       x = 0.5, y = 1.08,
       text = "<b>Expected Return /mo</b>  <i>= future_median ÷ future_months</i>",
@@ -698,7 +716,7 @@ server <- function(input, output, session) {
       font = list(color = "#94a3b8", size = 10, family = "Inter"),
       showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
     )
-    all_annotations <- c(list(return_label), return_annotations, list(improv_label), improv_annotations, list(risk_label), risk_annotations)
+    all_annotations <- c(list(signal_label), signal_annotations, list(return_label), return_annotations, list(improv_label), improv_annotations, list(risk_label), risk_annotations)
 
     fig %>% layout(
       title = list(text = "Past Distribution vs Future Return Range", font = list(color = "#f8fafc", family = "Inter", size = 18)),
@@ -708,7 +726,7 @@ server <- function(input, output, session) {
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       annotations = all_annotations,
-      margin = list(l = 50, r = 60, b = 50, t = 130),
+      margin = list(l = 50, r = 60, b = 50, t = 150),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
   })
