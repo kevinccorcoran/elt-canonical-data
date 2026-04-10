@@ -650,71 +650,68 @@ server <- function(input, output, session) {
     n_buckets <- nrow(df)
     # Signal color mapping
     signal_colors <- c('BUY' = '#34d399', 'HOLD' = '#fbbf24', 'WATCH' = '#60a5fa', 'SELL' = '#f87171')
-    # Row 0: Signal (BUY/HOLD/WATCH/SELL)
+
+    # Row 0: Signal (BUY/HOLD/WATCH/SELL) — prominent, largest font
     signal_annotations <- lapply(seq_len(n_buckets), function(i) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
       sig <- df$signal[i]
       list(
-        x = x_pos, y = 1.12,
-        text = sprintf("<b>%s: %s</b>", df$bucket[i], sig),
-        font = list(color = signal_colors[sig], size = 13, family = "Inter"),
+        x = x_pos, y = 1.13,
+        text = sprintf("<b>%s</b>", sig),
+        font = list(color = signal_colors[sig], size = 14, family = "Inter"),
         showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
     })
-    # Row 1: Expected Return (future median per month)
+    # Row 1: Expected Return — just the number
     return_annotations <- lapply(seq_len(n_buckets), function(i) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
       list(
-        x = x_pos, y = 1.04,
-        text = sprintf("<b>%s: %.2f</b>", df$bucket[i], df$conf_score[i]),
+        x = x_pos, y = 1.06,
+        text = sprintf("<b>%.2f</b>", df$conf_score[i]),
         font = list(color = df$conf_color[i], size = 11, family = "Inter"),
         showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
     })
-    # Row 2: Improvement (future - past per month)
+    # Row 2: Improvement — just the number
     improv_annotations <- lapply(seq_len(n_buckets), function(i) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
       list(
-        x = x_pos, y = 0.97,
-        text = sprintf("<b>%s: %.2f</b>", df$bucket[i], df$improv_score[i]),
+        x = x_pos, y = 1.00,
+        text = sprintf("<b>%.2f</b>", df$improv_score[i]),
         font = list(color = df$improv_color[i], size = 11, family = "Inter"),
         showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
     })
-    # Row 3: Risk (spread per month)
+    # Row 3: Risk — just the number
     risk_annotations <- lapply(seq_len(n_buckets), function(i) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
       list(
-        x = x_pos, y = 0.90,
-        text = sprintf("<b>%s: %.1f</b>", df$bucket[i], df$risk_score[i]),
+        x = x_pos, y = 0.94,
+        text = sprintf("<b>%.1f</b>", df$risk_score[i]),
         font = list(color = df$risk_color[i], size = 11, family = "Inter"),
         showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
     })
-    # Labels
+    # Row labels on the LEFT side
     signal_label <- list(
-      x = 0.5, y = 1.16,
-      text = "<b>Signal</b>",
-      font = list(color = "#94a3b8", size = 10, family = "Inter"),
-      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+      x = 0.0, y = 1.13, text = "<b>Signal</b>",
+      font = list(color = "#64748b", size = 9, family = "Inter"),
+      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "right"
     )
     return_label <- list(
-      x = 0.5, y = 1.08,
-      text = "<b>Expected Return /mo</b>  <i>= future_median ÷ future_months</i>",
-      font = list(color = "#94a3b8", size = 10, family = "Inter"),
-      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+      x = 0.0, y = 1.06, text = "<b>Return /mo</b>",
+      font = list(color = "#64748b", size = 9, family = "Inter"),
+      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "right"
     )
     improv_label <- list(
-      x = 0.5, y = 1.01,
-      text = "<b>Improvement /mo</b>  <i>= expected_return - (past_median ÷ past_months)</i>",
-      font = list(color = "#94a3b8", size = 10, family = "Inter"),
-      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+      x = 0.0, y = 1.00, text = "<b>Improv /mo</b>",
+      font = list(color = "#64748b", size = 9, family = "Inter"),
+      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "right"
     )
     risk_label <- list(
-      x = 0.5, y = 0.94,
-      text = "<b>Risk /mo</b>  <i>= (future_max - future_min) ÷ future_months</i>",
-      font = list(color = "#94a3b8", size = 10, family = "Inter"),
-      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
+      x = 0.0, y = 0.94, text = "<b>Risk /mo</b>",
+      font = list(color = "#64748b", size = 9, family = "Inter"),
+      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "right"
     )
     all_annotations <- c(list(signal_label), signal_annotations, list(return_label), return_annotations, list(improv_label), improv_annotations, list(risk_label), risk_annotations)
 
@@ -726,7 +723,7 @@ server <- function(input, output, session) {
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       annotations = all_annotations,
-      margin = list(l = 50, r = 60, b = 50, t = 150),
+      margin = list(l = 80, r = 60, b = 50, t = 140),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
   })
