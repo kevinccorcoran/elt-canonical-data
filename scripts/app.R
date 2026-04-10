@@ -681,19 +681,19 @@ server <- function(input, output, session) {
     # Labels
     return_label <- list(
       x = 0.5, y = 1.08,
-      text = "<b>Expected Return /mo</b>",
+      text = "<b>Expected Return /mo</b>  <i>= future_median ÷ future_months</i>",
       font = list(color = "#94a3b8", size = 10, family = "Inter"),
       showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
     )
     improv_label <- list(
       x = 0.5, y = 1.01,
-      text = "<b>Improvement /mo</b>",
+      text = "<b>Improvement /mo</b>  <i>= expected_return - (past_median ÷ past_months)</i>",
       font = list(color = "#94a3b8", size = 10, family = "Inter"),
       showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
     )
     risk_label <- list(
       x = 0.5, y = 0.94,
-      text = "<b>Risk /mo</b>",
+      text = "<b>Risk /mo</b>  <i>= (future_max - future_min) ÷ future_months</i>",
       font = list(color = "#94a3b8", size = 10, family = "Inter"),
       showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
     )
