@@ -715,26 +715,23 @@ server <- function(input, output, session) {
     )
     all_annotations <- c(list(signal_label), signal_annotations, list(return_label), return_annotations, list(improv_label), improv_annotations, list(risk_label), risk_annotations)
 
-    formula_text <- paste0(
-      "<span style='color:#64748b;font-size:10px'>",
-      "Return = future_median / future_lag  |  ",
-      "Improv = (future_median - past_median) / future_lag  |  ",
-      "Risk = (future_hi - future_lo) / future_median",
-      "</span>"
+    formula_annotation <- list(
+      x = 0.5, y = -0.35,
+      text = "Return = future_median / future_lag  |  Improv = (future_median - past_median) / future_lag  |  Risk = (future_hi - future_lo) / future_median",
+      font = list(color = "#64748b", size = 9, family = "Inter"),
+      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
     )
+    all_annotations <- c(all_annotations, list(formula_annotation))
 
     fig %>% layout(
-      title = list(
-        text = paste0("Past Distribution vs Future Return Range<br>", formula_text),
-        font = list(color = "#f8fafc", family = "Inter", size = 18)
-      ),
+      title = list(text = "Past Distribution vs Future Return Range", font = list(color = "#f8fafc", family = "Inter", size = 18)),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group", boxmode = "group",
       xaxis = list(title = "Past Excess Return Z-Bucket (SD)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
       yaxis = list(title = "Excess Return vs SPY (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       annotations = all_annotations,
-      margin = list(l = 80, r = 60, b = 50, t = 140),
+      margin = list(l = 80, r = 60, b = 80, t = 140),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
   })
