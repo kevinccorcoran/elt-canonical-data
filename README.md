@@ -2,61 +2,42 @@
 
 ![Architecture Diagram](tools/alphastream_system_architecture.png)
 
-This repository contains the infrastructure, ingestion pipelines, and canonical data models for the AlphaStream data system.
+Infrastructure, ingestion pipelines, and canonical data models for the AlphaStream data system.
 
 ## Data Lineage
 
 ### ELT Canonical Data
 ![ELT Canonical Data Lineage](tools/elt_lineage_graph.png)
 
-*The graph above represents the data lineage for the ELT canonical data repository, showing the flow from ingestion and raw tables to the canonical data models (CDM).*
+Ingestion → raw tables → canonical data models (CDM).
 
 ### ETL Inference
 ![ETL Inference Lineage](tools/inference_lineage_graph.png)
 
-*The graph above represents the data lineage for the ETL inference repository, specifically showing the flow for the metrics and inference tables. Table names are voluntarily masked for proprietary reasons.*
+Metrics and inference tables. Table names masked for proprietary reasons.
 
 ## Interactive Analytics Dashboard
 
-![Dashboard](tools/decomposition_plot.png)
+![Dashboard](tools/alpha_forecast.png)
 
-An R Shiny and Plotly dashboard used for visualizing expected return distributions and statistical spreads across multiple look-ahead/look-back horizons.
-
-- **Stack:** R, Shiny, Plotly, PostgreSQL
-- **Features:** Dynamic filtering, interactive dual-axis visualizations (Past vs. Future distributions), and Alpha Z-Bucket analysis.
+R / Shiny / Plotly dashboard for exploring alpha distributions across look-back and look-ahead horizons. Stack: **R, Shiny, Plotly, PostgreSQL.**
 
 ## Project Timeline
 
-*   **2024 — Foundation & Prototype**
-    *   **Core Pipeline:** Built the ELT pipeline using Python, dbt, and Apache Airflow.
-    *   **Data Modeling:** Designed the initial Canonical Data Model (CDM).
-    *   **Environments:** Established separate local development and staging environments to test changes safely.
-
-*   **2025 — Scale, Consolidation & Metrics**
-    *   **API Migration:** Migrated ingestion to a more reliable market data API following the deprecation of the previous provider.
-    *   **Consolidation:** Unified data from two external APIs into a single source, consolidating Raw → CDM tables.
-    *   **Metrics Layer:** Developed a comprehensive metrics layer over the full historical dataset.
-    *   **Cloud Deployment:** Deployed to Heroku to run pipelines in a hosted environment instead of locally.
-
-*   **2026 — Containerization & Production Infrastructure**
-    *   **Repo Split:** Divided code into public `elt-canonical-data` (infrastructure) and private `inference-models` (proprietary logic).
-    *   **Docker:** Containerized the full stack to ensure portability and environment parity across local, staging, and production.
-    *   **Infrastructure:** Migrated to DigitalOcean for simpler control and lower operating costs.
-    *   **Managed DB:** Transitioned to a managed PostgreSQL database to offload backups, upgrades, and maintenance.
-
-*   **Ongoing — Continuous Evolution**
-    *   **Inference:** Developing and refining predictive inference models.
-    *   **Quality:** Continuous performance tuning and data quality improvements.
-    *   **Features:** Adding new features and extending analytical capabilities.
+- **2024 — Foundation.** Built the ELT pipeline in Python, dbt, and Airflow; designed the initial CDM; set up dev + staging environments.
+- **2025 — Scale.** Migrated ingestion to a more reliable market data API, consolidated Raw → CDM, added a metrics layer, deployed to the cloud.
+- **2026 Q1 — Containerization.** Split the codebase into public infra (`elt-canonical-data`) and private logic (`inference-models`), dockerized the stack, migrated to DigitalOcean + managed Postgres.
+- **2026 Q2 — Inference & Visualization.** Simplified the inference pipeline (removed a circular z-score layer, unified scoring), added viability enforcement + tail-risk, fixed intra-month smoothing with a month-end snapshot, polished the Shiny dashboard (Alpha terminology, proper boxplots, cleaner layout), and triaged the inference QA backlog.
+- **Ongoing.** Refining inference models, tuning performance, extending analytics.
 
 ---
 
 ## Documentation
 
-For technical details and setup guides, please refer to the `docs/` directory:
+See the `docs/` directory:
 
-*   [**Architecture & Design**](docs/architecture.md): System overview, data flow, and environment strategy.
-*   [**Development Guide**](docs/development_guide.md): Local setup, running tests, and Git workflows.
-*   [**Operations Manual**](docs/operations_manual.md): Provisioning, deployment, and recovery procedures.
-*   [**Security**](docs/security.md): Network security, SSH keys, and secret management.
-*   [**Cheat Sheet**](docs/cheat_sheet.md): Quick reference for frequently used commands.
+- [**Architecture & Design**](docs/architecture.md)
+- [**Development Guide**](docs/development_guide.md)
+- [**Operations Manual**](docs/operations_manual.md)
+- [**Security**](docs/security.md)
+- [**Cheat Sheet**](docs/cheat_sheet.md)
