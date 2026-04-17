@@ -218,7 +218,16 @@ ui <- navbarPage(
       make_sidebar("T", "Database Connection (Transition)", tagList(
         selectInput("id_valT", "ID", choices = c("Connect first..." = ""), selected = ""),
         selectInput("past_fib_lagT", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
-        selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = "")
+        selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = ""),
+        tags$div(
+          style = "margin-top: 1.5rem; padding: 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #64748b; border-radius: 4px;
+                   color: #94a3b8; font-size: 0.75rem; font-family: 'Inter'; line-height: 1.5;",
+          tags$div(style = "color: #f8fafc; font-weight: 600; margin-bottom: 0.4rem;", "Formulas"),
+          tags$div(HTML("<b>Return /mo</b> = future_median / future_lag")),
+          tags$div(HTML("<b>Improv /mo</b> = future_median / future_lag &minus; past_median / past_lag")),
+          tags$div(HTML("<b>Risk /mo</b> = (future_q3 &minus; future_q1) / future_lag"))
+        )
       )),
       mainPanel(div(class = "main-card",
         plotlyOutput("transitionPlot", height = "700px")
@@ -746,14 +755,6 @@ server <- function(input, output, session) {
     )
     all_annotations <- c(list(signal_label), signal_annotations, list(return_label), return_annotations, list(improv_label), improv_annotations, list(risk_label), risk_annotations)
 
-    formula_annotation <- list(
-      x = 0.5, y = -0.35,
-      text = "Return = future_median / future_lag  |  Improv = future_median/future_lag &minus; past_median/past_lag  |  Risk = (future_hi &minus; future_lo) / future_lag",
-      font = list(color = "#64748b", size = 9, family = "Inter"),
-      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
-    )
-    all_annotations <- c(all_annotations, list(formula_annotation))
-
     fig %>% layout(
       title = list(text = "Alpha Forecast", font = list(color = "#f8fafc", family = "Inter", size = 18)),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group", boxmode = "group",
@@ -762,7 +763,7 @@ server <- function(input, output, session) {
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       annotations = all_annotations,
-      margin = list(l = 110, r = 60, b = 120, t = 140),
+      margin = list(l = 110, r = 60, b = 80, t = 140),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
   })
