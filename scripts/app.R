@@ -745,7 +745,7 @@ server <- function(input, output, session) {
 
     formula_annotation <- list(
       x = 0.5, y = -0.35,
-      text = "Return = future_median / future_lag  |  Improv = (future_median - past_median) / future_lag  |  Risk = (future_hi - future_lo) / future_median",
+      text = "Return = future_median / future_lag  |  Improv = future_median/future_lag &minus; past_median/past_lag  |  Risk = (future_hi &minus; future_lo) / future_lag",
       font = list(color = "#64748b", size = 9, family = "Inter"),
       showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
     )
