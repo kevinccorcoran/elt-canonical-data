@@ -18,7 +18,7 @@ This repository contains the infrastructure, ingestion pipelines, and canonical 
 
 ## Interactive Analytics Dashboard
 
-![Dashboard](tools/decomposition_plot.png)
+![Dashboard](tools/alpha_forecast.png)
 
 An R Shiny and Plotly dashboard used for visualizing expected return distributions and statistical spreads across multiple look-ahead/look-back horizons.
 
@@ -38,11 +38,18 @@ An R Shiny and Plotly dashboard used for visualizing expected return distributio
     *   **Metrics Layer:** Developed a comprehensive metrics layer over the full historical dataset.
     *   **Cloud Deployment:** Deployed to Heroku to run pipelines in a hosted environment instead of locally.
 
-*   **2026 — Containerization & Production Infrastructure**
+*   **2026 Q1 — Containerization & Production Infrastructure**
     *   **Repo Split:** Divided code into public `elt-canonical-data` (infrastructure) and private `inference-models` (proprietary logic).
     *   **Docker:** Containerized the full stack to ensure portability and environment parity across local, staging, and production.
     *   **Infrastructure:** Migrated to DigitalOcean for simpler control and lower operating costs.
     *   **Managed DB:** Transitioned to a managed PostgreSQL database to offload backups, upgrades, and maintenance.
+
+*   **2026 Q2 — Inference Pipeline Refactor & Visualization Polish**
+    *   **Pipeline simplification:** Removed a circular z-score layer from the return-cluster transition pipeline and flattened the aggregation chain; moved score formulas (Return/Improv/Risk per month) into `combined_bucket_stats` as the single source of truth.
+    *   **Viability enforcement:** Added an `is_viable` flag (min-sample threshold + long-future-lag exclusion) and a `future_tail_risk_score` column; non-viable combos now emit an `INSUFFICIENT_DATA` signal instead of a trading label.
+    *   **Bucket-stats accuracy:** Replaced monthly averaging with a month-end snapshot in `return_cluster_feature_set` so short-horizon signals no longer smooth over intra-month volatility.
+    *   **Shiny polish:** Uniform past/future tooltip layout, true Q1/Q3 boxplots for the future distribution, smoothed bucket-share line, labels and title migrated to "Alpha" terminology, and layout tightened so annotations no longer clip.
+    *   **QA documentation:** Triaged and ranked the inference-model quality backlog (multiple testing, survivorship, non-stationarity, look-ahead bias in bucket labels, SPY beta assumption, overlapping lags).
 
 *   **Ongoing — Continuous Evolution**
     *   **Inference:** Developing and refining predictive inference models.
