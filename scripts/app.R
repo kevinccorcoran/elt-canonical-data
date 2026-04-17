@@ -484,10 +484,8 @@ server <- function(input, output, session) {
     df <- app_dataC()
     if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
 
-    tot_past <- sum(df$past_count, na.rm = TRUE)
-    tot_future <- sum(df$future_count, na.rm = TRUE)
-    df$past_pct  <- df$past_count * 100
-    df$future_pct <- if(tot_future > 0) (df$future_count / tot_future) * 100 else 0
+    tot_count <- sum(df$future_count, na.rm = TRUE)
+    df$bucket_share <- if(tot_count > 0) (df$future_count / tot_count) * 100 else 0
 
     fig <- plot_ly(df)
 
@@ -509,17 +507,12 @@ server <- function(input, output, session) {
       marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
       hoverinfo="skip", showlegend=FALSE, offsetgroup='2')
 
-    # Past % (yellow dashed)
-    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~past_pct, type='scatter', mode='lines+markers',
-      name='Past % of Records', yaxis='y2', line=list(color='#fbbf24', width=2, dash='dot'),
-      marker=list(color='#fbbf24', size=6), hovertemplate="Bucket: %{x}<br>Past %%: %{y:.2f}%<extra></extra>")
+    # Bucket share (green solid) — % of records in each bucket for this combo
+    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~bucket_share, type='scatter', mode='lines+markers',
+      name='Bucket share (%)', yaxis='y2', line=list(color='#34d399', width=3),
+      marker=list(color='#34d399', size=8), hovertemplate="Bucket: %{x}<br>Share: %{y:.2f}%<extra></extra>")
 
-    # Future % (green solid)
-    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~future_pct, type='scatter', mode='lines+markers',
-      name='Future % of Records', yaxis='y2', line=list(color='#34d399', width=3),
-      marker=list(color='#34d399', size=8), hovertemplate="Bucket: %{x}<br>Future %%: %{y:.2f}%<extra></extra>")
-
-    max_pct <- max(c(df$past_pct, df$future_pct), na.rm = TRUE)
+    max_pct <- max(df$bucket_share, na.rm = TRUE)
 
     fig %>% layout(
       title = list(text = "Past vs. Future Expected Returns by Alpha Z-Bucket", font = list(color = "#f8fafc", family = "Inter", size = 18)),
@@ -594,10 +587,8 @@ server <- function(input, output, session) {
     df <- app_dataT()
     if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
 
-    tot_past <- sum(df$past_count, na.rm = TRUE)
-    tot_future <- sum(df$future_count, na.rm = TRUE)
-    df$past_pct  <- df$past_count * 100
-    df$future_pct <- if(tot_future > 0) (df$future_count / tot_future) * 100 else 0
+    tot_count <- sum(df$future_count, na.rm = TRUE)
+    df$bucket_share <- if(tot_count > 0) (df$future_count / tot_count) * 100 else 0
 
     # conf_score comes directly from the DB (future_confidence_score)
     # Build custom hover tooltips
@@ -662,30 +653,27 @@ server <- function(input, output, session) {
       showlegend=FALSE, hoverlabel=list(font=list(family='Courier New, monospace', size=12)),
       offsetgroup='2')
 
-    # Past % (yellow dashed)
-    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~past_pct, type='scatter', mode='lines+markers',
-      name='Past % of Records', yaxis='y2', line=list(color='#fbbf24', width=2, dash='dot'),
-      marker=list(color='#fbbf24', size=6), hovertemplate="<b>Bucket: %{x}</b><br>Past Records: %{y:.2f}%<extra></extra>")
+    # Bucket share (green solid) — % of records in each bucket for this combo
+    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~bucket_share, type='scatter', mode='lines+markers',
+      name='Bucket share (%)', yaxis='y2', line=list(color='#34d399', width=3),
+      marker=list(color='#34d399', size=8), hovertemplate="<b>Bucket: %{x}</b><br>Share: %{y:.2f}%<extra></extra>")
 
-    # Future % (green solid)
-    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~future_pct, type='scatter', mode='lines+markers',
-      name='Future % of Records', yaxis='y2', line=list(color='#34d399', width=3),
-      marker=list(color='#34d399', size=8), hovertemplate="<b>Bucket: %{x}</b><br>Future Records: %{y:.2f}%<extra></extra>")
-
-    max_pct <- max(c(df$past_pct, df$future_pct), na.rm = TRUE)
+    max_pct <- max(df$bucket_share, na.rm = TRUE)
 
     # Build score annotations evenly spaced across plot area
     n_buckets <- nrow(df)
     # Signal color mapping
-    signal_colors <- c('BUY' = '#34d399', 'HOLD' = '#fbbf24', 'WATCH' = '#60a5fa', 'SELL' = '#f87171')
+    signal_colors <- c('BUY' = '#34d399', 'HOLD' = '#fbbf24', 'WATCH' = '#60a5fa', 'SELL' = '#f87171', 'INSUFFICIENT_DATA' = '#64748b')
+    signal_display <- c('BUY' = 'BUY', 'HOLD' = 'HOLD', 'WATCH' = 'WATCH', 'SELL' = 'SELL', 'INSUFFICIENT_DATA' = 'N/A')
 
     # Row 0: Signal (BUY/HOLD/WATCH/SELL) — prominent, largest font
     signal_annotations <- lapply(seq_len(n_buckets), function(i) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
       sig <- df$signal[i]
+      display <- ifelse(sig %in% names(signal_display), signal_display[sig], sig)
       list(
         x = x_pos, y = 1.13,
-        text = sprintf("<b>%s</b>", sig),
+        text = sprintf("<b>%s</b>", display),
         font = list(color = signal_colors[sig], size = 14, family = "Inter"),
         showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
       )
