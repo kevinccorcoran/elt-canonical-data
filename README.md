@@ -1,8 +1,12 @@
-# ELT Canonical Data
+# AlphaStream
 
 ![Architecture Diagram](tools/alphastream_system_architecture.png)
 
-The data backbone behind the AlphaStream platform — ingestion, storage, and the cleaned, query-ready tables everything else is built on.
+AlphaStream is an end-to-end data and analytics platform. It ingests time-series data, cleans and standardizes it, and produces statistical forecasts with an interactive dashboard on top.
+
+## About this repository — ELT Canonical Data
+
+This repository is the data layer of AlphaStream. It handles ingestion, raw storage, and the cleaned tables everything downstream depends on.
 
 ## Data Lineage
 
@@ -20,14 +24,14 @@ Statistical forecasting and signal-generation tables that sit on top of the cano
 
 ![Dashboard](tools/alpha_forecast.jpg)
 
-A one-screen view of how a metric's distribution has changed over time — designed so patterns and data gaps stand out at a glance.
+Lets me visualize cohorts that share similar attributes and see, across lag time horizons spanning up to 40 years, how they tend to evolve.
 
 **You can:**
 - Compare past vs. future distributions side by side across groups.
 - Filter dynamically by group, time window, and environment.
 - See how many records back each group, so you know which ones to trust.
 
-**Built with:** R + Shiny, Plotly, PostgreSQL — packaged in Docker so it runs the same locally and in production.
+**Built with:** R + Shiny, Plotly, PostgreSQL, packaged in Docker so it runs the same locally and in production.
 
 ## Project Timeline
 
