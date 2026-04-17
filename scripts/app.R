@@ -221,7 +221,6 @@ ui <- navbarPage(
         selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = "")
       )),
       mainPanel(div(class = "main-card",
-        h4("Past Boxplot + Future Boxplot", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         plotlyOutput("transitionPlot", height = "700px")
       ))
     )
@@ -763,7 +762,7 @@ server <- function(input, output, session) {
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       annotations = all_annotations,
-      margin = list(l = 80, r = 60, b = 80, t = 140),
+      margin = list(l = 110, r = 60, b = 120, t = 140),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
   })
