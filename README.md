@@ -20,9 +20,14 @@ Metrics and inference tables. Table names masked for proprietary reasons.
 
 ![Dashboard](tools/alpha_forecast.png)
 
-- **What:** an interactive dashboard that compares the distribution of a metric across past and future time windows, grouped into bins, with per-bin summary statistics.
-- **Why:** lets a user explore how a given input historically evolved over time and quickly spot where data is dense, sparse, or inconsistent.
-- **How:** an R / Shiny / Plotly front-end reads directly from PostgreSQL; user-driven filters shape the query; results render as paired boxplots with an overlay showing each bin's share of the underlying data.
+A one-screen view of how a metric's distribution has changed over time — designed so patterns and data gaps stand out at a glance.
+
+**You can:**
+- Compare past vs. future distributions side by side across groups.
+- Filter dynamically by group, time window, and environment.
+- See how many records back each group, so you know which ones to trust.
+
+**Built with:** R + Shiny, Plotly, PostgreSQL — packaged in Docker so it runs the same locally and in production.
 
 ## Project Timeline
 
