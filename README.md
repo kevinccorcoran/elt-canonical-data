@@ -18,7 +18,7 @@ Metrics and inference tables. Table names masked for proprietary reasons.
 
 ## Interactive Analytics Dashboard
 
-![Dashboard](tools/alpha_forecast.png)
+![Dashboard](tools/alpha_forecast.jpg)
 
 A one-screen view of how a metric's distribution has changed over time — designed so patterns and data gaps stand out at a glance.
 
