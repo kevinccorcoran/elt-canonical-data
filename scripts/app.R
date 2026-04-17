@@ -663,8 +663,24 @@ server <- function(input, output, session) {
     # Build score annotations evenly spaced across plot area
     n_buckets <- nrow(df)
     # Signal color mapping
-    signal_colors <- c('BUY' = '#34d399', 'HOLD' = '#fbbf24', 'WATCH' = '#60a5fa', 'SELL' = '#f87171', 'INSUFFICIENT_DATA' = '#64748b')
-    signal_display <- c('BUY' = 'BUY', 'HOLD' = 'HOLD', 'WATCH' = 'WATCH', 'SELL' = 'SELL', 'INSUFFICIENT_DATA' = 'N/A')
+    signal_colors <- c(
+      'STRONG_BUY'        = '#059669',
+      'BUY'               = '#34d399',
+      'HOLD'              = '#fbbf24',
+      'WATCH'             = '#60a5fa',
+      'SELL'              = '#f87171',
+      'STRONG_SELL'       = '#dc2626',
+      'INSUFFICIENT_DATA' = '#64748b'
+    )
+    signal_display <- c(
+      'STRONG_BUY'        = 'BUY++',
+      'BUY'               = 'BUY',
+      'HOLD'              = 'HOLD',
+      'WATCH'             = 'WATCH',
+      'SELL'              = 'SELL',
+      'STRONG_SELL'       = 'SELL++',
+      'INSUFFICIENT_DATA' = 'N/A'
+    )
 
     # Row 0: Signal (BUY/HOLD/WATCH/SELL) — prominent, largest font
     signal_annotations <- lapply(seq_len(n_buckets), function(i) {
