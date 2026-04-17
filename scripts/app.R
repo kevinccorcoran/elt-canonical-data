@@ -568,7 +568,7 @@ server <- function(input, output, session) {
              past_record_count AS past_count,
              past_lo, past_q1, past_median AS past_med, past_q3, past_hi,
              future_record_count AS future_count,
-             future_lo, future_median AS future_med, future_hi,
+             future_lo, future_q1, future_median AS future_med, future_q3, future_hi,
              n_observations,
              future_confidence_score AS conf_score,
              future_improvement_score AS improv_score,
@@ -602,12 +602,28 @@ server <- function(input, output, session) {
     # conf_score comes directly from the DB (future_confidence_score)
     # Build custom hover tooltips
     df$past_hover <- sprintf(
-      "<b>Past Distribution</b><br>Max: %.2f%%<br>Q3: %.2f%%<br>Median: %.2f%%<br>Q1: %.2f%%<br>Min: %.2f%%<br>Records: %.0f",
+      paste0(
+        "<b>Past Distribution</b><br>",
+        "Max:&nbsp;&nbsp;&nbsp;&nbsp;%7.2f%%<br>",
+        "Q3:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%7.2f%%<br>",
+        "Median:&nbsp;%7.2f%%<br>",
+        "Q1:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%7.2f%%<br>",
+        "Min:&nbsp;&nbsp;&nbsp;&nbsp;%7.2f%%<br>",
+        "Records: %.0f"
+      ),
       df$past_hi, df$past_q3, df$past_med, df$past_q1, df$past_lo, df$past_count)
 
     df$future_hover <- sprintf(
-      "<b>Future Range</b><br>Max: %.2f%%<br>Median: %.2f%%<br>Min: %.2f%%<br>Records: %.0f",
-      df$future_hi, df$future_med, df$future_lo, df$future_count)
+      paste0(
+        "<b>Future Range</b><br>",
+        "Max:&nbsp;&nbsp;&nbsp;&nbsp;%7.2f%%<br>",
+        "Q3:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%7.2f%%<br>",
+        "Median:&nbsp;%7.2f%%<br>",
+        "Q1:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%7.2f%%<br>",
+        "Min:&nbsp;&nbsp;&nbsp;&nbsp;%7.2f%%<br>",
+        "Records: %.0f"
+      ),
+      df$future_hi, df$future_q3, df$future_med, df$future_q1, df$future_lo, df$future_count)
 
     df$conf_color <- ifelse(df$conf_score >= 0, '#34d399', '#f87171')
     df$improv_color <- ifelse(df$improv_score >= 0, '#60a5fa', '#f87171')
@@ -615,24 +631,36 @@ server <- function(input, output, session) {
 
     fig <- plot_ly(df)
 
-    # Past boxplot (purple)
+    # Past boxplot (purple) — visual only, no hover
     fig <- fig %>% add_trace(type='box', name='Past Return Distribution', x=~as.factor(bucket),
       q1=~past_q1, median=~past_med, q3=~past_q3, lowerfence=~past_lo, upperfence=~past_hi,
       marker=list(color='#a855f7'), line=list(color='#a855f7', width=2),
-      fillcolor='rgba(167,139,250,0.4)', text=~past_hover, hovertemplate="%{text}<extra></extra>", hoveron="boxes", offsetgroup='1')
+      fillcolor='rgba(167,139,250,0.4)', hoverinfo="skip", offsetgroup='1')
     fig <- fig %>% add_markers(x=~as.factor(bucket), y=~past_med, name='Past Median',
       marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
-      text=~past_hover, hovertemplate="%{text}<extra></extra>", showlegend=FALSE, offsetgroup='1')
+      hoverinfo="skip", showlegend=FALSE, offsetgroup='1')
+    # Past hover catcher (invisible, fires custom tooltip anywhere in the box column)
+    fig <- fig %>% add_trace(type='scatter', mode='markers', x=~as.factor(bucket), y=~past_med,
+      marker=list(color='rgba(167,139,250,0)', size=60),
+      text=~past_hover, hovertemplate="%{text}<extra></extra>",
+      showlegend=FALSE, hoverlabel=list(font=list(family='Courier New, monospace', size=12)),
+      offsetgroup='1')
 
-    # Future range (sky blue) — box body spans min to max
+    # Future range (sky blue) — box body spans min to max, visual only
     fig <- fig %>% add_trace(type='box', name='Future Range (Min to Max)', x=~as.factor(bucket),
       q1=~future_lo, median=~future_med, q3=~future_hi,
       lowerfence=~future_lo, upperfence=~future_hi,
       marker=list(color='#0ea5e9'), line=list(color='#0ea5e9', width=2),
-      fillcolor='rgba(14,165,233,0.4)', text=~future_hover, hovertemplate="%{text}<extra></extra>", hoveron="boxes", offsetgroup='2')
+      fillcolor='rgba(14,165,233,0.4)', hoverinfo="skip", offsetgroup='2')
     fig <- fig %>% add_markers(x=~as.factor(bucket), y=~future_med, name='Future Median',
       marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
-      text=~future_hover, hovertemplate="%{text}<extra></extra>", showlegend=FALSE, offsetgroup='2')
+      hoverinfo="skip", showlegend=FALSE, offsetgroup='2')
+    # Future hover catcher (invisible, fires custom tooltip anywhere in the box column)
+    fig <- fig %>% add_trace(type='scatter', mode='markers', x=~as.factor(bucket), y=~future_med,
+      marker=list(color='rgba(14,165,233,0)', size=60),
+      text=~future_hover, hovertemplate="%{text}<extra></extra>",
+      showlegend=FALSE, hoverlabel=list(font=list(family='Courier New, monospace', size=12)),
+      offsetgroup='2')
 
     # Past % (yellow dashed)
     fig <- fig %>% add_trace(x=~as.factor(bucket), y=~past_pct, type='scatter', mode='lines+markers',
