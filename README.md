@@ -24,11 +24,11 @@ R / Shiny / Plotly dashboard for exploring alpha distributions across look-back 
 
 ## Project Timeline
 
-- **2024 — Foundation.** Built the ELT pipeline in Python, dbt, and Airflow; designed the initial CDM; set up dev + staging environments.
-- **2025 — Scale.** Migrated ingestion to a more reliable market data API, consolidated Raw → CDM, added a metrics layer, deployed to the cloud.
-- **2026 Q1 — Containerization.** Split the codebase into public infra (`elt-canonical-data`) and private logic (`inference-models`), dockerized the stack, migrated to DigitalOcean + managed Postgres.
-- **2026 Q2 — Inference & Visualization.** Simplified the inference pipeline (removed a circular z-score layer, unified scoring), added viability enforcement + tail-risk, fixed intra-month smoothing with a month-end snapshot, polished the Shiny dashboard (Alpha terminology, proper boxplots, cleaner layout), and triaged the inference QA backlog.
-- **Ongoing.** Refining inference models, tuning performance, extending analytics.
+- **2024 — Foundation.** Built the ELT pipeline in Python, dbt, and Airflow; designed the initial canonical data model; stood up separate dev and staging environments to ship safely.
+- **2025 — Scale.** Migrated ingestion to a more reliable market data API, consolidated data from multiple sources into a single pipeline, added a comprehensive metrics layer over the full historical dataset, and moved pipeline execution from local machines into the cloud.
+- **2026 Q1 — Production Infrastructure.** Split the codebase into a public infrastructure repo and a private proprietary-logic repo, containerized the full stack with Docker for environment parity, migrated hosting to DigitalOcean, and switched to a managed PostgreSQL database to offload maintenance.
+- **2026 Q2 — Inference & Dashboard.** Refactored the inference layer to improve signal quality and data integrity, added quality safeguards so unreliable results are flagged rather than shown as signals, polished the analytics dashboard, and formalized a ranked backlog of known model limitations.
+- **Ongoing.** Continuous refinement of predictive models, performance tuning, and new analytical features.
 
 ---
 
