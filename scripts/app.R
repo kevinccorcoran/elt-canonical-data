@@ -293,7 +293,7 @@ render_single_boxplot <- function(df, title, x_title, box_color = '#a855f7', fil
     title = list(text = title, font = list(color = "#f8fafc", family = "Inter", size = 18)),
     paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group",
     xaxis = list(title = x_title, color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
-    yaxis = list(title = "Excess Return vs SPY (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
+    yaxis = list(title = "Alpha (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
     yaxis2 = list(title = "Record Percentage (%)", color = "#fbbf24", gridcolor = "transparent", overlaying = "y", side = "right",
                   range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
     margin = list(l = 50, r = 60, b = 50, t = 50),
@@ -369,7 +369,7 @@ server <- function(input, output, session) {
     req(app_dataP())
     df <- app_dataP()
     if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
-    render_single_boxplot(df, "Past Return Distribution by Alpha Z-Bucket", "Past Excess Return Z-Bucket (SD)", '#a855f7', 'rgba(167, 139, 250, 0.4)')
+    render_single_boxplot(df, "Past Return Distribution by Alpha Z-Bucket", "Past Alpha Z-Bucket (SD)", '#a855f7', 'rgba(167, 139, 250, 0.4)')
   })
 
   # ── FUTURE: Connect ──
@@ -422,7 +422,7 @@ server <- function(input, output, session) {
     req(app_dataF())
     df <- app_dataF()
     if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
-    render_single_boxplot(df, "Future Return Distribution by Alpha Z-Bucket", "Future Excess Return Z-Bucket (SD)", '#0ea5e9', 'rgba(14, 165, 233, 0.4)')
+    render_single_boxplot(df, "Future Return Distribution by Alpha Z-Bucket", "Future Alpha Z-Bucket (SD)", '#0ea5e9', 'rgba(14, 165, 233, 0.4)')
   })
 
   # ── COMBINED: Connect ──
@@ -517,8 +517,8 @@ server <- function(input, output, session) {
     fig %>% layout(
       title = list(text = "Past vs. Future Expected Returns by Alpha Z-Bucket", font = list(color = "#f8fafc", family = "Inter", size = 18)),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group", boxmode = "group",
-      xaxis = list(title = "Excess Return Z-Bucket (SD)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
-      yaxis = list(title = "Excess Return vs SPY (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
+      xaxis = list(title = "Alpha Z-Bucket (SD)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
+      yaxis = list(title = "Alpha (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       margin = list(l = 50, r = 60, b = 50, t = 50),
@@ -758,8 +758,8 @@ server <- function(input, output, session) {
     fig %>% layout(
       title = list(text = "Past Distribution vs Future Return Range", font = list(color = "#f8fafc", family = "Inter", size = 18)),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group", boxmode = "group",
-      xaxis = list(title = "Past Excess Return Z-Bucket (SD)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
-      yaxis = list(title = "Excess Return vs SPY (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
+      xaxis = list(title = "Past Alpha Z-Bucket (SD)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
+      yaxis = list(title = "Alpha (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
       annotations = all_annotations,
