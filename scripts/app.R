@@ -490,7 +490,7 @@ server <- function(input, output, session) {
     fig <- plot_ly(df)
 
     # Past box (purple)
-    fig <- fig %>% add_trace(type='box', name='Past Return Distribution', x=~as.factor(bucket),
+    fig <- fig %>% add_trace(type='box', name='Past Distribution', x=~as.factor(bucket),
       q1=~past_q1, median=~past_med, q3=~past_q3, lowerfence=~past_lo, upperfence=~past_hi,
       marker=list(color='#a855f7'), line=list(color='#a855f7', width=2),
       fillcolor='rgba(167,139,250,0.4)', hoverinfo="y", offsetgroup='1')
@@ -499,7 +499,7 @@ server <- function(input, output, session) {
       hoverinfo="skip", showlegend=FALSE, offsetgroup='1')
 
     # Future box (sky blue)
-    fig <- fig %>% add_trace(type='box', name='Future Return Distribution', x=~as.factor(bucket),
+    fig <- fig %>% add_trace(type='box', name='Future Distribution', x=~as.factor(bucket),
       q1=~future_q1, median=~future_med, q3=~future_q3, lowerfence=~future_lo, upperfence=~future_hi,
       marker=list(color='#0ea5e9'), line=list(color='#0ea5e9', width=2),
       fillcolor='rgba(14,165,233,0.4)', hoverinfo="y", offsetgroup='2')
@@ -623,7 +623,7 @@ server <- function(input, output, session) {
     fig <- plot_ly(df)
 
     # Past boxplot (purple) — visual only, no hover
-    fig <- fig %>% add_trace(type='box', name='Past Return Distribution', x=~as.factor(bucket),
+    fig <- fig %>% add_trace(type='box', name='Past Distribution', x=~as.factor(bucket),
       q1=~past_q1, median=~past_med, q3=~past_q3, lowerfence=~past_lo, upperfence=~past_hi,
       marker=list(color='#a855f7'), line=list(color='#a855f7', width=2),
       fillcolor='rgba(167,139,250,0.4)', hoverinfo="skip", offsetgroup='1')
@@ -638,7 +638,7 @@ server <- function(input, output, session) {
       offsetgroup='1')
 
     # Future boxplot (sky blue) — box body = IQR (Q1..Q3), whiskers = Min..Max
-    fig <- fig %>% add_trace(type='box', name='Future Return Distribution', x=~as.factor(bucket),
+    fig <- fig %>% add_trace(type='box', name='Future Distribution', x=~as.factor(bucket),
       q1=~future_q1, median=~future_med, q3=~future_q3,
       lowerfence=~future_lo, upperfence=~future_hi,
       marker=list(color='#0ea5e9'), line=list(color='#0ea5e9', width=2),
@@ -756,7 +756,7 @@ server <- function(input, output, session) {
     all_annotations <- c(all_annotations, list(formula_annotation))
 
     fig %>% layout(
-      title = list(text = "Past Distribution vs Future Return Range", font = list(color = "#f8fafc", family = "Inter", size = 18)),
+      title = list(text = "Alpha Forecast", font = list(color = "#f8fafc", family = "Inter", size = 18)),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group", boxmode = "group",
       xaxis = list(title = "Past Alpha Z-Bucket (SD)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
       yaxis = list(title = "Alpha (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
