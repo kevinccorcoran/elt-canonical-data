@@ -517,7 +517,7 @@ server <- function(input, output, session) {
 
     # Bucket share (green solid) — % of records in each bucket for this combo
     fig <- fig %>% add_trace(x=~as.factor(bucket), y=~bucket_share, type='scatter', mode='lines+markers',
-      name='Bucket share (%)', yaxis='y2', line=list(color='#34d399', width=3),
+      name='Bucket share (%)', yaxis='y2', line=list(color='#34d399', width=3, shape='spline', smoothing=1.0),
       marker=list(color='#34d399', size=8), hovertemplate="Bucket: %{x}<br>Share: %{y:.2f}%<extra></extra>")
 
     max_pct <- max(df$bucket_share, na.rm = TRUE)
@@ -663,7 +663,7 @@ server <- function(input, output, session) {
 
     # Bucket share (green solid) — % of records in each bucket for this combo
     fig <- fig %>% add_trace(x=~as.factor(bucket), y=~bucket_share, type='scatter', mode='lines+markers',
-      name='Bucket share (%)', yaxis='y2', line=list(color='#34d399', width=3),
+      name='Bucket share (%)', yaxis='y2', line=list(color='#34d399', width=3, shape='spline', smoothing=1.0),
       marker=list(color='#34d399', size=8), hovertemplate="<b>Bucket: %{x}</b><br>Share: %{y:.2f}%<extra></extra>")
 
     max_pct <- max(df$bucket_share, na.rm = TRUE)
