@@ -221,7 +221,7 @@ ui <- navbarPage(
         selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = "")
       )),
       mainPanel(div(class = "main-card",
-        h4("Past Boxplot + Future Min/Max Range", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        h4("Past Boxplot + Future Boxplot", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         plotlyOutput("transitionPlot", height = "700px")
       ))
     )
@@ -637,9 +637,9 @@ server <- function(input, output, session) {
       showlegend=FALSE, hoverlabel=list(font=list(family='Courier New, monospace', size=12)),
       offsetgroup='1')
 
-    # Future range (sky blue) — box body spans min to max, visual only
-    fig <- fig %>% add_trace(type='box', name='Future Range (Min to Max)', x=~as.factor(bucket),
-      q1=~future_lo, median=~future_med, q3=~future_hi,
+    # Future boxplot (sky blue) — box body = IQR (Q1..Q3), whiskers = Min..Max
+    fig <- fig %>% add_trace(type='box', name='Future Return Distribution', x=~as.factor(bucket),
+      q1=~future_q1, median=~future_med, q3=~future_q3,
       lowerfence=~future_lo, upperfence=~future_hi,
       marker=list(color='#0ea5e9'), line=list(color='#0ea5e9', width=2),
       fillcolor='rgba(14,165,233,0.4)', hoverinfo="skip", offsetgroup='2')
