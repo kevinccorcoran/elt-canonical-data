@@ -4,9 +4,12 @@
 
 AlphaStream is an end-to-end data and analytics platform. It ingests time-series data, cleans and standardizes it, and produces statistical forecasts with an interactive dashboard on top.
 
-## About this repository — ELT Canonical Data
+## Repositories
 
-This repository is the data layer of AlphaStream. It handles ingestion, raw storage, and the cleaned tables everything downstream depends on.
+AlphaStream is split into two repositories:
+
+- **`elt-canonical-data`** (this repo, public) — the data layer. Ingestion, raw storage, cleaned canonical tables, and shared infrastructure and documentation.
+- **`inference-models`** (private) — the forecasting and signal-generation layer that sits on top of the canonical tables.
 
 ## Data Lineage
 
