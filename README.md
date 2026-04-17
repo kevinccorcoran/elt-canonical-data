@@ -2,19 +2,19 @@
 
 ![Architecture Diagram](tools/alphastream_system_architecture.png)
 
-Infrastructure, ingestion pipelines, and canonical data models for the AlphaStream data system.
+The data backbone behind the AlphaStream platform — ingestion, storage, and the cleaned, query-ready tables everything else is built on.
 
 ## Data Lineage
 
-### ELT Canonical Data
+### ELT — Canonical Data
 ![ELT Canonical Data Lineage](tools/elt_lineage_graph.png)
 
-Ingestion → raw tables → canonical data models (CDM).
+From raw ingestion to the standardized, deduplicated tables that serve as the single source of truth for every downstream model.
 
-### ETL Inference
+### ETL — Forecasting & Signals
 ![ETL Inference Lineage](tools/inference_lineage_graph.jpg)
 
-Metrics and inference tables. Table names masked for proprietary reasons.
+Statistical forecasting and signal-generation tables that sit on top of the canonical layer.
 
 ## Interactive Analytics Dashboard
 
@@ -34,7 +34,7 @@ A one-screen view of how a metric's distribution has changed over time — desig
 - **2024 — Foundation.** Built the ELT pipeline in Python, dbt, and Airflow; designed the initial canonical data model; stood up separate dev and staging environments to ship safely.
 - **2025 — Scale.** Migrated ingestion to a more reliable market data API, consolidated data from multiple sources into a single pipeline, added a comprehensive metrics layer over the full historical dataset, and moved pipeline execution from local machines into the cloud.
 - **2026 Q1 — Production Infrastructure.** Split the codebase into a public infrastructure repo and a private proprietary-logic repo, containerized the full stack with Docker for environment parity, migrated hosting to DigitalOcean, and switched to a managed PostgreSQL database to offload maintenance.
-- **2026 Q2 — Inference & Dashboard.** Refactored the inference layer to improve signal quality and data integrity, added quality safeguards so unreliable results are flagged rather than shown as signals, polished the analytics dashboard, and formalized a ranked backlog of known model limitations.
+- **2026 Q2 — Forecasting & Dashboard.** Refactored the forecasting layer to improve signal quality and data integrity, added safeguards so unreliable results are flagged rather than shown as signals, polished the analytics dashboard, and formalized a ranked backlog of known model limitations.
 - **Ongoing.** Continuous refinement of predictive models, performance tuning, and new analytical features.
 
 ---
