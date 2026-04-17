@@ -20,7 +20,9 @@ Metrics and inference tables. Table names masked for proprietary reasons.
 
 ![Dashboard](tools/alpha_forecast.png)
 
-R / Shiny / Plotly dashboard for exploring alpha distributions across look-back and look-ahead horizons. Stack: **R, Shiny, Plotly, PostgreSQL.**
+- **What:** an R Shiny + Plotly dashboard showing past vs. future alpha distributions by Z-bucket, with per-bucket signal summaries (Return, Improvement, Risk) and a trading label (BUY / HOLD / WATCH / SELL).
+- **Why:** gives a fast, visual way to explore how tickers historically transitioned from one alpha regime to another, and where the current signal is strong, weak, or unreliable.
+- **How:** an R / Shiny / Plotly front-end reads directly from the inference tables in PostgreSQL; environment, ticker group, and time-horizon filters drive the query; results render as dual-axis boxplots with a bucket-share overlay.
 
 ## Project Timeline
 
