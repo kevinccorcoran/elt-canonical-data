@@ -12,7 +12,7 @@ Infrastructure, ingestion pipelines, and canonical data models for the AlphaStre
 Ingestion → raw tables → canonical data models (CDM).
 
 ### ETL Inference
-![ETL Inference Lineage](tools/inference_lineage_graph.png)
+![ETL Inference Lineage](tools/inference_lineage_graph.jpg)
 
 Metrics and inference tables. Table names masked for proprietary reasons.
 
