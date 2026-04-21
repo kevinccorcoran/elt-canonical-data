@@ -289,9 +289,6 @@ ui <- navbarPage(
         selectInput("id_valT", "ID", choices = c("Connect first..." = ""), selected = ""),
         selectInput("past_fib_lagT", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
         selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = ""),
-        radioButtons("signal_typeT", "Signal",
-                     choices = c("Momentum" = "signal", "Alpha rate" = "alpha_signal"),
-                     selected = "signal", inline = TRUE),
         tags$div(
           style = "margin-top: 1.5rem; padding: 0.75rem; background: rgba(255,255,255,0.03);
                    border-left: 2px solid #64748b; border-radius: 4px;
@@ -667,12 +664,13 @@ server <- function(input, output, session) {
       'INSUFFICIENT_DATA' = 'N/A'
     )
 
-    # Row 0: Signal (BUY/HOLD/WATCH/SELL) — prominent, largest font
-    # Pick column based on sidebar toggle (signal vs alpha_signal).
-    signal_col <- input$signal_typeT %||% "signal"
+    # Row 0: Signal (BUY/HOLD/WATCH/SELL) — prominent, largest font.
+    # Single source of truth: alpha_signal (rate-based). Rewards steady
+    # forward alpha vs SPY. The legacy momentum-based `signal` column is
+    # still in the DB but not displayed here.
     signal_annotations <- lapply(seq_len(n_buckets), function(i) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
-      sig <- df[[signal_col]][i]
+      sig <- df$alpha_signal[i]
       display <- ifelse(sig %in% names(signal_display), signal_display[sig], sig)
       list(
         x = x_pos, y = 1.13,
