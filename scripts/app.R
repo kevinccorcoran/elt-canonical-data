@@ -2,6 +2,120 @@ library(shiny)
 library(DBI)
 library(RPostgres)
 library(plotly)
+library(jsonlite)
+library(nanoparquet)
+library(DT)
+
+# ─── QA history parquet (persists across runs, one file across DBs) ───
+QA_HISTORY_DIR  <- "/opt/airflow/scripts/data"
+QA_HISTORY_PATH <- file.path(QA_HISTORY_DIR, "ticker_count_history.parquet")
+
+load_qa_history <- function() {
+  if (!file.exists(QA_HISTORY_PATH)) return(NULL)
+  tryCatch(as.data.frame(nanoparquet::read_parquet(QA_HISTORY_PATH)),
+           error = function(e) NULL)
+}
+
+append_qa_history <- function(results, db_name, run_at = Sys.time()) {
+  if (!dir.exists(QA_HISTORY_DIR)) dir.create(QA_HISTORY_DIR, recursive = TRUE)
+  new_rows <- data.frame(
+    run_at        = rep(run_at, nrow(results)),
+    database_name = rep(db_name, nrow(results)),
+    schema_name   = results$schema,
+    table_name    = results$table,
+    ticker_count  = as.numeric(results$ticker_count),
+    stringsAsFactors = FALSE
+  )
+  existing <- load_qa_history()
+  all_rows <- if (is.null(existing)) new_rows else rbind(existing, new_rows)
+  nanoparquet::write_parquet(all_rows, QA_HISTORY_PATH)
+  new_rows
+}
+
+latest_qa_run <- function(history) {
+  if (is.null(history) || nrow(history) == 0) return(NULL)
+  latest_ts <- max(history$run_at)
+  history[history$run_at == latest_ts, , drop = FALSE]
+}
+
+# ─── Schema display order + lineage ranks from dbt manifests ───
+SCHEMA_ORDER <- c("raw", "cdm", "metrics", "analysis", "inference")
+
+compute_lineage_ranks <- function() {
+  manifest_paths <- c(
+    "/opt/elt-inference-models/target/manifest.json",
+    "/opt/elt-canonical-data/dbt/src/app/target/manifest.json"
+  )
+  node_info <- list()
+  for (p in manifest_paths) {
+    if (!file.exists(p)) next
+    m <- tryCatch(jsonlite::fromJSON(p, simplifyVector = FALSE),
+                  error = function(e) NULL)
+    if (is.null(m) || is.null(m$nodes)) next
+    for (uid in names(m$nodes)) {
+      n <- m$nodes[[uid]]
+      rt <- n$resource_type
+      if (isTRUE(rt == "model") || isTRUE(rt == "seed")) {
+        node_info[[uid]] <- list(
+          schema = tolower(n$schema),
+          name   = tolower(n$name),
+          deps   = unlist(n$depends_on$nodes)
+        )
+      }
+    }
+  }
+  if (length(node_info) == 0) {
+    return(data.frame(schema=character(), name=character(), rank=integer(),
+                      stringsAsFactors = FALSE))
+  }
+  rank_of  <- new.env(hash = TRUE)
+  visiting <- new.env(hash = TRUE)
+  compute_rank <- function(uid) {
+    cached <- rank_of[[uid]]
+    if (!is.null(cached)) return(cached)
+    if (!is.null(visiting[[uid]])) return(0L)
+    visiting[[uid]] <- TRUE
+    info <- node_info[[uid]]
+    if (is.null(info) || length(info$deps) == 0) {
+      r <- 0L
+    } else {
+      dep_ranks <- vapply(info$deps, function(d) {
+        if (!is.null(node_info[[d]])) compute_rank(d) else 0L
+      }, integer(1))
+      r <- as.integer(max(dep_ranks)) + 1L
+    }
+    rm(list = uid, envir = visiting)
+    rank_of[[uid]] <- r
+    r
+  }
+  for (uid in names(node_info)) compute_rank(uid)
+  data.frame(
+    schema = vapply(node_info, `[[`, character(1), "schema"),
+    name   = vapply(node_info, `[[`, character(1), "name"),
+    rank   = vapply(names(node_info), function(u) rank_of[[u]], integer(1)),
+    stringsAsFactors = FALSE
+  )
+}
+
+LINEAGE_RANKS <- tryCatch(compute_lineage_ranks(),
+  error = function(e) data.frame(schema=character(), name=character(),
+                                 rank=integer(), stringsAsFactors = FALSE))
+
+# Return sort order for parallel (schema, table) vectors: schema priority,
+# then lineage rank, then alpha. Unknown schemas/tables go to the end.
+lineage_order <- function(schemas, tables) {
+  key <- data.frame(schema = tolower(schemas), name = tolower(tables),
+                    stringsAsFactors = FALSE)
+  key$idx <- seq_len(nrow(key))
+  merged <- merge(key, LINEAGE_RANKS, by = c("schema","name"),
+                  all.x = TRUE, sort = FALSE)
+  merged <- merged[order(merged$idx), ]
+  ranks <- merged$rank
+  ranks[is.na(ranks)] <- .Machine$integer.max %/% 2L
+  schema_prio <- match(merged$schema, SCHEMA_ORDER)
+  schema_prio[is.na(schema_prio)] <- 100L
+  order(schema_prio, ranks, merged$name)
+}
 
 # Custom CSS matching the returns_analyzer.html dark theme
 custom_css <- "
@@ -147,7 +261,7 @@ hr {
 make_sidebar <- function(suffix, title, filter_widgets) {
   sidebarPanel(
     h4(title),
-    selectInput(paste0("db_env", suffix), "Environment", choices = c("Production", "Staging", "Dev"), selected = "Dev"),
+    selectInput(paste0("db_env", suffix), "Environment", choices = c("Production", "Staging", "Dev"), selected = "Production"),
     textInput(paste0("db_host", suffix), "Host", value = "host.docker.internal"),
     textInput(paste0("db_port", suffix), "Port", value = "5432"),
     textInput(paste0("db_user", suffix), "User", value = "postgres"),
@@ -168,57 +282,16 @@ ui <- navbarPage(
   title = "Analysis Dashboard",
   tags$head(tags$style(HTML(custom_css))),
 
-  # ── Tab 1: Past Decomposition ──
-  tabPanel("Past Decomposition",
-    sidebarLayout(
-      make_sidebar("P", "Database Connection (Past)", tagList(
-        selectInput("id_valP", "ID", choices = c("Connect first..." = ""), selected = ""),
-        selectInput("fib_lagP", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = "")
-      )),
-      mainPanel(div(class = "main-card",
-        h4("return_cluster_past_bucket_stats", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-        plotlyOutput("pastPlot", height = "700px")
-      ))
-    )
-  ),
-
-  # ── Tab 2: Future Decomposition ──
-  tabPanel("Future Decomposition",
-    sidebarLayout(
-      make_sidebar("F", "Database Connection (Future)", tagList(
-        selectInput("id_valF", "ID", choices = c("Connect first..." = ""), selected = ""),
-        selectInput("fib_lagF", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
-        selectInput("future_fib_lagF", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = "")
-      )),
-      mainPanel(div(class = "main-card",
-        h4("return_cluster_future_bucket_stats", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-        plotlyOutput("futurePlot", height = "700px")
-      ))
-    )
-  ),
-
-  # ── Tab 3: Combined Decomposition ──
-  tabPanel("Combined Decomposition",
-    sidebarLayout(
-      make_sidebar("C", "Database Connection (Combined)", tagList(
-        selectInput("id_valC", "ID", choices = c("Connect first..." = ""), selected = ""),
-        selectInput("past_fib_lagC", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
-        selectInput("future_fib_lagC", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = "")
-      )),
-      mainPanel(div(class = "main-card",
-        h4("Past vs Future Bucket Stats", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-        plotlyOutput("combinedPlot", height = "700px")
-      ))
-    )
-  ),
-
-  # ── Tab 4: Transition Range ──
+  # ── Tab 1: Transition Range ──
   tabPanel("Transition Range",
     sidebarLayout(
       make_sidebar("T", "Database Connection (Transition)", tagList(
         selectInput("id_valT", "ID", choices = c("Connect first..." = ""), selected = ""),
         selectInput("past_fib_lagT", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
         selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = ""),
+        radioButtons("signal_typeT", "Signal",
+                     choices = c("Momentum" = "signal", "Alpha rate" = "alpha_signal"),
+                     selected = "signal", inline = TRUE),
         tags$div(
           style = "margin-top: 1.5rem; padding: 0.75rem; background: rgba(255,255,255,0.03);
                    border-left: 2px solid #64748b; border-radius: 4px;
@@ -232,6 +305,128 @@ ui <- navbarPage(
       mainPanel(div(class = "main-card",
         plotlyOutput("transitionPlot", height = "700px")
       ))
+    )
+  ),
+
+  # ── Tab 2: Heatmap ──
+  tabPanel("Heatmap",
+    sidebarLayout(
+      make_sidebar("H", "Database Connection (Heatmap)", tagList(
+        selectInput("id_valH", "ID", choices = c("Connect first..." = ""), selected = ""),
+        selectInput("bucket_valH", "Past Z-Bucket", choices = c("All" = "ALL"), selected = "ALL"),
+        selectInput("metric_valH", "Fill Metric",
+          choices = c("Return /mo"    = "future_confidence_score",
+                      "Improv /mo"    = "future_improvement_score",
+                      "Risk /mo"      = "future_risk_score",
+                      "Tail Risk /mo" = "future_tail_risk_score"),
+          selected = "future_confidence_score"),
+        checkboxInput("viable_onlyH", "Viable combinations only", value = TRUE)
+      )),
+      mainPanel(div(class = "main-card",
+        h4("Past × Future Lag Heatmap", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        plotlyOutput("heatmapPlot", height = "700px")
+      ))
+    )
+  ),
+
+  # ── Tab 3: Data QA ──
+  tabPanel("Data QA",
+    sidebarLayout(
+      make_sidebar("Q", "Database Connection (Data QA)", tagList(
+        tags$div(
+          style = "padding: 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #64748b; border-radius: 4px;
+                   color: #94a3b8; font-size: 0.75rem; font-family: 'Inter'; line-height: 1.5;
+                   margin-bottom: 0.75rem;",
+          tags$div(style = "color: #f8fafc; font-weight: 600; margin-bottom: 0.4rem;", "Scan"),
+          "Scans every table with a ", tags$code("ticker"),
+          " column. Connect to load schemas, pick which to include, then Generate Chart."
+        ),
+        uiOutput("qaSchemasUI")
+      )),
+      mainPanel(
+        tags$style(HTML("
+          #qaHistoryTable table { width: 100%; color: #f8fafc; font-family: 'Inter'; font-size: 0.85rem; }
+          #qaHistoryTable th { color: #94a3b8; border-bottom: 1px solid rgba(255,255,255,0.1); padding: 0.5rem; text-align: left; }
+          #qaHistoryTable td { border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem; font-family: 'JetBrains Mono', monospace; }
+          #qaHistoryTable tr:hover td { background: rgba(56,189,248,0.08); }
+        ")),
+        div(class = "main-card",
+          h4("Ticker counts per table (parquet history)",
+             style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+          tags$style(HTML("
+            .qa-filter-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.25rem; }
+            .qa-filter-head .control-label { margin-bottom: 0 !important; }
+            .qa-filter-actions a { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+            .qa-filter-actions a + a { margin-left: 0.5rem; }
+            .qa-filter-actions a.qa-all   { color: #38bdf8; }
+            .qa-filter-actions a.qa-clear { color: #64748b; }
+            /* DT dark theme overrides */
+            #qaHistoryTable .dataTables_wrapper,
+            #qaHistoryTable .dataTables_info,
+            #qaHistoryTable .dataTables_paginate { color: #94a3b8 !important; }
+            #qaHistoryTable table.dataTable thead th {
+              color: #94a3b8 !important;
+              border-bottom: 1px solid rgba(255,255,255,0.1) !important;
+              background: transparent !important; }
+            #qaHistoryTable table.dataTable tbody td {
+              color: #f8fafc !important;
+              border-top: 1px solid rgba(255,255,255,0.05) !important;
+              background: transparent !important;
+              font-family: 'JetBrains Mono', monospace;
+              font-size: 0.85rem; }
+            #qaHistoryTable table.dataTable tbody tr:hover td { background: rgba(56,189,248,0.08) !important; }
+            #qaHistoryTable table.dataTable tbody tr.selected td { background: rgba(56,189,248,0.25) !important; color: #f8fafc !important; }
+            #qaHistoryTable .paginate_button { color: #94a3b8 !important; }
+            #qaHistoryTable .paginate_button.current,
+            #qaHistoryTable .paginate_button:hover { color: #000 !important; background: #38bdf8 !important; border-color: #38bdf8 !important; }
+          ")),
+          div(style = "display: flex; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap;",
+            div(style = "flex: 1; min-width: 180px;",
+              tags$div(class = "qa-filter-head",
+                tags$label("Run at", class = "control-label"),
+                tags$span(class = "qa-filter-actions",
+                  actionLink("filterRunAtAllQ",   "all",   class = "qa-all"),
+                  actionLink("filterRunAtClearQ", "clear", class = "qa-clear"))
+              ),
+              selectizeInput("filterRunAtQ", label = NULL, choices = NULL, multiple = TRUE,
+                             options = list(placeholder = "All runs (newest first)",
+                                            plugins = list("remove_button")))
+            ),
+            div(style = "flex: 1; min-width: 180px;",
+              tags$div(class = "qa-filter-head",
+                tags$label("Database", class = "control-label"),
+                tags$span(class = "qa-filter-actions",
+                  actionLink("filterDbAllQ",   "all",   class = "qa-all"),
+                  actionLink("filterDbClearQ", "clear", class = "qa-clear"))
+              ),
+              selectizeInput("filterDbQ", label = NULL, choices = NULL, multiple = TRUE,
+                             options = list(placeholder = "All databases",
+                                            plugins = list("remove_button")))
+            ),
+            div(style = "flex: 1; min-width: 180px;",
+              tags$div(class = "qa-filter-head",
+                tags$label("Schema", class = "control-label"),
+                tags$span(class = "qa-filter-actions",
+                  actionLink("filterSchemaAllQ",   "all",   class = "qa-all"),
+                  actionLink("filterSchemaClearQ", "clear", class = "qa-clear"))
+              ),
+              selectizeInput("filterSchemaQ", label = NULL, choices = NULL, multiple = TRUE,
+                             options = list(placeholder = "All schemas",
+                                            plugins = list("remove_button")))
+            )
+          ),
+          div(style = "display: flex; gap: 0.75rem; margin-bottom: 0.75rem; align-items: center;",
+            actionLink("qaSelectAllQ",    "Select all",    style = "font-size: 0.75rem; color: #38bdf8; font-weight: 600; text-transform: uppercase;"),
+            actionLink("qaSelectNoneQ",   "Select none",   style = "font-size: 0.75rem; color: #64748b; font-weight: 600; text-transform: uppercase;"),
+            actionLink("qaSelectInvertQ", "Invert",        style = "font-size: 0.75rem; color: #a855f7; font-weight: 600; text-transform: uppercase;"),
+            tags$span(style = "flex: 1;"),
+            actionButton("qaDeleteSelectedQ", "Delete selected",
+              style = "background: transparent !important; color: #f87171 !important; border: 1px solid #f87171 !important; font-size: 0.75rem !important; padding: 0.4rem 0.9rem !important;")
+          ),
+          DT::DTOutput("qaHistoryTable")
+        )
+      )
     )
   )
 )
@@ -312,228 +507,6 @@ render_single_boxplot <- function(df, title, x_title, box_color = '#a855f7', fil
 # ─── Server ───
 server <- function(input, output, session) {
 
-  # Reactive values
-  app_dataP <- reactiveVal(NULL)
-  status_msgP <- reactiveVal("Ready")
-  app_dataF <- reactiveVal(NULL)
-  status_msgF <- reactiveVal("Ready")
-  app_dataC <- reactiveVal(NULL)
-  status_msgC <- reactiveVal("Ready")
-
-  output$statusMessageP <- renderText({ status_msgP() })
-  output$statusMessageF <- renderText({ status_msgF() })
-  output$statusMessageC <- renderText({ status_msgC() })
-
-  # Env switchers
-  setup_env_switcher(input, session, "P")
-  setup_env_switcher(input, session, "F")
-  setup_env_switcher(input, session, "C")
-
-  # ── PAST: Connect ──
-  observeEvent(input$connect_btnP, {
-    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
-    status_msgP("Connecting...")
-    tryCatch({
-      con <- get_con(input, "P")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      id_vals  <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
-      fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
-      updateSelectInput(session, "id_valP",  choices = id_vals[[1]],  selected = id_vals[[1]][1])
-      updateSelectInput(session, "fib_lagP", choices = fib_vals[[1]], selected = fib_vals[[1]][1])
-      status_msgP("Filters loaded!")
-    }, error = function(e) { status_msgP(paste("Error:", e$message)) })
-  })
-
-  # ── PAST: Execute ──
-  observeEvent(input$execute_P, {
-    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
-    if (input$fib_lagP == "" || input$id_valP == "") { status_msgP("Error: Select filters first."); return() }
-    status_msgP("Running query...")
-    query <- sprintf("
-      SELECT past_excess_return_z_bucket_num AS bucket,
-             SUM(record_count_in_bucket) AS count,
-             MIN(min_past_excess_return_vs_spy) AS lo,
-             SUM(past_q1_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS q1,
-             SUM(past_median_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS med,
-             SUM(past_q3_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS q3,
-             MAX(max_past_excess_return_vs_spy) AS hi
-      FROM inference.return_cluster_past_bucket_stats
-      WHERE fibonacci_lag_value = %s AND id = %s
-      GROUP BY past_excess_return_z_bucket_num
-      ORDER BY past_excess_return_z_bucket_num;",
-      input$fib_lagP, input$id_valP)
-    tryCatch({
-      con <- get_con(input, "P")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      res <- dbGetQuery(con, query)
-      for(col in names(res)) res[[col]] <- as.numeric(res[[col]])
-      app_dataP(res)
-      status_msgP(paste("Loaded", nrow(res), "rows."))
-    }, error = function(e) { status_msgP(paste("Error:", e$message)) })
-  })
-
-  # ── PAST: Render ──
-  output$pastPlot <- renderPlotly({
-    req(app_dataP())
-    df <- app_dataP()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
-    render_single_boxplot(df, "Past Return Distribution by Alpha Z-Bucket", "Past Alpha Z-Bucket (SD)", '#a855f7', 'rgba(167, 139, 250, 0.4)')
-  })
-
-  # ── FUTURE: Connect ──
-  observeEvent(input$connect_btnF, {
-    if (input$db_passF == "") { status_msgF("Error: Password is not set."); return() }
-    status_msgF("Connecting...")
-    tryCatch({
-      con <- get_con(input, "F")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      id_vals  <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
-      fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
-      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
-      updateSelectInput(session, "id_valF",  choices = id_vals[[1]],  selected = id_vals[[1]][1])
-      updateSelectInput(session, "fib_lagF", choices = fib_vals[[1]], selected = fib_vals[[1]][1])
-      updateSelectInput(session, "future_fib_lagF", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
-      status_msgF("Filters loaded!")
-    }, error = function(e) { status_msgF(paste("Error:", e$message)) })
-  })
-
-  # ── FUTURE: Execute ──
-  observeEvent(input$execute_F, {
-    if (input$db_passF == "") { status_msgF("Error: Password is not set."); return() }
-    if (input$fib_lagF == "" || input$id_valF == "" || input$future_fib_lagF == "") { status_msgF("Error: Select filters first."); return() }
-    status_msgF("Running query...")
-    query <- sprintf("
-      SELECT future_excess_return_z_bucket_num AS bucket,
-             SUM(record_count_in_bucket) AS count,
-             MIN(min_future_excess_return_vs_spy) AS lo,
-             SUM(future_q1_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS q1,
-             SUM(future_median_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS med,
-             SUM(future_q3_return * record_count_in_bucket) / NULLIF(SUM(record_count_in_bucket), 0) AS q3,
-             MAX(max_future_excess_return_vs_spy) AS hi
-      FROM inference.return_cluster_future_bucket_stats
-      WHERE fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
-      GROUP BY future_excess_return_z_bucket_num
-      ORDER BY future_excess_return_z_bucket_num;",
-      input$fib_lagF, input$future_fib_lagF, input$id_valF)
-    tryCatch({
-      con <- get_con(input, "F")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      res <- dbGetQuery(con, query)
-      for(col in names(res)) res[[col]] <- as.numeric(res[[col]])
-      app_dataF(res)
-      status_msgF(paste("Loaded", nrow(res), "rows."))
-    }, error = function(e) { status_msgF(paste("Error:", e$message)) })
-  })
-
-  # ── FUTURE: Render ──
-  output$futurePlot <- renderPlotly({
-    req(app_dataF())
-    df <- app_dataF()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
-    render_single_boxplot(df, "Future Return Distribution by Alpha Z-Bucket", "Future Alpha Z-Bucket (SD)", '#0ea5e9', 'rgba(14, 165, 233, 0.4)')
-  })
-
-  # ── COMBINED: Connect ──
-  observeEvent(input$connect_btnC, {
-    if (input$db_passC == "") { status_msgC("Error: Password is not set."); return() }
-    status_msgC("Connecting...")
-    tryCatch({
-      con <- get_con(input, "C")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      id_vals       <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
-      past_fib_vals <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_past_bucket_stats ORDER BY 1")
-      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_future_bucket_stats ORDER BY 1")
-      updateSelectInput(session, "id_valC", choices = id_vals[[1]], selected = id_vals[[1]][1])
-      updateSelectInput(session, "past_fib_lagC", choices = past_fib_vals[[1]], selected = past_fib_vals[[1]][1])
-      updateSelectInput(session, "future_fib_lagC", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
-      status_msgC("Filters loaded!")
-    }, error = function(e) { status_msgC(paste("Error:", e$message)) })
-  })
-
-  # ── COMBINED: Execute ──
-  observeEvent(input$execute_C, {
-    if (input$db_passC == "") { status_msgC("Error: Password is not set."); return() }
-    if (input$id_valC == "" || input$past_fib_lagC == "" || input$future_fib_lagC == "") {
-      status_msgC("Error: Select filters first."); return()
-    }
-    status_msgC("Running query...")
-    query <- sprintf("
-      SELECT past_excess_return_z_bucket_num AS bucket,
-             MAX(past_record_count) AS past_count,
-             MIN(past_min) AS past_lo,
-             SUM(past_q1 * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_q1,
-             SUM(past_median * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_med,
-             SUM(past_q3 * past_record_count) / NULLIF(SUM(past_record_count), 0) AS past_q3,
-             MAX(past_max) AS past_hi,
-             SUM(future_record_count) AS future_count,
-             MIN(future_min) AS future_lo,
-             SUM(future_q1 * future_record_count) / NULLIF(SUM(future_record_count), 0) AS future_q1,
-             SUM(future_median * future_record_count) / NULLIF(SUM(future_record_count), 0) AS future_med,
-             SUM(future_q3 * future_record_count) / NULLIF(SUM(future_record_count), 0) AS future_q3,
-             MAX(future_max) AS future_hi
-      FROM inference.return_cluster_combined_bucket_stats
-      WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
-      GROUP BY past_excess_return_z_bucket_num
-      ORDER BY past_excess_return_z_bucket_num;",
-      input$past_fib_lagC, input$future_fib_lagC, input$id_valC)
-    tryCatch({
-      con <- get_con(input, "C")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      res <- dbGetQuery(con, query)
-      for(col in names(res)) res[[col]] <- as.numeric(res[[col]])
-      app_dataC(res)
-      status_msgC(paste("Loaded", nrow(res), "rows."))
-    }, error = function(e) { status_msgC(paste("Error:", e$message)) })
-  })
-
-  # ── COMBINED: Render ──
-  output$combinedPlot <- renderPlotly({
-    req(app_dataC())
-    df <- app_dataC()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
-
-    tot_count <- sum(df$future_count, na.rm = TRUE)
-    df$bucket_share <- if(tot_count > 0) (df$future_count / tot_count) * 100 else 0
-
-    fig <- plot_ly(df)
-
-    # Past box (purple)
-    fig <- fig %>% add_trace(type='box', name='Past Distribution', x=~as.factor(bucket),
-      q1=~past_q1, median=~past_med, q3=~past_q3, lowerfence=~past_lo, upperfence=~past_hi,
-      marker=list(color='#a855f7'), line=list(color='#a855f7', width=2),
-      fillcolor='rgba(167,139,250,0.4)', hoverinfo="y", offsetgroup='1')
-    fig <- fig %>% add_markers(x=~as.factor(bucket), y=~past_med, name='Past Median',
-      marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
-      hoverinfo="skip", showlegend=FALSE, offsetgroup='1')
-
-    # Future box (sky blue)
-    fig <- fig %>% add_trace(type='box', name='Future Distribution', x=~as.factor(bucket),
-      q1=~future_q1, median=~future_med, q3=~future_q3, lowerfence=~future_lo, upperfence=~future_hi,
-      marker=list(color='#0ea5e9'), line=list(color='#0ea5e9', width=2),
-      fillcolor='rgba(14,165,233,0.4)', hoverinfo="y", offsetgroup='2')
-    fig <- fig %>% add_markers(x=~as.factor(bucket), y=~future_med, name='Future Median',
-      marker=list(color='#ffffff', symbol="line-ew", size=25, line=list(color='#ffffff', width=3)),
-      hoverinfo="skip", showlegend=FALSE, offsetgroup='2')
-
-    # Bucket share (green solid) — % of records in each bucket for this combo
-    fig <- fig %>% add_trace(x=~as.factor(bucket), y=~bucket_share, type='scatter', mode='lines+markers',
-      name='Bucket share (%)', yaxis='y2', line=list(color='#34d399', width=3, shape='spline', smoothing=1.0),
-      marker=list(color='#34d399', size=8), hovertemplate="Bucket: %{x}<br>Share: %{y:.2f}%<extra></extra>")
-
-    max_pct <- max(df$bucket_share, na.rm = TRUE)
-
-    fig %>% layout(
-      title = list(text = "Past vs. Future Expected Returns by Alpha Z-Bucket", font = list(color = "#f8fafc", family = "Inter", size = 18)),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group", boxmode = "group",
-      xaxis = list(title = "Alpha Z-Bucket (SD)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zerolinecolor = "rgba(255,255,255,0.1)"),
-      yaxis = list(title = "Alpha (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
-      yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
-                    range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
-      margin = list(l = 50, r = 60, b = 50, t = 50),
-      showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
-    )
-  })
-
   # ── TRANSITION: Reactive values ──
   app_dataT <- reactiveVal(NULL)
   status_msgT <- reactiveVal("Ready")
@@ -574,7 +547,9 @@ server <- function(input, output, session) {
              future_confidence_score AS conf_score,
              future_improvement_score AS improv_score,
              future_risk_score AS risk_score,
-             signal
+             alpha_rate,
+             signal,
+             alpha_signal
       FROM inference.return_cluster_transition_confidence
       WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
       ORDER BY past_excess_return_z_bucket_num;",
@@ -583,7 +558,7 @@ server <- function(input, output, session) {
       con <- get_con(input, "T")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       res <- dbGetQuery(con, query)
-      for(col in names(res)) { if(col != "signal") res[[col]] <- as.numeric(res[[col]]) }
+      for(col in names(res)) { if(!(col %in% c("signal","alpha_signal"))) res[[col]] <- as.numeric(res[[col]]) }
       app_dataT(res)
       status_msgT(paste("Loaded", nrow(res), "rows."))
     }, error = function(e) { status_msgT(paste("Error:", e$message)) })
@@ -677,23 +652,27 @@ server <- function(input, output, session) {
       'HOLD'              = '#fbbf24',
       'WATCH'             = '#60a5fa',
       'SELL'              = '#f87171',
-      'STRONG_SELL'       = '#dc2626',
+      'AVOID'             = '#f87171',
+      'NO_SIGNAL'         = '#64748b',
       'INSUFFICIENT_DATA' = '#64748b'
     )
     signal_display <- c(
-      'STRONG_BUY'        = 'BUY++',
+      'STRONG_BUY'        = 'BUY+',
       'BUY'               = 'BUY',
       'HOLD'              = 'HOLD',
       'WATCH'             = 'WATCH',
       'SELL'              = 'SELL',
-      'STRONG_SELL'       = 'SELL++',
+      'AVOID'             = 'AVOID',
+      'NO_SIGNAL'         = '—',
       'INSUFFICIENT_DATA' = 'N/A'
     )
 
     # Row 0: Signal (BUY/HOLD/WATCH/SELL) — prominent, largest font
+    # Pick column based on sidebar toggle (signal vs alpha_signal).
+    signal_col <- input$signal_typeT %||% "signal"
     signal_annotations <- lapply(seq_len(n_buckets), function(i) {
       x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
-      sig <- df$signal[i]
+      sig <- df[[signal_col]][i]
       display <- ifelse(sig %in% names(signal_display), signal_display[sig], sig)
       list(
         x = x_pos, y = 1.13,
@@ -766,6 +745,430 @@ server <- function(input, output, session) {
       margin = list(l = 110, r = 60, b = 80, t = 140),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
     )
+  })
+
+  # ── HEATMAP: Reactive values ──
+  app_dataH <- reactiveVal(NULL)
+  status_msgH <- reactiveVal("Ready")
+  output$statusMessageH <- renderText({ status_msgH() })
+  setup_env_switcher(input, session, "H")
+
+  # ── HEATMAP: Connect ──
+  observeEvent(input$connect_btnH, {
+    if (input$db_passH == "") { status_msgH("Error: Password is not set."); return() }
+    status_msgH("Connecting...")
+    tryCatch({
+      con <- get_con(input, "H")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      id_vals <- dbGetQuery(con,
+        "SELECT DISTINCT id FROM inference.return_cluster_transition_confidence ORDER BY 1")
+      bucket_vals <- dbGetQuery(con,
+        "SELECT DISTINCT past_excess_return_z_bucket, past_excess_return_z_bucket_num
+         FROM inference.return_cluster_transition_confidence
+         ORDER BY past_excess_return_z_bucket_num")
+      bucket_choices <- c("All" = "ALL", setNames(bucket_vals[[1]], bucket_vals[[1]]))
+      updateSelectInput(session, "id_valH", choices = id_vals[[1]], selected = id_vals[[1]][1])
+      updateSelectInput(session, "bucket_valH", choices = bucket_choices, selected = "ALL")
+      status_msgH("Filters loaded!")
+    }, error = function(e) { status_msgH(paste("Error:", e$message)) })
+  })
+
+  # ── HEATMAP: Execute ──
+  observeEvent(input$execute_H, {
+    if (input$db_passH == "") { status_msgH("Error: Password is not set."); return() }
+    if (input$id_valH == "") { status_msgH("Error: Select an ID first."); return() }
+    status_msgH("Running query...")
+
+    bucket_clause <- if (input$bucket_valH == "ALL") "" else sprintf(
+      "AND past_excess_return_z_bucket = '%s'", gsub("'", "''", input$bucket_valH))
+    viable_clause <- if (isTRUE(input$viable_onlyH)) "AND is_viable" else ""
+
+    query <- sprintf("
+      SELECT past_fibonacci_lag_value,
+             future_fibonacci_lag_value,
+             past_excess_return_z_bucket,
+             future_confidence_score,
+             future_improvement_score,
+             future_risk_score,
+             future_tail_risk_score,
+             signal,
+             is_viable
+      FROM inference.return_cluster_transition_confidence
+      WHERE id = %s %s %s
+      ORDER BY past_fibonacci_lag_value, future_fibonacci_lag_value;",
+      input$id_valH, bucket_clause, viable_clause)
+
+    tryCatch({
+      con <- get_con(input, "H")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      res <- dbGetQuery(con, query)
+      num_cols <- c("past_fibonacci_lag_value","future_fibonacci_lag_value",
+                    "future_confidence_score","future_improvement_score",
+                    "future_risk_score","future_tail_risk_score")
+      for (col in num_cols) res[[col]] <- as.numeric(res[[col]])
+      app_dataH(res)
+      status_msgH(paste("Loaded", nrow(res), "rows."))
+    }, error = function(e) { status_msgH(paste("Error:", e$message)) })
+  })
+
+  # ── HEATMAP: Render ──
+  output$heatmapPlot <- renderPlotly({
+    req(app_dataH())
+    df <- app_dataH()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(
+      title = list(text = "No data found", font = list(color="#f8fafc")),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+
+    metric <- input$metric_valH
+    metric_labels <- c(
+      "future_confidence_score"  = "Return /mo",
+      "future_improvement_score" = "Improv /mo",
+      "future_risk_score"        = "Risk /mo",
+      "future_tail_risk_score"   = "Tail Risk /mo"
+    )
+
+    # Aggregate by (past_lag, future_lag) — mean over buckets when "All" is selected
+    agg <- aggregate(df[[metric]],
+      by = list(past = df$past_fibonacci_lag_value,
+                future = df$future_fibonacci_lag_value),
+      FUN = mean, na.rm = TRUE)
+    names(agg)[3] <- "value"
+
+    x_vals <- sort(unique(agg$past))
+    y_vals <- sort(unique(agg$future))
+    z_mat <- matrix(NA_real_, nrow = length(y_vals), ncol = length(x_vals),
+                    dimnames = list(as.character(y_vals), as.character(x_vals)))
+    for (i in seq_len(nrow(agg))) {
+      z_mat[as.character(agg$future[i]), as.character(agg$past[i])] <- agg$value[i]
+    }
+
+    is_diverging <- metric %in% c("future_confidence_score","future_improvement_score")
+    if (is_diverging) {
+      max_abs <- max(abs(z_mat), na.rm = TRUE)
+      if (!is.finite(max_abs) || max_abs == 0) max_abs <- 1
+      zmin <- -max_abs; zmax <- max_abs
+      colorscale <- list(c(0, '#dc2626'), c(0.5, '#1e293b'), c(1, '#34d399'))
+    } else {
+      zmin <- min(z_mat, na.rm = TRUE); zmax <- max(z_mat, na.rm = TRUE)
+      if (!is.finite(zmin)) zmin <- 0
+      if (!is.finite(zmax) || zmax == zmin) zmax <- zmin + 1
+      colorscale <- list(c(0, '#1e293b'), c(0.5, '#fbbf24'), c(1, '#f87171'))
+    }
+
+    bucket_label <- if (input$bucket_valH == "ALL") "" else sprintf(" · bucket %s", input$bucket_valH)
+
+    plot_ly(
+      x = as.character(x_vals), y = as.character(y_vals), z = z_mat, type = "heatmap",
+      colorscale = colorscale, zmin = zmin, zmax = zmax,
+      hovertemplate = sprintf(
+        "Past lag: %%{x}<br>Future lag: %%{y}<br>%s: %%{z:.4f}<extra></extra>",
+        metric_labels[[metric]]),
+      colorbar = list(title = list(text = metric_labels[[metric]],
+                                   font = list(color = "#f8fafc")),
+                      tickfont = list(color = "#94a3b8"))
+    ) %>% layout(
+      title = list(
+        text = sprintf("ID %s — Past × Future Lag (%s%s)",
+                       input$id_valH, metric_labels[[metric]], bucket_label),
+        font = list(color = "#f8fafc", family = "Inter", size = 18)),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+      xaxis = list(title = "Past Lag (months)", type = "category",
+                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+      yaxis = list(title = "Future Lag (months)", type = "category",
+                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+      margin = list(l = 80, r = 60, b = 60, t = 60)
+    )
+  })
+
+  # ── DATA QA: Reactive values ──
+  # app_historyQ = full parquet (all runs, all databases)
+  initial_hist <- load_qa_history()
+  app_historyQ <- reactiveVal(initial_hist)
+  status_msgQ <- reactiveVal(
+    if (is.null(initial_hist) || nrow(initial_hist) == 0) "Ready"
+    else sprintf("Loaded %d rows from parquet across %d runs.",
+                 nrow(initial_hist), length(unique(initial_hist$run_at)))
+  )
+  output$statusMessageQ <- renderText({ status_msgQ() })
+  setup_env_switcher(input, session, "Q")
+
+  qa_schemasQ <- reactiveVal(NULL)
+
+  # ── DATA QA: Connect — load list of schemas that have tables with a ticker column ──
+  observeEvent(input$connect_btnQ, {
+    if (input$db_passQ == "") { status_msgQ("Error: Password is not set."); return() }
+    status_msgQ("Loading schemas...")
+    tryCatch({
+      con <- get_con(input, "Q")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      schemas <- dbGetQuery(con, "
+        SELECT table_schema, COUNT(*) AS n_tables
+        FROM information_schema.columns
+        WHERE column_name = 'ticker'
+          AND table_schema NOT IN ('pg_catalog','information_schema')
+        GROUP BY table_schema
+        ORDER BY table_schema")
+      qa_schemasQ(schemas)
+      status_msgQ(sprintf("Loaded %d schemas (%s tables total).",
+                          nrow(schemas), sum(schemas$n_tables)))
+    }, error = function(e) { status_msgQ(paste("Error:", e$message)) })
+  })
+
+  # ── DATA QA: Render the schema checkboxes dynamically ──
+  output$qaSchemasUI <- renderUI({
+    schemas <- qa_schemasQ()
+    if (is.null(schemas) || nrow(schemas) == 0) {
+      return(tags$div(style = "color: #64748b; font-size: 0.75rem; font-style: italic;",
+                      "Connect to load schemas."))
+    }
+    # Reorder schemas: raw → cdm → metrics → analysis → inference, then others alpha
+    prio <- match(schemas$table_schema, SCHEMA_ORDER)
+    prio[is.na(prio)] <- 100L
+    schemas <- schemas[order(prio, schemas$table_schema), ]
+    labels <- sprintf("%s (%d)", schemas$table_schema, as.integer(schemas$n_tables))
+    choices <- setNames(schemas$table_schema, labels)
+    tagList(
+      tags$label("Schemas to scan", class = "control-label"),
+      checkboxGroupInput("schemasQ", label = NULL,
+                         choices = choices, selected = schemas$table_schema)
+    )
+  })
+
+  # ── DATA QA: Execute ──
+  observeEvent(input$execute_Q, {
+    if (input$db_passQ == "") { status_msgQ("Error: Password is not set."); return() }
+
+    # First click: load schemas and show checkboxes, then stop and wait for user
+    if (is.null(qa_schemasQ())) {
+      status_msgQ("Loading schemas...")
+      schemas <- tryCatch({
+        con <- get_con(input, "Q")
+        on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+        dbGetQuery(con, "
+          SELECT table_schema, COUNT(*) AS n_tables
+          FROM information_schema.columns
+          WHERE column_name = 'ticker'
+            AND table_schema NOT IN ('pg_catalog','information_schema')
+          GROUP BY table_schema
+          ORDER BY table_schema")
+      }, error = function(e) { status_msgQ(paste("Error:", e$message)); NULL })
+      if (is.null(schemas)) return()
+      qa_schemasQ(schemas)
+      status_msgQ(sprintf(
+        "Loaded %d schemas — pick which to include and click Generate Chart again.",
+        nrow(schemas)))
+      return()
+    }
+
+    selected <- input$schemasQ
+    if (is.null(selected) || length(selected) == 0) {
+      status_msgQ("Error: Pick at least one schema.")
+      return()
+    }
+    status_msgQ("Scanning tables...")
+    tryCatch({
+      con <- get_con(input, "Q")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+
+      placeholders <- paste(sprintf("'%s'", gsub("'", "''", selected)), collapse = ",")
+      tables <- dbGetQuery(con, sprintf("
+        SELECT table_schema, table_name
+        FROM information_schema.columns
+        WHERE column_name = 'ticker'
+          AND table_schema IN (%s)
+        ORDER BY table_schema, table_name", placeholders))
+
+      if (nrow(tables) == 0) {
+        status_msgQ("No tables with a ticker column.")
+        return()
+      }
+
+      results <- data.frame(
+        schema       = character(nrow(tables)),
+        table        = character(nrow(tables)),
+        ticker_count = integer(nrow(tables)),
+        stringsAsFactors = FALSE
+      )
+      for (i in seq_len(nrow(tables))) {
+        s <- tables$table_schema[i]; t <- tables$table_name[i]
+        status_msgQ(sprintf("Scanning %d/%d: %s.%s", i, nrow(tables), s, t))
+        q <- sprintf('SELECT COUNT(DISTINCT ticker) AS tc FROM %s.%s',
+                     DBI::dbQuoteIdentifier(con, s),
+                     DBI::dbQuoteIdentifier(con, t))
+        counts <- tryCatch(dbGetQuery(con, q),
+                           error = function(e) data.frame(tc = NA))
+        results$schema[i]       <- s
+        results$table[i]        <- t
+        results$ticker_count[i] <- as.numeric(counts$tc[1])
+      }
+      results <- results[lineage_order(results$schema, results$table), ]
+
+      db_name <- tryCatch(
+        dbGetQuery(con, "SELECT current_database() AS n")$n[1],
+        error = function(e) "unknown")
+      new_rows <- tryCatch(
+        append_qa_history(results, db_name = db_name),
+        error = function(e) { status_msgQ(paste("Parquet save failed:", e$message)); NULL })
+      if (is.null(new_rows)) return()
+
+      full_hist <- load_qa_history()
+      app_historyQ(full_hist)
+      status_msgQ(sprintf(
+        "Scanned %d tables (db=%s). Parquet now has %d rows across %d runs.",
+        nrow(new_rows), db_name,
+        nrow(full_hist), length(unique(full_hist$run_at))))
+    }, error = function(e) { status_msgQ(paste("Error:", e$message)) })
+  })
+
+  # ── DATA QA: Keep filter dropdowns in sync with current parquet history ──
+  qa_filter_choices <- reactive({
+    df <- app_historyQ()
+    if (is.null(df) || nrow(df) == 0) {
+      return(list(run_at = character(0), db = character(0), schema = character(0)))
+    }
+    # Pair each run_at with its database for the dropdown label
+    run_map <- unique(data.frame(run_at = df$run_at,
+                                 db     = df$database_name,
+                                 stringsAsFactors = FALSE))
+    run_map <- run_map[order(run_map$run_at, decreasing = TRUE), , drop = FALSE]
+    run_at_values <- format(run_map$run_at, "%Y-%m-%d %H:%M:%S")
+    run_at_labels <- sprintf("%s  ·  %s", run_at_values, run_map$db)
+    list(
+      run_at = setNames(run_at_values, run_at_labels),
+      db     = sort(unique(df$database_name)),
+      schema = sort(unique(df$schema_name))
+    )
+  })
+
+  observe({
+    ch <- qa_filter_choices()
+    updateSelectizeInput(session, "filterRunAtQ",  choices = ch$run_at)
+    updateSelectizeInput(session, "filterDbQ",     choices = ch$db)
+    updateSelectizeInput(session, "filterSchemaQ", choices = ch$schema)
+  })
+
+  # all/clear handlers
+  observeEvent(input$filterRunAtAllQ,    updateSelectizeInput(session, "filterRunAtQ",  selected = qa_filter_choices()$run_at))
+  observeEvent(input$filterRunAtClearQ,  updateSelectizeInput(session, "filterRunAtQ",  selected = character(0)))
+  observeEvent(input$filterDbAllQ,       updateSelectizeInput(session, "filterDbQ",     selected = qa_filter_choices()$db))
+  observeEvent(input$filterDbClearQ,     updateSelectizeInput(session, "filterDbQ",     selected = character(0)))
+  observeEvent(input$filterSchemaAllQ,   updateSelectizeInput(session, "filterSchemaQ", selected = qa_filter_choices()$schema))
+  observeEvent(input$filterSchemaClearQ, updateSelectizeInput(session, "filterSchemaQ", selected = character(0)))
+
+  # ── DATA QA: Filtered + sorted history used by the DT render and delete ──
+  qa_display_df <- reactive({
+    df <- app_historyQ()
+    if (is.null(df) || nrow(df) == 0) return(NULL)
+    if (length(input$filterRunAtQ) > 0) {
+      df <- df[format(df$run_at, "%Y-%m-%d %H:%M:%S") %in% input$filterRunAtQ, ,
+               drop = FALSE]
+    }
+    if (length(input$filterDbQ) > 0)
+      df <- df[df$database_name %in% input$filterDbQ, , drop = FALSE]
+    if (length(input$filterSchemaQ) > 0)
+      df <- df[df$schema_name %in% input$filterSchemaQ, , drop = FALSE]
+    if (nrow(df) == 0) return(df)
+    key <- data.frame(schema = tolower(df$schema_name), name = tolower(df$table_name),
+                      idx = seq_len(nrow(df)), stringsAsFactors = FALSE)
+    merged <- merge(key, LINEAGE_RANKS, by = c("schema","name"),
+                    all.x = TRUE, sort = FALSE)
+    merged <- merged[order(merged$idx), ]
+    rk <- merged$rank; rk[is.na(rk)] <- .Machine$integer.max %/% 2L
+    sp <- match(merged$schema, SCHEMA_ORDER); sp[is.na(sp)] <- 100L
+    df[order(-as.numeric(df$run_at), sp, rk, merged$name), , drop = FALSE]
+  })
+
+  output$qaHistoryTable <- DT::renderDT({
+    df <- qa_display_df()
+    if (is.null(df) || nrow(df) == 0) {
+      return(DT::datatable(
+        data.frame(Note = "No history yet. Run Generate Chart, or relax filters."),
+        selection = "none", rownames = FALSE, class = "compact",
+        options = list(dom = "t", ordering = FALSE)))
+    }
+    display <- data.frame(
+      `Run At`    = format(df$run_at, "%Y-%m-%d %H:%M:%S"),
+      Database    = df$database_name,
+      Schema      = df$schema_name,
+      Table       = df$table_name,
+      Tickers     = formatC(df$ticker_count, format = "d", big.mark = ","),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    DT::datatable(
+      display,
+      selection = list(mode = "multiple", target = "row"),
+      rownames  = FALSE,
+      class     = "compact",
+      options   = list(
+        pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
+        dom = "tip", searching = FALSE, ordering = FALSE,
+        columnDefs = list(list(className = "dt-right", targets = 4))
+      )
+    )
+  }, server = FALSE)
+
+  # Select all / none via DT proxy
+  qa_dt_proxy <- DT::dataTableProxy("qaHistoryTable")
+  observeEvent(input$qaSelectAllQ, {
+    disp <- qa_display_df()
+    if (is.null(disp) || nrow(disp) == 0) return()
+    DT::selectRows(qa_dt_proxy, seq_len(nrow(disp)))
+  })
+  observeEvent(input$qaSelectNoneQ, {
+    DT::selectRows(qa_dt_proxy, integer(0))
+  })
+  observeEvent(input$qaSelectInvertQ, {
+    disp <- qa_display_df()
+    if (is.null(disp) || nrow(disp) == 0) {
+      status_msgQ("Invert: no rows in view.")
+      return()
+    }
+    current  <- input$qaHistoryTable_rows_selected
+    inverted <- setdiff(seq_len(nrow(disp)), current)
+    status_msgQ(sprintf("Invert: %d → %d rows selected (of %d).",
+                        length(current), length(inverted), nrow(disp)))
+    DT::selectRows(qa_dt_proxy, as.integer(inverted))
+  }, ignoreInit = TRUE)
+
+  # Delete selected rows from the parquet
+  observeEvent(input$qaDeleteSelectedQ, {
+    sel <- input$qaHistoryTable_rows_selected
+    if (length(sel) == 0) {
+      status_msgQ("Select rows first — click rows in the table.")
+      return()
+    }
+    showModal(modalDialog(
+      title = "Delete selected rows",
+      sprintf("Delete %d rows from the parquet? This cannot be undone.", length(sel)),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("qaDeleteConfirmQ", "Delete", class = "btn-primary")),
+      easyClose = TRUE, size = "s"
+    ))
+  })
+
+  observeEvent(input$qaDeleteConfirmQ, {
+    removeModal()
+    sel <- input$qaHistoryTable_rows_selected
+    if (length(sel) == 0) return()
+    disp <- qa_display_df()
+    to_del <- disp[sel, , drop = FALSE]
+    full <- app_historyQ()
+    key_full <- paste(as.numeric(full$run_at), full$database_name,
+                      full$schema_name, full$table_name, sep = "|")
+    key_del  <- paste(as.numeric(to_del$run_at), to_del$database_name,
+                      to_del$schema_name, to_del$table_name, sep = "|")
+    remaining <- full[!(key_full %in% key_del), , drop = FALSE]
+    if (nrow(remaining) == 0) {
+      if (file.exists(QA_HISTORY_PATH)) file.remove(QA_HISTORY_PATH)
+    } else {
+      nanoparquet::write_parquet(remaining, QA_HISTORY_PATH)
+    }
+    app_historyQ(remaining)
+    DT::selectRows(qa_dt_proxy, integer(0))
+    status_msgQ(sprintf("Deleted %d rows. Parquet has %d rows now.",
+                        nrow(to_del), nrow(remaining)))
   })
 }
 
