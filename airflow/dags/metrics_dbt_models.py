@@ -134,6 +134,20 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # Train-only variant: feeds ticker_cluster_segments_train via the same
+    # Python script below. Used by the backtest track (feature_set_train →
+    # validation_agreement) so clusters there don't peek at post-cutoff data.
+    bash_command, env_vars = get_inference_dbt_bash_command(
+        runtime_env, "ticker_weighted_growth_ranking_train"
+    )
+    dbt_run_ticker_weighted_growth_ranking_train = BashOperator(
+        task_id="dbt_run_metrics_ticker_weighted_growth_ranking_train",
+        bash_command=bash_command,
+        env=env_vars,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     python_run_ticker_cluster_segments = BashOperator(
         task_id="python_run_analysis_ticker_cluster_segments",
         bash_command=(
@@ -150,6 +164,17 @@ with DAG(
     )
     dbt_run_ticker_cluster_volatility_summary = BashOperator(
         task_id="dbt_run_metrics_ticker_cluster_volatility_summary",
+        bash_command=bash_command,
+        env=env_vars,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    bash_command, env_vars = get_inference_dbt_bash_command(
+        runtime_env, "ticker_cluster_volatility_summary_train"
+    )
+    dbt_run_ticker_cluster_volatility_summary_train = BashOperator(
+        task_id="dbt_run_metrics_ticker_cluster_volatility_summary_train",
         bash_command=bash_command,
         env=env_vars,
         append_env=True,
@@ -244,8 +269,14 @@ with DAG(
     check_disk_space >> dbt_deps >> dbt_run_intermediate_fibonacci_base
     dbt_run_intermediate_fibonacci_base >> dbt_run_fibonacci_offset_observation_dates
 
-    dbt_run_ticker_weighted_growth_ranking >> python_run_ticker_cluster_segments
-    python_run_ticker_cluster_segments >> dbt_run_ticker_cluster_volatility_summary
+    [
+        dbt_run_ticker_weighted_growth_ranking,
+        dbt_run_ticker_weighted_growth_ranking_train,
+    ] >> python_run_ticker_cluster_segments
+    python_run_ticker_cluster_segments >> [
+        dbt_run_ticker_cluster_volatility_summary,
+        dbt_run_ticker_cluster_volatility_summary_train,
+    ]
 
     dbt_run_fibonacci_offset_observation_dates >> [
         dbt_run_metrics_fibonacci_past_offset_avg_prices,

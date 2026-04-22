@@ -35,6 +35,19 @@ with DAG(
     is_paused_upon_creation=False,
 ) as dag:
 
+    # Build the train-only feature_set first — scored_split reads from it
+    # so validation_agreement's clusters don't peek at post-cutoff data.
+    bash_fs, env_fs = get_inference_dbt_bash_command(
+        runtime_env, "return_cluster_feature_set_train"
+    )
+    dbt_run_feature_set_train = BashOperator(
+        task_id="dbt_run_return_cluster_feature_set_train",
+        bash_command=bash_fs,
+        env=env_fs,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     bash_split, env_split = get_inference_dbt_bash_command(
         runtime_env, "return_cluster_transition_scored_split"
     )
@@ -57,4 +70,4 @@ with DAG(
         do_xcom_push=False,
     )
 
-    dbt_run_transition_scored_split >> dbt_run_validation_agreement
+    dbt_run_feature_set_train >> dbt_run_transition_scored_split >> dbt_run_validation_agreement
