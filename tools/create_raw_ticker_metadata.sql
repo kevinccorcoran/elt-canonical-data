@@ -25,18 +25,26 @@ CREATE TABLE IF NOT EXISTS raw.ticker_metadata (
     share_class_figi    TEXT,
     sic_code            TEXT,
     list_date           DATE,
+    -- Heuristic categorization of WHY the ticker delisted. Populated by
+    -- tools/classify_delisting_categories.sql (re-runnable). Polygon
+    -- doesn't expose a delisting reason, so this is a derived best-guess
+    -- from sic_code + name + last close from the bars table. Values:
+    -- SPAC, BANKRUPTCY, M&A_OR_PRIVATE, DISTRESSED, SHELL_OR_FAILED_IPO,
+    -- UNKNOWN. NULL = not yet classified.
+    delisting_category  TEXT,
     aggregates_fetched  BOOLEAN     NOT NULL DEFAULT FALSE,
     first_seen_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_refreshed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Backward-compat migrations (idempotent).
-ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS type             TEXT;
-ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS cik              TEXT;
-ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS composite_figi   TEXT;
-ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS share_class_figi TEXT;
-ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS sic_code         TEXT;
-ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS list_date        DATE;
+ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS type               TEXT;
+ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS cik                TEXT;
+ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS composite_figi     TEXT;
+ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS share_class_figi   TEXT;
+ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS sic_code           TEXT;
+ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS list_date          DATE;
+ALTER TABLE raw.ticker_metadata ADD COLUMN IF NOT EXISTS delisting_category TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_ticker_metadata_delisted_unfetched
     ON raw.ticker_metadata (delisted_utc)

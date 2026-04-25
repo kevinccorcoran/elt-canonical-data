@@ -90,4 +90,36 @@ with DAG(
         do_xcom_push=False,
     )
 
-    refresh_metadata >> backfill_aggregates
+    # Detail-endpoint enrichment for new rows that need sic_code +
+    # list_date so the classifier can categorize them. Restricted to
+    # rows we just fetched bars for (aggregates_fetched=TRUE and
+    # sic_code IS NULL) to keep API quota use minimal.
+    enrich_details = BashOperator(
+        task_id="enrich_ticker_details",
+        bash_command=f"""
+        set -euxo pipefail
+        export PYTHONPATH="{PROJECT_ROOT}/src"
+        cd "{PROJECT_ROOT}"
+        python -m datapipeline.ingestion.massive_enrich_ticker_details \
+            --where "delisted_utc IS NOT NULL AND aggregates_fetched = TRUE AND sic_code IS NULL"
+        """,
+        env=_env(),
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    # Heuristic classifier: derives delisting_category (SPAC, M&A,
+    # BANKRUPTCY, DISTRESSED, ...) from sic_code + name + last close.
+    # Pure SQL, idempotent, runs in seconds.
+    classify_delistings = BashOperator(
+        task_id="classify_delisting_categories",
+        bash_command=f"""
+        set -euxo pipefail
+        psql "$DATABASE_URL" -f "{PROJECT_ROOT}/tools/classify_delisting_categories.sql"
+        """,
+        env=_env(),
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    refresh_metadata >> backfill_aggregates >> enrich_details >> classify_delistings
