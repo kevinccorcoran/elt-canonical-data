@@ -129,3 +129,6 @@ docker/airflow/airflow-postgres/
 
 # Docker Airflow local envs (Secrets)
 docker/airflow/.env*
+
+# Docker dbt-docs-canonical local envs (Secrets)
+docker/dbt-docs-canonical/.env*
