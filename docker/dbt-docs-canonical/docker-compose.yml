@@ -1,0 +1,25 @@
+services:
+  dbt-docs-canonical:
+    image: python:3.11-slim
+    container_name: dbt-docs-canonical
+    restart: unless-stopped
+    working_dir: /app/dbt/src/app
+    env_file:
+      - .env.docs
+    environment:
+      DB_HOST: host.docker.internal
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_DATABASE: staging
+    volumes:
+      - ../..:/app
+      - ../../../elt-inference-models:/elt-inference-models
+      - ~/.dbt:/root/.dbt
+      - ./entrypoint.sh:/entrypoint.sh:ro
+      - ./prune_manifest.py:/prune_manifest.py:ro
+      # Anonymous volume shadows the bind-mounted target/ so the pruned
+      # manifest can't be overwritten by host-side `dbt docs generate`.
+      - /app/dbt/src/app/target
+    ports:
+      - "8890:8080"
+    entrypoint: ["bash", "/entrypoint.sh"]
