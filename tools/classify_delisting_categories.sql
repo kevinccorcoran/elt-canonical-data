@@ -10,9 +10,17 @@
 -- Rules are evaluated top-to-bottom; first match wins.
 --
 -- Categories:
+--   TICKER_VARIANT      — when-issued / ex-distribution / share-class
+--                         clones of legit tickers (e.g. IBMw, MMMw,
+--                         AEBIV, LGF.A). Brief artifacts of corporate
+--                         actions; not investable as standalone equity.
 --   SPAC                — sic 6770 OR name contains 'Acquisition Corp(oration)'
 --                         / 'Blank Check'
---   SHELL_OR_FAILED_IPO — listed < 2 years (and not classified as SPAC)
+--   SHELL_OR_FAILED_IPO — listed < 2 years OR fewer than 60 bars in
+--                         our backfill (catches ticker renames where
+--                         metadata list_date is the parent company's
+--                         IPO but actual trading under the symbol was
+--                         brief, e.g. VAPE post-CEAD rename)
 --   BANKRUPTCY          — last close < $1.00 (worthless)
 --   DISTRESSED          — last close $1.00–$4.99 (penny-ish, ambiguous —
 --                         could be biotech bust, going-concern issues,
@@ -34,7 +42,8 @@ WITH last_close AS (
     SELECT
         ticker,
         (array_agg(close ORDER BY date DESC))[1] AS last_close,
-        MAX(date) AS last_date
+        MAX(date) AS last_date,
+        COUNT(*) AS bar_count
     FROM raw.api_data_ingestion_massive_delisted
     GROUP BY ticker
 ),
@@ -42,6 +51,21 @@ classified AS (
     SELECT
         m.ticker,
         CASE
+            -- 0. Ticker variants: when-issued / ex-distribution / share
+            --    classes. These often share the parent company's
+            --    list_date and have a normal-looking last close, so they
+            --    must be detected by ticker shape and name BEFORE the
+            --    price-based rules — otherwise IBMw, MMMw etc. get
+            --    mis-tagged as M&A_OR_PRIVATE.
+            WHEN m.ticker ~ '[a-z]$'                  -- IBMw, MMMw, ...
+              OR m.ticker ~ '\.[A-Z]$'                -- LGF.A, BWL.A, ...
+              OR m.ticker LIKE '%V'                   -- AEBIV, TSVTV, ...
+              OR m.name ILIKE '%When Issued%'
+              OR m.name ILIKE '%When-Issued%'
+              OR m.name ILIKE '%Ex-distribution%'
+              OR m.name ILIKE '%Ex Distribution%'
+                THEN 'TICKER_VARIANT'
+
             -- 1. SPAC takes precedence: SIC 6770 (Blank Checks) is
             --    Polygon's authoritative tag, with name fallback for
             --    rows where SIC is missing.
@@ -52,9 +76,13 @@ classified AS (
                 THEN 'SPAC'
 
             -- 2. Short-lived listings (non-SPAC) — failed IPOs, shells,
-            --    spin-offs that didn't survive.
-            WHEN m.list_date IS NOT NULL
-              AND (m.delisted_utc::date - m.list_date) < 730
+            --    spin-offs that didn't survive. Also catches ticker
+            --    renames where the parent company's list_date looks long
+            --    but actual trading under this symbol was brief
+            --    (e.g. VAPE post-CEAD rename, 34 bars).
+            WHEN (m.list_date IS NOT NULL
+                  AND (m.delisted_utc::date - m.list_date) < 730)
+              OR (lc.bar_count IS NOT NULL AND lc.bar_count < 60)
                 THEN 'SHELL_OR_FAILED_IPO'
 
             -- 3. Worthless / bankruptcy: ended under $1.

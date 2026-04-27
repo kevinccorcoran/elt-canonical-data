@@ -48,6 +48,13 @@ massive AS (
     FROM {{ ref('ingest_massive_staging') }}
 ),
 
+-- NOTE: delisted bars are intentionally NOT unioned here. They live in
+-- cdm.ingest_massive_delisted_inc and should be opted into explicitly
+-- by any backtest model that wants survivorship-bias correction.
+-- Adding them here cascades into the inference pipeline (which reads
+-- ingest_combined as a source) and shifts cluster boundaries enough
+-- to drop entire clusters from the inference output.
+
 -- Exclusion lists allow you to explicitly force a provider choice per ticker
 excluded_massive AS (
     SELECT ticker FROM {{ ref('excluded_tickers_massive') }}
