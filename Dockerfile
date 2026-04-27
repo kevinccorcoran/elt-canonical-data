@@ -5,8 +5,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git r-base libpq-dev build-essential libcurl4-openssl-dev libssl-dev pkg-config r-cran-shiny r-cran-jsonlite r-cran-dbi && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
-RUN Rscript -e "install.packages(c('RPostgres', 'plotly', 'htmlwidgets'), repos='http://cran.us.r-project.org')" && \
-    Rscript -e "stopifnot(require('shiny')); stopifnot(require('RPostgres')); stopifnot(require('plotly'))"
+RUN Rscript -e "install.packages(c('RPostgres', 'plotly', 'htmlwidgets', 'jsonlite', 'DT', 'nanoparquet'), repos='http://cran.us.r-project.org')" && \
+    Rscript -e "for (p in c('shiny','RPostgres','plotly','jsonlite','DT','nanoparquet')) stopifnot(require(p, character.only=TRUE))"
 
 USER airflow
 
