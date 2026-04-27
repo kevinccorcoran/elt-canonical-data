@@ -32,21 +32,11 @@ services:
       - .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DATABASE_URL}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__WEB_SERVER_HOST: 0.0.0.0
-      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
       AIRFLOW__CORE__PARALLELISM: 4
       AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: 2
-
-      ENV: ${ENV}
-      DATABASE_URL: ${DATABASE_URL}
-      DB_DATABASE: ${DB_DATABASE}
-      DB_HOST: ${DB_HOST}
-      DB_PORT: ${DB_PORT}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      MASSIVE_API_KEY: ${MASSIVE_API_KEY}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DATABASE_URL}
 
       PROJECT_ROOT: /opt/elt-canonical-data
       PYTHONPATH: /opt/elt-canonical-data/src
@@ -68,6 +58,8 @@ services:
     command: >
       bash -c "
         airflow db upgrade &&
+        Rscript /opt/airflow/scripts/app.R > /opt/airflow/scripts/shiny.log 2>&1 &
+        Rscript /opt/airflow/scripts/app_violin.R > /opt/airflow/scripts/shiny_violin.log 2>&1 &
         airflow webserver &
         airflow scheduler
       "
