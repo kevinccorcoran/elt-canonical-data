@@ -425,6 +425,27 @@ ui <- navbarPage(
         )
       )
     )
+  ),
+
+  # ── Tab 4: Ticker Coverage ──
+  tabPanel("Ticker Coverage",
+    sidebarLayout(
+      make_sidebar("V", "Database Connection (Coverage)", tagList(
+        tags$div(
+          style = "padding: 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #64748b; border-radius: 4px;
+                   color: #94a3b8; font-size: 0.75rem; font-family: 'Inter'; line-height: 1.5;",
+          tags$div(style = "color: #f8fafc; font-weight: 600; margin-bottom: 0.4rem;", "What this shows"),
+          "One horizontal bar per ticker in ", tags$code("cdm.ingest_combined"),
+          ". Left edge = first observation, right edge = last observation. Dashed vertical line = today."
+        )
+      )),
+      mainPanel(div(class = "main-card",
+        h4("Ticker history coverage (cdm.ingest_combined)",
+           style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        uiOutput("coveragePlotContainer")
+      ))
+    )
   )
 )
 
@@ -1167,6 +1188,105 @@ server <- function(input, output, session) {
     DT::selectRows(qa_dt_proxy, integer(0))
     status_msgQ(sprintf("Deleted %d rows. Parquet has %d rows now.",
                         nrow(to_del), nrow(remaining)))
+  })
+
+  # ── COVERAGE: Reactive values ──
+  app_dataV <- reactiveVal(NULL)
+  status_msgV <- reactiveVal("Ready")
+  output$statusMessageV <- renderText({ status_msgV() })
+  setup_env_switcher(input, session, "V")
+
+  # ── COVERAGE: Connect — just smoke-test the query source ──
+  observeEvent(input$connect_btnV, {
+    if (input$db_passV == "") { status_msgV("Error: Password is not set."); return() }
+    status_msgV("Connecting...")
+    tryCatch({
+      con <- get_con(input, "V")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      n <- dbGetQuery(con,
+        "SELECT COUNT(DISTINCT ticker) AS n FROM cdm.ingest_combined")$n[1]
+      status_msgV(sprintf("Connected — %s distinct tickers.", n))
+    }, error = function(e) { status_msgV(paste("Error:", e$message)) })
+  })
+
+  # ── COVERAGE: Execute — load min/max date per ticker ──
+  observeEvent(input$execute_V, {
+    if (input$db_passV == "") { status_msgV("Error: Password is not set."); return() }
+    status_msgV("Loading ticker coverage...")
+    tryCatch({
+      con <- get_con(input, "V")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      df <- dbGetQuery(con, "
+        SELECT ticker,
+               MIN(\"date\")::date AS first_date,
+               MAX(\"date\")::date AS last_date,
+               COUNT(*) AS n_obs
+        FROM cdm.ingest_combined
+        GROUP BY ticker
+        ORDER BY MIN(\"date\")")
+      df$first_date <- as.Date(df$first_date)
+      df$last_date  <- as.Date(df$last_date)
+      df$n_obs      <- as.numeric(df$n_obs)
+      app_dataV(df)
+      status_msgV(sprintf("Loaded %d tickers.", nrow(df)))
+    }, error = function(e) { status_msgV(paste("Error:", e$message)) })
+  })
+
+  # ── COVERAGE: Container with dynamic height ──
+  output$coveragePlotContainer <- renderUI({
+    req(app_dataV())
+    ph <- max(3000, nrow(app_dataV()) * 14)
+    plotlyOutput("coveragePlot", height = paste0(ph, "px"))
+  })
+
+  # ── COVERAGE: Render ──
+  output$coveragePlot <- renderPlotly({
+    req(app_dataV())
+    df <- app_dataV()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(
+      title = list(text = "No data", font = list(color="#f8fafc")),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+
+    # Sort: earliest start at bottom (longest history), most recent start at top
+    df <- df[order(df$first_date), ]
+    df$ticker_f <- factor(df$ticker, levels = df$ticker)
+    today <- Sys.Date()
+    ph <- max(3000, nrow(df) * 14)
+
+    hover <- sprintf(
+      "<b>%s</b><br>%s → %s<br>%s obs<extra></extra>",
+      df$ticker, df$first_date, df$last_date, format(df$n_obs, big.mark = ","))
+
+    plot_ly(height = ph) %>%
+      add_segments(
+        x = df$first_date, xend = df$last_date,
+        y = df$ticker_f,   yend = df$ticker_f,
+        line = list(color = "#fb7185", width = 4),
+        hovertemplate = hover,
+        hoverlabel = list(font = list(family = "JetBrains Mono, monospace", size = 12))
+      ) %>%
+      layout(
+        paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+        xaxis = list(title = "Observation date", color = "#94a3b8",
+                     gridcolor = "rgba(255,255,255,0.08)",
+                     zerolinecolor = "rgba(255,255,255,0.08)",
+                     fixedrange = TRUE),
+        yaxis = list(title = "", color = "#94a3b8", automargin = TRUE,
+                     tickfont = list(size = 8),
+                     categoryorder = "array",
+                     categoryarray = levels(df$ticker_f),
+                     fixedrange = TRUE),
+        shapes = list(list(
+          type = "line", x0 = today, x1 = today, y0 = 0, y1 = 1, yref = "paper",
+          line = list(color = "#f8fafc", width = 2, dash = "dot"))),
+        annotations = list(list(
+          x = today, y = 1.005, yref = "paper", xanchor = "right", yanchor = "bottom",
+          text = sprintf("today (%s)", today), showarrow = FALSE,
+          font = list(color = "#94a3b8", size = 11, family = "Inter"))),
+        margin = list(l = 80, r = 40, t = 40, b = 60),
+        showlegend = FALSE
+      ) %>%
+      config(scrollZoom = FALSE, displayModeBar = FALSE)
   })
 }
 
