@@ -80,6 +80,8 @@ def get_inference_dbt_deps_command(
     bash_command = (
         "set -euo pipefail && "
         f"cd {dbt_project_dir} && "
+        "git fetch --quiet origin main && "
+        "git reset --quiet --hard origin/main && "
         "dbt deps"
     )
 
@@ -163,6 +165,8 @@ def get_inference_dbt_bash_command(
     bash_command = (
         "set -euo pipefail && "
         f"cd {dbt_project_dir} && "
+        "git fetch --quiet origin main && "
+        "git reset --quiet --hard origin/main && "
         f"dbt run --select {selector}"
     )
 
