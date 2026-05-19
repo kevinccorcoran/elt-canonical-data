@@ -293,14 +293,35 @@ ui <- navbarPage(
           style = "margin-top: 1.5rem; padding: 0.75rem; background: rgba(255,255,255,0.03);
                    border-left: 2px solid #64748b; border-radius: 4px;
                    color: #94a3b8; font-size: 0.75rem; font-family: 'Inter'; line-height: 1.5;",
-          tags$div(style = "color: #f8fafc; font-weight: 600; margin-bottom: 0.4rem;", "Formulas"),
+          tags$div(style = "color: #f8fafc; font-weight: 600; margin-bottom: 0.4rem;", "Distribution metrics"),
           tags$div(HTML("<b>Return /mo</b> = future_median / future_lag")),
           tags$div(HTML("<b>Improv /mo</b> = future_median / future_lag &minus; past_median / past_lag")),
-          tags$div(HTML("<b>Risk /mo</b> = (future_q3 &minus; future_q1) / future_lag"))
+          tags$div(HTML("<b>Risk /mo</b> = (future_q3 &minus; future_q1) / &radic;future_lag")),
+          tags$div(HTML("<b>Tail Risk /mo</b> = max(q1&minus;min, max&minus;q3) / &radic;future_lag")),
+
+          tags$div(style = "color: #f8fafc; font-weight: 600; margin-top: 0.8rem; margin-bottom: 0.4rem;", "Positive flags"),
+          tags$div(HTML("&times;3 future_median &gt; 0")),
+          tags$div(HTML("&times;2 Return /mo &divide; Risk /mo &ge; 0.5")),
+          tags$div(HTML("&times;1 future_q1 &gt; 0")),
+          tags$div(HTML("&times;1 future_median &gt; past_median")),
+          tags$div(HTML("&times;1 future IQR &lt; past IQR")),
+
+          tags$div(style = "color: #f8fafc; font-weight: 600; margin-top: 0.8rem; margin-bottom: 0.4rem;", "Negative flags"),
+          tags$div(HTML("&times;3 future_median &lt; 0")),
+          tags$div(HTML("&times;3 future_q3 &lt; 0")),
+          tags$div(HTML("&times;1 future_median &lt; past_median")),
+          tags$div(HTML("&times;1 future_risk_score &gt; p90 cutoff")),
+
+          tags$div(style = "color: #f8fafc; font-weight: 600; margin-top: 0.8rem; margin-bottom: 0.4rem;", "Aggregates"),
+          tags$div(HTML("<b>net_score</b> = positive_score &minus; negative_score")),
+          tags$div(HTML("<b>signal_score</b>: STRONG_BUY=+3, BUY=+2, HOLD=0, WATCH=&minus;1, AVOID=&minus;2, SELL=&minus;3")),
+          tags$div(HTML("<b>combined_score</b> = signal_score + net_score")),
+          tags$div(HTML("<b>recommendation</b> = combined_score tier (STRONG_PICK / BUY / HOLD / AVOID / OUTLIER_*)"))
         )
       )),
-      mainPanel(div(class = "main-card",
-        plotlyOutput("transitionPlot", height = "700px")
+      mainPanel(div(class = "main-card", style = "height: calc(100vh - 4rem); display: flex; flex-direction: column;",
+        uiOutput("transitionHeader"),
+        div(style = "flex: 1; min-height: 0;", plotlyOutput("transitionPlot", height = "100%"))
       ))
     )
   ),
@@ -312,11 +333,15 @@ ui <- navbarPage(
         selectInput("id_valH", "ID", choices = c("Connect first..." = ""), selected = ""),
         selectInput("bucket_valH", "Past Z-Bucket", choices = c("All" = "ALL"), selected = "ALL"),
         selectInput("metric_valH", "Fill Metric",
-          choices = c("Return /mo"    = "future_confidence_score",
-                      "Improv /mo"    = "future_improvement_score",
-                      "Risk /mo"      = "future_risk_score",
-                      "Tail Risk /mo" = "future_tail_risk_score"),
-          selected = "future_confidence_score"),
+          choices = c("Combined Score"  = "combined_score",
+                      "Net Score"       = "net_score",
+                      "Positive Score"  = "positive_score",
+                      "Negative Score"  = "negative_score",
+                      "Return /mo"      = "future_confidence_score",
+                      "Improv /mo"      = "future_improvement_score",
+                      "Risk /mo"        = "future_risk_score",
+                      "Tail Risk /mo"   = "future_tail_risk_score"),
+          selected = "combined_score"),
         checkboxInput("viable_onlyH", "Viable combinations only", value = TRUE)
       )),
       mainPanel(div(class = "main-card",
@@ -567,8 +592,13 @@ server <- function(input, output, session) {
              future_risk_score AS risk_score,
              alpha_rate,
              signal,
-             alpha_signal
-      FROM inference.return_cluster_transition_confidence
+             alpha_signal,
+             positive_score,
+             negative_score,
+             net_score,
+             combined_score,
+             recommendation
+      FROM inference.return_cluster_cell_score
       WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
       ORDER BY past_excess_return_z_bucket_num;",
       input$past_fib_lagT, input$future_fib_lagT, input$id_valT)
@@ -576,7 +606,7 @@ server <- function(input, output, session) {
       con <- get_con(input, "T")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       res <- dbGetQuery(con, query)
-      for(col in names(res)) { if(!(col %in% c("signal","alpha_signal"))) res[[col]] <- as.numeric(res[[col]]) }
+      for(col in names(res)) { if(!(col %in% c("signal","alpha_signal","recommendation"))) res[[col]] <- as.numeric(res[[col]]) }
       app_dataT(res)
       status_msgT(paste("Loaded", nrow(res), "rows."))
     }, error = function(e) { status_msgT(paste("Error:", e$message)) })
@@ -661,98 +691,7 @@ server <- function(input, output, session) {
 
     max_pct <- max(df$bucket_share, na.rm = TRUE)
 
-    # Build score annotations evenly spaced across plot area
-    n_buckets <- nrow(df)
-    # Signal color mapping
-    signal_colors <- c(
-      'STRONG_BUY'        = '#059669',
-      'BUY'               = '#34d399',
-      'HOLD'              = '#fbbf24',
-      'WATCH'             = '#60a5fa',
-      'SELL'              = '#f87171',
-      'AVOID'             = '#f87171',
-      'NO_SIGNAL'         = '#64748b',
-      'INSUFFICIENT_DATA' = '#64748b'
-    )
-    signal_display <- c(
-      'STRONG_BUY'        = 'BUY+',
-      'BUY'               = 'BUY',
-      'HOLD'              = 'HOLD',
-      'WATCH'             = 'WATCH',
-      'SELL'              = 'SELL',
-      'AVOID'             = 'AVOID',
-      'NO_SIGNAL'         = '—',
-      'INSUFFICIENT_DATA' = 'N/A'
-    )
-
-    # Row 0: Signal (BUY/HOLD/WATCH/SELL) — prominent, largest font.
-    # Single source of truth: alpha_signal (rate-based). Rewards steady
-    # forward alpha vs SPY. The legacy momentum-based `signal` column is
-    # still in the DB but not displayed here.
-    signal_annotations <- lapply(seq_len(n_buckets), function(i) {
-      x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
-      sig <- df$alpha_signal[i]
-      display <- ifelse(sig %in% names(signal_display), signal_display[sig], sig)
-      list(
-        x = x_pos, y = 1.13,
-        text = sprintf("<b>%s</b>", display),
-        font = list(color = signal_colors[sig], size = 14, family = "Inter"),
-        showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
-      )
-    })
-    # Row 1: Expected Return — just the number
-    return_annotations <- lapply(seq_len(n_buckets), function(i) {
-      x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
-      list(
-        x = x_pos, y = 1.06,
-        text = sprintf("<b>%.2f</b>", df$conf_score[i]),
-        font = list(color = df$conf_color[i], size = 11, family = "Inter"),
-        showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
-      )
-    })
-    # Row 2: Improvement — just the number
-    improv_annotations <- lapply(seq_len(n_buckets), function(i) {
-      x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
-      list(
-        x = x_pos, y = 1.00,
-        text = sprintf("<b>%.2f</b>", df$improv_score[i]),
-        font = list(color = df$improv_color[i], size = 11, family = "Inter"),
-        showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
-      )
-    })
-    # Row 3: Risk — just the number
-    risk_annotations <- lapply(seq_len(n_buckets), function(i) {
-      x_pos <- 0.05 + (i - 1) * (0.90 / max(n_buckets - 1, 1))
-      list(
-        x = x_pos, y = 0.94,
-        text = sprintf("<b>%.1f</b>", df$risk_score[i]),
-        font = list(color = df$risk_color[i], size = 11, family = "Inter"),
-        showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "center"
-      )
-    })
-    # Row labels on the LEFT side
-    signal_label <- list(
-      x = 0.0, y = 1.13, text = "<b>Signal</b>",
-      font = list(color = "#64748b", size = 9, family = "Inter"),
-      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "right"
-    )
-    return_label <- list(
-      x = 0.0, y = 1.06, text = "<b>Return /mo</b>",
-      font = list(color = "#64748b", size = 9, family = "Inter"),
-      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "right"
-    )
-    improv_label <- list(
-      x = 0.0, y = 1.00, text = "<b>Improv /mo</b>",
-      font = list(color = "#64748b", size = 9, family = "Inter"),
-      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "right"
-    )
-    risk_label <- list(
-      x = 0.0, y = 0.94, text = "<b>Risk /mo</b>",
-      font = list(color = "#64748b", size = 9, family = "Inter"),
-      showarrow = FALSE, xref = "paper", yref = "paper", xanchor = "right"
-    )
-    all_annotations <- c(list(signal_label), signal_annotations, list(return_label), return_annotations, list(improv_label), improv_annotations, list(risk_label), risk_annotations)
-
+    max_pct_local <- max_pct  # capture for inner closure
     fig %>% layout(
       title = list(text = "Alpha Forecast", font = list(color = "#f8fafc", family = "Inter", size = 18)),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", barmode = "group", boxmode = "group",
@@ -760,9 +699,79 @@ server <- function(input, output, session) {
       yaxis = list(title = "Alpha (%)", color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)", zeroline = TRUE, zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.2)"),
       yaxis2 = list(title = "Record Percentage (%)", color = "#f8fafc", gridcolor = "transparent", overlaying = "y", side = "right",
                     range = c(0, ifelse(is.infinite(max_pct) || is.na(max_pct), 100, max_pct * 1.5))),
-      annotations = all_annotations,
-      margin = list(l = 110, r = 60, b = 80, t = 140),
+      margin = list(l = 60, r = 60, b = 80, t = 50),
       showlegend = TRUE, legend = list(font = list(color = "#f8fafc"), orientation = "h", y = -0.2)
+    )
+  })
+
+  # ── TRANSITION: Metric header table (replaces in-plot annotations) ──
+  output$transitionHeader <- renderUI({
+    req(app_dataT())
+    df <- app_dataT()
+    if (nrow(df) == 0) return(NULL)
+
+    df$conf_color   <- ifelse(df$conf_score   >= 0, '#34d399', '#f87171')
+    df$improv_color <- ifelse(df$improv_score >= 0, '#60a5fa', '#f87171')
+    df$risk_color   <- ifelse(df$risk_score   <= 10, '#34d399',
+                       ifelse(df$risk_score   <= 30, '#fbbf24', '#f87171'))
+
+    rec_colors <- c(
+      'STRONG_PICK'     = '#059669',
+      'BUY'             = '#34d399',
+      'SCORE_PICK'      = '#60a5fa',
+      'HOLD'            = '#fbbf24',
+      'SIGNAL_TRAP'     = '#f87171',
+      'AVOID'           = '#f87171',
+      'OUTLIER_BUY'     = '#86efac',
+      'OUTLIER_AVOID'   = '#fca5a5',
+      'OUTLIER_NEUTRAL' = '#94a3b8',
+      'SKIP'            = '#64748b'
+    )
+    rec_display <- c(
+      'STRONG_PICK'     = 'STRONG_PICK',
+      'BUY'             = 'BUY',
+      'SCORE_PICK'      = 'SCORE_PICK',
+      'HOLD'            = 'HOLD',
+      'SIGNAL_TRAP'     = 'SIGNAL_TRAP',
+      'AVOID'           = 'AVOID',
+      'OUTLIER_BUY'     = 'OUT_BUY',
+      'OUTLIER_AVOID'   = 'OUT_AVOID',
+      'OUTLIER_NEUTRAL' = 'OUT_NEUT',
+      'SKIP'            = 'SKIP'
+    )
+
+    cell_style <- "padding: 6px 8px; text-align: center; font-family: 'Inter'; font-weight: 600;"
+    label_style <- "padding: 6px 8px; text-align: right; color: #94a3b8; font-family: 'Inter'; font-size: 0.75rem; font-weight: 500;"
+
+    make_row <- function(label, values, colors, fmt) {
+      tags$tr(
+        tags$td(label, style = label_style),
+        lapply(seq_along(values), function(i) {
+          tags$td(sprintf(fmt, values[i]),
+                  style = sprintf("%s color: %s;", cell_style, colors[i]))
+        })
+      )
+    }
+
+    sig_colors_vec <- sapply(df$recommendation, function(s) {
+      if (s %in% names(rec_colors)) rec_colors[[s]] else "#94a3b8"
+    })
+    sig_display_vec <- sapply(df$recommendation, function(s) {
+      if (s %in% names(rec_display)) rec_display[[s]] else s
+    })
+
+    tags$table(
+      style = "width: 100%; border-collapse: collapse; margin-bottom: 0.5rem; background: rgba(15, 23, 42, 0.4); border-radius: 6px;",
+      tags$tr(
+        tags$td("Signal", style = label_style),
+        lapply(seq_along(sig_display_vec), function(i) {
+          tags$td(sig_display_vec[i],
+                  style = sprintf("%s color: %s; font-size: 0.9rem;", cell_style, sig_colors_vec[i]))
+        })
+      ),
+      make_row("Return /mo", df$conf_score,   df$conf_color,   "%.2f"),
+      make_row("Improv /mo", df$improv_score, df$improv_color, "%.2f"),
+      make_row("Risk /mo",   df$risk_score,   df$risk_color,   "%.1f")
     )
   })
 
@@ -780,10 +789,10 @@ server <- function(input, output, session) {
       con <- get_con(input, "H")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
-        "SELECT DISTINCT id FROM inference.return_cluster_transition_confidence ORDER BY 1")
+        "SELECT DISTINCT id FROM inference.return_cluster_cell_score ORDER BY 1")
       bucket_vals <- dbGetQuery(con,
         "SELECT DISTINCT past_excess_return_z_bucket, past_excess_return_z_bucket_num
-         FROM inference.return_cluster_transition_confidence
+         FROM inference.return_cluster_cell_score
          ORDER BY past_excess_return_z_bucket_num")
       bucket_choices <- c("All" = "ALL", setNames(bucket_vals[[1]], bucket_vals[[1]]))
       updateSelectInput(session, "id_valH", choices = id_vals[[1]], selected = id_vals[[1]][1])
@@ -810,9 +819,14 @@ server <- function(input, output, session) {
              future_improvement_score,
              future_risk_score,
              future_tail_risk_score,
+             positive_score,
+             negative_score,
+             net_score,
+             combined_score,
+             recommendation,
              signal,
              is_viable
-      FROM inference.return_cluster_transition_confidence
+      FROM inference.return_cluster_cell_score
       WHERE id = %s %s %s
       ORDER BY past_fibonacci_lag_value, future_fibonacci_lag_value;",
       input$id_valH, bucket_clause, viable_clause)
@@ -823,7 +837,8 @@ server <- function(input, output, session) {
       res <- dbGetQuery(con, query)
       num_cols <- c("past_fibonacci_lag_value","future_fibonacci_lag_value",
                     "future_confidence_score","future_improvement_score",
-                    "future_risk_score","future_tail_risk_score")
+                    "future_risk_score","future_tail_risk_score",
+                    "positive_score","negative_score","net_score","combined_score")
       for (col in num_cols) res[[col]] <- as.numeric(res[[col]])
       app_dataH(res)
       status_msgH(paste("Loaded", nrow(res), "rows."))
