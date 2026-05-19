@@ -293,30 +293,54 @@ ui <- navbarPage(
           style = "margin-top: 1.5rem; padding: 0.75rem; background: rgba(255,255,255,0.03);
                    border-left: 2px solid #64748b; border-radius: 4px;
                    color: #94a3b8; font-size: 0.75rem; font-family: 'Inter'; line-height: 1.5;",
-          tags$div(style = "color: #f8fafc; font-weight: 600; margin-bottom: 0.4rem;", "Distribution metrics"),
-          tags$div(HTML("<b>Return /mo</b> = future_median / future_lag")),
-          tags$div(HTML("<b>Improv /mo</b> = future_median / future_lag &minus; past_median / past_lag")),
-          tags$div(HTML("<b>Risk /mo</b> = (future_q3 &minus; future_q1) / &radic;future_lag")),
-          tags$div(HTML("<b>Tail Risk /mo</b> = max(q1&minus;min, max&minus;q3) / &radic;future_lag")),
+          tags$style(HTML("
+            details > summary { color: #f8fafc; font-weight: 600; margin-top: 0.6rem; margin-bottom: 0.3rem; cursor: pointer; list-style: none; }
+            details > summary::-webkit-details-marker { display: none; }
+            details > summary::before { content: '\\25B8 '; display: inline-block; transition: transform 0.15s; }
+            details[open] > summary::before { content: '\\25BE '; }
+            details > div { margin-left: 0.8rem; }
+          ")),
 
-          tags$div(style = "color: #f8fafc; font-weight: 600; margin-top: 0.8rem; margin-bottom: 0.4rem;", "Positive flags"),
-          tags$div(HTML("&times;3 future_median &gt; 0")),
-          tags$div(HTML("&times;2 Return /mo &divide; Risk /mo &ge; 0.5")),
-          tags$div(HTML("&times;1 future_q1 &gt; 0")),
-          tags$div(HTML("&times;1 future_median &gt; past_median")),
-          tags$div(HTML("&times;1 future IQR &lt; past IQR")),
+          tags$details(open = NA,
+            tags$summary("Distribution metrics"),
+            tags$div(
+              tags$div(HTML("<b>Return /mo</b> = future_median / future_lag")),
+              tags$div(HTML("<b>Improv /mo</b> = future_median / future_lag &minus; past_median / past_lag")),
+              tags$div(HTML("<b>Risk /mo</b> = (future_q3 &minus; future_q1) / &radic;future_lag")),
+              tags$div(HTML("<b>Tail Risk /mo</b> = max(q1&minus;min, max&minus;q3) / &radic;future_lag"))
+            )
+          ),
 
-          tags$div(style = "color: #f8fafc; font-weight: 600; margin-top: 0.8rem; margin-bottom: 0.4rem;", "Negative flags"),
-          tags$div(HTML("&times;3 future_median &lt; 0")),
-          tags$div(HTML("&times;3 future_q3 &lt; 0")),
-          tags$div(HTML("&times;1 future_median &lt; past_median")),
-          tags$div(HTML("&times;1 future_risk_score &gt; p90 cutoff")),
+          tags$details(
+            tags$summary("Positive flags"),
+            tags$div(
+              tags$div(HTML("&times;3 future_median &gt; 0")),
+              tags$div(HTML("&times;2 Return /mo &divide; Risk /mo &ge; 0.5")),
+              tags$div(HTML("&times;1 future_q1 &gt; 0")),
+              tags$div(HTML("&times;1 future_median &gt; past_median")),
+              tags$div(HTML("&times;1 future IQR &lt; past IQR"))
+            )
+          ),
 
-          tags$div(style = "color: #f8fafc; font-weight: 600; margin-top: 0.8rem; margin-bottom: 0.4rem;", "Aggregates"),
-          tags$div(HTML("<b>net_score</b> = positive_score &minus; negative_score")),
-          tags$div(HTML("<b>signal_score</b>: STRONG_BUY=+3, BUY=+2, HOLD=0, WATCH=&minus;1, AVOID=&minus;2, SELL=&minus;3")),
-          tags$div(HTML("<b>combined_score</b> = signal_score + net_score")),
-          tags$div(HTML("<b>recommendation</b> = combined_score tier (STRONG_PICK / BUY / HOLD / AVOID / OUTLIER_*)"))
+          tags$details(
+            tags$summary("Negative flags"),
+            tags$div(
+              tags$div(HTML("&times;3 future_median &lt; 0")),
+              tags$div(HTML("&times;3 future_q3 &lt; 0")),
+              tags$div(HTML("&times;1 future_median &lt; past_median")),
+              tags$div(HTML("&times;1 future_risk_score &gt; p90 cutoff"))
+            )
+          ),
+
+          tags$details(
+            tags$summary("Aggregates"),
+            tags$div(
+              tags$div(HTML("<b>net_score</b> = positive_score &minus; negative_score")),
+              tags$div(HTML("<b>signal_score</b>: STRONG_BUY=+3, BUY=+2, HOLD=0, WATCH=&minus;1, AVOID=&minus;2, SELL=&minus;3")),
+              tags$div(HTML("<b>combined_score</b> = signal_score + net_score")),
+              tags$div(HTML("<b>recommendation</b> = combined_score tier (STRONG_PICK / BUY / HOLD / AVOID / OUTLIER_*)"))
+            )
+          )
         )
       )),
       mainPanel(div(class = "main-card", style = "height: calc(100vh - 4rem); display: flex; flex-direction: column;",
