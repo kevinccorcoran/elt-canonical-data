@@ -621,7 +621,8 @@ server <- function(input, output, session) {
              negative_score,
              net_score,
              combined_score,
-             recommendation
+             recommendation,
+             recommendation_rank
       FROM inference.return_cluster_cell_score
       WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
       ORDER BY past_excess_return_z_bucket_num;",
@@ -789,8 +790,11 @@ server <- function(input, output, session) {
       tags$tr(
         tags$td("Signal", style = label_style),
         lapply(seq_along(sig_display_vec), function(i) {
-          tags$td(sig_display_vec[i],
-                  style = sprintf("%s color: %s; font-size: 0.9rem;", cell_style, sig_colors_vec[i]))
+          tags$td(
+            HTML(sprintf("%s <span style=\"color:#94a3b8; font-size:0.7rem;\">#%d</span>",
+                         sig_display_vec[i], as.integer(df$recommendation_rank[i]))),
+            style = sprintf("%s color: %s; font-size: 0.9rem;", cell_style, sig_colors_vec[i])
+          )
         })
       ),
       make_row("Return /mo", df$conf_score,   df$conf_color,   "%.2f"),
