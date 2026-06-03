@@ -53,6 +53,12 @@ def batch_create_transition_scored(**context):
     conn = _get_db_conn()
     cur = conn.cursor()
 
+    # Performance tuning for the per-partition window/aggregate work. Big
+    # clusters (id=4 ~1.6M rows, id=7 ~15M rows) otherwise spill the
+    # DISTINCT/sort to disk at the managed-PG default work_mem (a few MB).
+    cur.execute("SET work_mem = '256MB'")
+    cur.execute("SET max_parallel_workers_per_gather = 4")
+
     logging.info("Creating empty transition_scored table...")
     cur.execute("DROP TABLE IF EXISTS inference.return_cluster_transition_scored CASCADE")
     cur.execute("""
@@ -94,26 +100,23 @@ def batch_create_transition_scored(**context):
                 WHERE id = %s AND cluster_id = %s AND fibonacci_lag_value = %s
                   AND past_excess_return_vs_spy IS NOT NULL
             ),
-            -- Deduplicate past observations before computing stats so that
-            -- the future_fibonacci_lag_value fan-out does not inflate counts
-            -- or weight the mean/stddev toward observations that happen to
-            -- have more future horizons.
+            -- Stats over DISTINCT past observations so the future_fibonacci_lag_value
+            -- fan-out does not inflate counts or weight the mean/stddev. base is
+            -- already a single (id, cluster_id, fibonacci_lag_value) partition, so
+            -- these are scalar aggregates broadcast to every row via CROSS JOIN.
+            -- Replaces the prior DISTINCT -> window -> float-equality self-join,
+            -- which was the per-partition bottleneck on the large clusters.
             past_stats AS (
                 SELECT
-                    id,
-                    cluster_id,
-                    fibonacci_lag_value,
-                    past_excess_return_vs_spy,
-                    COUNT(*) OVER w_past AS past_record_count,
-                    AVG(past_excess_return_vs_spy) OVER w_past AS avg_past_excess_return_vs_spy,
-                    STDDEV_SAMP(past_excess_return_vs_spy) OVER w_past AS stddev_past_excess_return_vs_spy
+                    COUNT(*) AS past_record_count,
+                    AVG(past_excess_return_vs_spy) AS avg_past_excess_return_vs_spy,
+                    STDDEV_SAMP(past_excess_return_vs_spy) AS stddev_past_excess_return_vs_spy
                 FROM (
-                    SELECT DISTINCT id, cluster_id, fibonacci_lag_value, past_excess_return_vs_spy
+                    SELECT DISTINCT past_excess_return_vs_spy
                     FROM base
                 ) distinct_past
-                WINDOW w_past AS (PARTITION BY id, cluster_id, fibonacci_lag_value)
             ),
-            scored_past AS (
+            bucketed_past AS (
                 SELECT
                     b.id,
                     b.cluster_id,
@@ -123,24 +126,15 @@ def batch_create_transition_scored(**context):
                     b.future_excess_return_vs_spy,
                     ps.past_record_count,
                     ps.avg_past_excess_return_vs_spy,
-                    ps.stddev_past_excess_return_vs_spy
-                FROM base b
-                JOIN past_stats ps
-                    ON b.id = ps.id
-                    AND b.cluster_id = ps.cluster_id
-                    AND b.fibonacci_lag_value = ps.fibonacci_lag_value
-                    AND b.past_excess_return_vs_spy = ps.past_excess_return_vs_spy
-            ),
-            bucketed_past AS (
-                SELECT
-                    *,
+                    ps.stddev_past_excess_return_vs_spy,
                     CASE
-                        WHEN stddev_past_excess_return_vs_spy IS NULL
-                          OR stddev_past_excess_return_vs_spy = 0
+                        WHEN ps.stddev_past_excess_return_vs_spy IS NULL
+                          OR ps.stddev_past_excess_return_vs_spy = 0
                         THEN NULL
-                        ELSE (past_excess_return_vs_spy - avg_past_excess_return_vs_spy) / stddev_past_excess_return_vs_spy
+                        ELSE (b.past_excess_return_vs_spy - ps.avg_past_excess_return_vs_spy) / ps.stddev_past_excess_return_vs_spy
                     END AS past_num_stddevs_away
-                FROM scored_past
+                FROM base b
+                CROSS JOIN past_stats ps
             )
             SELECT
                 *,
@@ -198,6 +192,26 @@ with DAG(
         task_id="dbt_run_return_cluster_feature_set",
         bash_command=bash_fs,
         env=env_fs,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    # --- return_cluster_feature_set_current (latest obs per ticker/lag) ---
+    bash_fsc, env_fsc = get_inference_dbt_bash_command(runtime_env, "return_cluster_feature_set_current")
+    dbt_run_feature_set_current = BashOperator(
+        task_id="dbt_run_return_cluster_feature_set_current",
+        bash_command=bash_fsc,
+        env=env_fsc,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    # --- return_cluster_transition_scored_current (cross-sectional z-bucket) ---
+    bash_tsc, env_tsc = get_inference_dbt_bash_command(runtime_env, "return_cluster_transition_scored_current")
+    dbt_run_transition_scored_current = BashOperator(
+        task_id="dbt_run_return_cluster_transition_scored_current",
+        bash_command=bash_tsc,
+        env=env_tsc,
         append_env=True,
         do_xcom_push=False,
     )
@@ -280,5 +294,6 @@ with DAG(
     # DEPENDENCIES
     dbt_run_feature_set >> batch_transition_scored >> [dbt_run_past_bucket_stats, dbt_run_future_bucket_stats] >> dbt_run_combined_bucket_stats
     dbt_run_feature_set >> dbt_run_lag_viability
+    dbt_run_feature_set >> dbt_run_feature_set_current >> dbt_run_transition_scored_current
     [dbt_run_combined_bucket_stats, dbt_run_lag_viability] >> dbt_run_transition_confidence
     dbt_run_transition_confidence >> dbt_run_cell_score >> trigger_inference_backtest
