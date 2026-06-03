@@ -8,6 +8,7 @@ sources:
       - name: fib_seq
       - name: ticker_index_summary
       - name: api_data_ingestion_massive
+      - name: api_data_ingestion_massive_delisted
 
   - name: cdm
     database: "{{ env_var('DB_DATABASE', 'prod') }}"
@@ -15,6 +16,7 @@ sources:
     tables:
       - name: api_data_ingestion_yfinance
       - name: api_data_ingestion_massive
+      - name: ingest_massive_delisted_inc
 
   - name: analysis
     database: "{{ env_var('DB_DATABASE', 'prod') }}"

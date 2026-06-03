@@ -36,7 +36,7 @@ WITH run_time AS (
     SELECT NOW() AS ts
 ),
 
--- PRIMARY PROVIDER: Massive (preferred source when available and not excluded)
+-- PRIMARY PROVIDER: Massive (preferred when not in a bad range)
 massive AS (
     SELECT
         "date",
@@ -48,10 +48,12 @@ massive AS (
     FROM {{ ref('ingest_massive_staging') }}
 ),
 
--- Exclusion lists allow you to explicitly force a provider choice per ticker
-excluded_massive AS (
-    SELECT ticker FROM {{ ref('excluded_tickers_massive') }}
+-- Per-(ticker, date-range) bad-data exclusions from the data_quality model
+bad_ranges AS (
+    SELECT ticker, bad_start, bad_end
+    FROM {{ ref('excluded_tickers_massive') }}
 ),
+
 excluded_yfinance AS (
     SELECT ticker FROM {{ ref('excluded_tickers_yfinance') }}
 ),
@@ -60,15 +62,9 @@ excluded_yfinance AS (
 yfinance AS (
     SELECT
         "date",
-
-        -- Normalize ticker names for downstream consistency
         CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END AS ticker,
-
-        -- Adjust ^GSPC pricing to match SPY scale (domain-specific normalization)
         CASE WHEN ticker = '^GSPC' THEN adj_close / 10.0 ELSE adj_close END AS adj_close,
-
         'yfinance' AS source,
-
         (CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END || '_' || "date") AS ticker_date_id
     FROM {{ ref('ingest_yfinance_staging') }} yf
     WHERE NOT EXISTS (SELECT 1 FROM excluded_yfinance ey WHERE ey.ticker = yf.ticker)
@@ -76,7 +72,7 @@ yfinance AS (
 
 combined AS (
 
-    -- 1) Use Massive when allowed (ticker not excluded from Massive)
+    -- 1) Use Massive when (ticker, date) is NOT in any bad range
     SELECT
         m."date",
         m.ticker,
@@ -86,11 +82,15 @@ combined AS (
         m.ticker_date_id
     FROM massive m
     CROSS JOIN run_time rt
-    WHERE NOT EXISTS (SELECT 1 FROM excluded_massive ex WHERE ex.ticker = m.ticker)
+    WHERE NOT EXISTS (
+        SELECT 1 FROM bad_ranges br
+        WHERE br.ticker = m.ticker
+          AND m."date" BETWEEN br.bad_start AND br.bad_end
+    )
 
     UNION ALL
 
-    -- 2) Massive excluded → use YFinance for that ticker (if YFinance not excluded)
+    -- 2) Use YFinance to fill in dates that ARE in a bad range
     SELECT
         y."date",
         y.ticker,
@@ -100,13 +100,16 @@ combined AS (
         y.ticker_date_id
     FROM yfinance y
     CROSS JOIN run_time rt
-    WHERE EXISTS (SELECT 1 FROM excluded_massive ex WHERE ex.ticker = y.ticker)
-      AND NOT EXISTS (SELECT 1 FROM excluded_yfinance ey WHERE ey.ticker = y.ticker)
+    WHERE EXISTS (
+        SELECT 1 FROM bad_ranges br
+        WHERE br.ticker = y.ticker
+          AND y."date" BETWEEN br.bad_start AND br.bad_end
+    )
 
     UNION ALL
 
-    -- 3) Missing from Massive entirely → use YFinance
-    -- (only if the ticker is not excluded from either provider)
+    -- 3) Use YFinance when Massive doesn't have the (ticker, date) at all
+    --    AND it's not already covered by case 2 (date is not in a bad range)
     SELECT
         y."date",
         y.ticker,
@@ -122,8 +125,34 @@ combined AS (
               WHERE m.ticker = y.ticker
                 AND m."date" = y."date"
           )
-      AND NOT EXISTS (SELECT 1 FROM excluded_yfinance ey WHERE ey.ticker = y.ticker)
-      AND NOT EXISTS (SELECT 1 FROM excluded_massive ex WHERE ex.ticker = y.ticker)
+      AND NOT EXISTS (
+              SELECT 1 FROM bad_ranges br
+              WHERE br.ticker = y.ticker
+                AND y."date" BETWEEN br.bad_start AND br.bad_end
+          )
+
+    UNION ALL
+
+    -- 4) Delisted tickers from Massive's delisted feed.
+    --    Source label 'massive_delisted' so downstream can filter if a model
+    --    explicitly wants active-only. Polygon's delisted feed occasionally
+    --    overlaps with active for ~38 tickers (re-listed, symbol reuse, etc.);
+    --    massive (active) is treated as authoritative for the overlapping
+    --    (ticker, date) tuples to avoid duplicates downstream.
+    SELECT
+        d."date",
+        d.ticker,
+        d.adj_close,
+        'massive_delisted' AS source,
+        rt.ts AS processed_at,
+        (d.ticker || '_' || d."date") AS ticker_date_id
+    FROM {{ source('cdm', 'ingest_massive_delisted_inc') }} d
+    CROSS JOIN run_time rt
+    WHERE NOT EXISTS (
+        SELECT 1 FROM massive m
+        WHERE m.ticker = d.ticker
+          AND m."date" = d."date"
+    )
 )
 
 SELECT *
