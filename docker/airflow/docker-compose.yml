@@ -1,3 +1,30 @@
+x-airflow-common: &airflow-common
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__WEBSERVER__WEB_SERVER_HOST: 0.0.0.0
+    AIRFLOW__CORE__PARALLELISM: 4
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: 2
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DATABASE_URL}
+    PROJECT_ROOT: /opt/elt-canonical-data
+    PYTHONPATH: /opt/elt-canonical-data/src
+  volumes:
+    - ../../airflow/dags:/opt/airflow/dags
+    - ../../src:/opt/elt-canonical-data/src
+    # - ../../airflow/logs:/opt/airflow/logs
+    - ../../dbt:/opt/elt-canonical-data/dbt
+    - ../../.dbt:/home/airflow/.dbt
+    - ../../../elt-inference-models:/opt/elt-inference-models
+    - ../../scripts:/opt/airflow/scripts
+  depends_on:
+    postgres:
+      condition: service_healthy
+
 services:
   postgres:
     image: postgres:15
@@ -10,7 +37,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      - "5435:5432"
     volumes:
       - ./airflow-postgres:/var/lib/postgresql/data
     healthcheck:
@@ -19,47 +46,63 @@ services:
       timeout: 3s
       retries: 20
 
-  airflow:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    container_name: airflow
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    restart: "no"
+    command: bash -c "airflow db upgrade"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
-    env_file:
-      - .env
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__WEBSERVER__WEB_SERVER_HOST: 0.0.0.0
-      AIRFLOW__CORE__PARALLELISM: 4
-      AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: 2
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DATABASE_URL}
+      airflow-init:
+        condition: service_completed_successfully
+    command: bash -c "airflow scheduler"
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
-      PROJECT_ROOT: /opt/elt-canonical-data
-      PYTHONPATH: /opt/elt-canonical-data/src
-
-    volumes:
-      - ../../airflow/dags:/opt/airflow/dags
-      - ../../src:/opt/elt-canonical-data/src
-      # - ../../airflow/logs:/opt/airflow/logs
-      - ../../dbt:/opt/elt-canonical-data/dbt
-      - ../../.dbt:/home/airflow/.dbt
-      - ../../../elt-inference-models:/opt/elt-inference-models
-      - ../../scripts:/opt/airflow/scripts
-
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: bash -c "airflow webserver"
     ports:
       - "8080:8080"
-      - "3838:3838"
-      - "3839:3839"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
+  airflow-shiny:
+    <<: *airflow-common
+    container_name: airflow-shiny
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     command: >
       bash -c "
-        airflow db upgrade &&
         Rscript /opt/airflow/scripts/app.R > /opt/airflow/scripts/shiny.log 2>&1 &
+        SHINY_PID=$$!;
         Rscript /opt/airflow/scripts/app_violin.R > /opt/airflow/scripts/shiny_violin.log 2>&1 &
-        airflow webserver &
-        airflow scheduler
+        VIOLIN_PID=$$!;
+        wait -n $$SHINY_PID $$VIOLIN_PID
       "
+    ports:
+      - "3838:3838"
+      - "3839:3839"
