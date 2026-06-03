@@ -80,7 +80,7 @@ def get_inference_dbt_deps_command(
     bash_command = (
         "set -euo pipefail && "
         f"cd {dbt_project_dir} && "
-        "if [ -d .git ]; then git fetch --quiet origin main && git reset --quiet --hard origin/main; fi && "
+        "if [ \"${ENV:-}\" = \"prod\" ] && [ -d .git ]; then git fetch --quiet origin main && git reset --quiet --hard origin/main; fi && "
         "dbt deps"
     )
 
@@ -164,7 +164,7 @@ def get_inference_dbt_bash_command(
     bash_command = (
         "set -euo pipefail && "
         f"cd {dbt_project_dir} && "
-        "if [ -d .git ]; then git fetch --quiet origin main && git reset --quiet --hard origin/main; fi && "
+        "if [ \"${ENV:-}\" = \"prod\" ] && [ -d .git ]; then git fetch --quiet origin main && git reset --quiet --hard origin/main; fi && "
         f"dbt run --select {selector}"
     )
 
