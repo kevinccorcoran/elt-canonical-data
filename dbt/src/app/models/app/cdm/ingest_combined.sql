@@ -130,29 +130,6 @@ combined AS (
               WHERE br.ticker = y.ticker
                 AND y."date" BETWEEN br.bad_start AND br.bad_end
           )
-
-    UNION ALL
-
-    -- 4) Delisted tickers from Massive's delisted feed.
-    --    Source label 'massive_delisted' so downstream can filter if a model
-    --    explicitly wants active-only. Polygon's delisted feed occasionally
-    --    overlaps with active for ~38 tickers (re-listed, symbol reuse, etc.);
-    --    massive (active) is treated as authoritative for the overlapping
-    --    (ticker, date) tuples to avoid duplicates downstream.
-    SELECT
-        d."date",
-        d.ticker,
-        d.adj_close,
-        'massive_delisted' AS source,
-        rt.ts AS processed_at,
-        (d.ticker || '_' || d."date") AS ticker_date_id
-    FROM {{ source('cdm', 'ingest_massive_delisted_inc') }} d
-    CROSS JOIN run_time rt
-    WHERE NOT EXISTS (
-        SELECT 1 FROM massive m
-        WHERE m.ticker = d.ticker
-          AND m."date" = d."date"
-    )
 )
 
 SELECT *
