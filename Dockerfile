@@ -1,7 +1,7 @@
 FROM apache/airflow:2.9.3
 
 USER root
-RUN apt-get update && \
+RUN apt-get -o Acquire::Max-FutureTime=86400 -o Acquire::Check-Valid-Until=false update && \
     apt-get install -y --no-install-recommends git r-base libpq-dev build-essential libcurl4-openssl-dev libssl-dev pkg-config r-cran-shiny r-cran-jsonlite r-cran-dbi && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
