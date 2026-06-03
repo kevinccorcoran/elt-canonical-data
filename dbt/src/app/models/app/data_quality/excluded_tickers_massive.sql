@@ -8,47 +8,46 @@
       """
         CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_ticker
         ON {{ this }} (ticker);
+      """,
+      """
+        CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_ticker_range
+        ON {{ this }} (ticker, bad_start, bad_end);
       """
     ]
   )
 }}
 
 /* --------------------------------------------------------------
-   PRICE STAGNATION + FIRST adj_close = 0 DETECTION
+   BAD-DATA DATE RANGES IN MASSIVE FEED
 
-   Flags tickers that exhibit suspicious price behavior:
-     1) Price does not change for ≥ 20 consecutive trading days
-     2) First observed adj_close value equals 0 (invalid starting price)
+   Emits one row per (ticker, bad_start, bad_end) date range that
+   should be dropped from the massive source. Downstream
+   `ingest_combined` falls back to yfinance for those ranges
+   but keeps massive for everything else.
 
-   Output: DISTINCT list of affected tickers.
+   Two rules:
+     1) Stagnation: ≥ 20 consecutive trading days at same price
+     2) Zero close: any row where adj_close = 0
    -------------------------------------------------------------- */
 
--- 1) Prepare price history with previous-day comparison
 WITH prices AS (
     SELECT
         ticker,
         date,
         adj_close,
-        LAG(adj_close) OVER (
-            PARTITION BY ticker ORDER BY date
-        ) AS prev_close
+        LAG(adj_close) OVER (PARTITION BY ticker ORDER BY date) AS prev_close
     FROM {{ ref('ingest_massive_staging') }}
 ),
 
--- 2) Mark boundaries where a new price run begins
 runs AS (
     SELECT
         ticker,
         date,
         adj_close,
-        CASE
-            WHEN adj_close = prev_close THEN 0
-            ELSE 1
-        END AS new_run_flag
+        CASE WHEN adj_close = prev_close THEN 0 ELSE 1 END AS new_run_flag
     FROM prices
 ),
 
--- 3) Assign a unique run ID per uninterrupted price sequence
 run_groups AS (
     SELECT
         ticker,
@@ -61,42 +60,27 @@ run_groups AS (
     FROM runs
 ),
 
--- 4) Measure how long each price run lasts
-run_lengths AS (
+stagnation_ranges AS (
     SELECT
         ticker,
-        run_id,
-        COUNT(*) AS run_length
+        MIN(date) AS bad_start,
+        MAX(date) AS bad_end,
+        'stagnation' AS reason
     FROM run_groups
     GROUP BY ticker, run_id
+    HAVING COUNT(*) >= 20
 ),
 
--- 5) Flag tickers with long flat-price runs
-stagnation_flag AS (
-    SELECT DISTINCT ticker
-    FROM run_lengths
-    WHERE run_length >= 20   -- stagnation threshold
-),
-
--- 6) Detect tickers whose first recorded adj_close is zero
-first_adj_close_0 AS (
-    SELECT DISTINCT ticker
-    FROM (
-        SELECT
-            a.ticker,
-            FIRST_VALUE(a.adj_close) OVER (
-                PARTITION BY a.ticker ORDER BY a.date
-            ) AS first_adj_close
-        FROM {{ ref('ingest_massive_staging') }} a
-    ) t
-    WHERE first_adj_close = 0
+zero_close_ranges AS (
+    SELECT
+        ticker,
+        date AS bad_start,
+        date AS bad_end,
+        'zero_close' AS reason
+    FROM {{ ref('ingest_massive_staging') }}
+    WHERE adj_close = 0
 )
 
--- 7) Final result: union of all detected issues
-SELECT DISTINCT ticker
-FROM stagnation_flag
-
-UNION
-
-SELECT DISTINCT ticker
-FROM first_adj_close_0
+SELECT ticker, bad_start, bad_end, reason FROM stagnation_ranges
+UNION ALL
+SELECT ticker, bad_start, bad_end, reason FROM zero_close_ranges
