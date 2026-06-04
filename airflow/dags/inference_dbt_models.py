@@ -100,21 +100,40 @@ def batch_create_transition_scored(**context):
                 WHERE id = %s AND cluster_id = %s AND fibonacci_lag_value = %s
                   AND past_excess_return_vs_spy IS NOT NULL
             ),
-            -- Stats over DISTINCT past observations so the future_fibonacci_lag_value
-            -- fan-out does not inflate counts or weight the mean/stddev. base is
-            -- already a single (id, cluster_id, fibonacci_lag_value) partition, so
-            -- these are scalar aggregates broadcast to every row via CROSS JOIN.
-            -- Replaces the prior DISTINCT -> window -> float-equality self-join,
-            -- which was the per-partition bottleneck on the large clusters.
-            past_stats AS (
+            -- Robust center/scale for the (id, cluster, lag) partition using
+            -- median + MAD (median absolute deviation) instead of mean + SD.
+            -- A single outlier pulls mean/SD enough that most observations
+            -- z-score to the same bucket; median/MAD ignore the outlier so
+            -- bucket coverage stays well-distributed.
+            -- The 1.4826 multiplier makes MAD asymptotically equal to SD for
+            -- normal data, so the downstream ±1/±2/±3 SD thresholds keep their
+            -- meaning. Column names stay 'avg_*' and 'stddev_*' for backward
+            -- compatibility with downstream models.
+            distinct_past AS (
+                SELECT DISTINCT past_excess_return_vs_spy FROM base
+            ),
+            past_center AS (
                 SELECT
                     COUNT(*) AS past_record_count,
-                    AVG(past_excess_return_vs_spy) AS avg_past_excess_return_vs_spy,
-                    STDDEV_SAMP(past_excess_return_vs_spy) AS stddev_past_excess_return_vs_spy
-                FROM (
-                    SELECT DISTINCT past_excess_return_vs_spy
-                    FROM base
-                ) distinct_past
+                    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY past_excess_return_vs_spy) AS past_median
+                FROM distinct_past
+            ),
+            past_abs_dev AS (
+                SELECT ABS(dp.past_excess_return_vs_spy - pc.past_median) AS abs_dev
+                FROM distinct_past dp
+                CROSS JOIN past_center pc
+            ),
+            past_mad AS (
+                SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY abs_dev) AS mad
+                FROM past_abs_dev
+            ),
+            past_stats AS (
+                SELECT
+                    pc.past_record_count,
+                    pc.past_median AS avg_past_excess_return_vs_spy,
+                    1.4826 * pm.mad AS stddev_past_excess_return_vs_spy
+                FROM past_center pc
+                CROSS JOIN past_mad pm
             ),
             bucketed_past AS (
                 SELECT
