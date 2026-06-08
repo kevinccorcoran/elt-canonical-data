@@ -302,6 +302,16 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # --- return_cluster_pair_recommendation (use_pair flag per id/past_lag/future_lag) ---
+    bash_pr, env_pr = get_inference_dbt_bash_command(runtime_env, "return_cluster_pair_recommendation")
+    dbt_run_pair_recommendation = BashOperator(
+        task_id="dbt_run_return_cluster_pair_recommendation",
+        bash_command=bash_pr,
+        env=env_pr,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     # --- trigger inference_backtest_dbt_models after prod refresh completes ---
     trigger_inference_backtest = TriggerDagRunOperator(
         task_id="trigger_inference_backtest_dbt_models",
@@ -315,4 +325,4 @@ with DAG(
     dbt_run_feature_set >> dbt_run_lag_viability
     dbt_run_feature_set >> dbt_run_feature_set_current >> dbt_run_transition_scored_current
     [dbt_run_combined_bucket_stats, dbt_run_lag_viability] >> dbt_run_transition_confidence
-    dbt_run_transition_confidence >> dbt_run_cell_score >> trigger_inference_backtest
+    dbt_run_transition_confidence >> dbt_run_cell_score >> dbt_run_pair_recommendation >> trigger_inference_backtest
