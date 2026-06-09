@@ -5,6 +5,8 @@ import pendulum
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 
+from utils.dbt_helpers import get_dbt_bash_command
+
 
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/opt/elt-canonical-data")
 LOCAL_TZ = pendulum.timezone("Europe/Amsterdam")
@@ -122,4 +124,20 @@ with DAG(
         do_xcom_push=False,
     )
 
-    refresh_metadata >> backfill_aggregates >> enrich_details >> classify_delistings
+    # Rebuild the delisted cdm model and fold it into ingest_combined, so the
+    # delisted bars actually surface downstream (e.g. the ticker-coverage
+    # dashboard). Without this the raw load never reaches cdm.
+    _dbt_env_name = os.environ.get("DB_DATABASE") or "prod"
+    _dbt_cmd, _dbt_env = get_dbt_bash_command(
+        env=_dbt_env_name,
+        selector="ingest_massive_delisted_inc ingest_combined",
+    )
+    build_dbt = BashOperator(
+        task_id="dbt_build_delisted_and_combined",
+        bash_command=_dbt_cmd,
+        env={**_env(), **_dbt_env},
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    refresh_metadata >> backfill_aggregates >> enrich_details >> classify_delistings >> build_dbt

@@ -44,7 +44,7 @@ massive AS (
         adj_close,
         processed_at,
         ticker_date_id,
-        'massive' AS source
+        source
     FROM {{ ref('ingest_massive_staging') }}
 ),
 
