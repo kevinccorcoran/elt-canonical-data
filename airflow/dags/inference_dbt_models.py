@@ -312,6 +312,26 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # --- return_cluster_ticker_pair_current (pair-grain landing: ticker x pair x bucket) ---
+    bash_tpc, env_tpc = get_inference_dbt_bash_command(runtime_env, "return_cluster_ticker_pair_current")
+    dbt_run_ticker_pair_current = BashOperator(
+        task_id="dbt_run_return_cluster_ticker_pair_current",
+        bash_command=bash_tpc,
+        env=env_tpc,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    # --- return_cluster_ticker_summary_current (ticker-grain rollup; dashboard landing) ---
+    bash_tsc, env_tsc = get_inference_dbt_bash_command(runtime_env, "return_cluster_ticker_summary_current")
+    dbt_run_ticker_summary_current = BashOperator(
+        task_id="dbt_run_return_cluster_ticker_summary_current",
+        bash_command=bash_tsc,
+        env=env_tsc,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     # --- trigger inference_backtest_dbt_models after prod refresh completes ---
     trigger_inference_backtest = TriggerDagRunOperator(
         task_id="trigger_inference_backtest_dbt_models",
@@ -325,4 +345,5 @@ with DAG(
     dbt_run_feature_set >> dbt_run_lag_viability
     dbt_run_feature_set >> dbt_run_feature_set_current >> dbt_run_transition_scored_current
     [dbt_run_combined_bucket_stats, dbt_run_lag_viability] >> dbt_run_transition_confidence
-    dbt_run_transition_confidence >> dbt_run_cell_score >> dbt_run_pair_recommendation >> trigger_inference_backtest
+    dbt_run_transition_confidence >> dbt_run_cell_score >> dbt_run_pair_recommendation
+    [dbt_run_transition_scored_current, dbt_run_cell_score, dbt_run_pair_recommendation] >> dbt_run_ticker_pair_current >> dbt_run_ticker_summary_current >> trigger_inference_backtest
