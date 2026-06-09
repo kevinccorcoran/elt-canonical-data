@@ -58,8 +58,25 @@ ticker_index_summary AS (
     SELECT
         ticker
     FROM {{ ref('ticker_index_summary') }}
+),
+
+-- Delisted bars (survivorship-bias-free history). NOT filtered by the
+-- index-membership allowlist, since dead tickers aren't in it. Only the
+-- backtest-relevant categories (include_for_backtest excludes SPACs/shells).
+delisted AS (
+    SELECT
+        "date",
+        ticker,
+        adj_close,
+        processed_at,
+        ticker_date_id,
+        'massive_delisted' AS source,
+        NULL AS date_type
+    FROM {{ ref('ingest_massive_delisted_inc') }}
+    WHERE include_for_backtest = TRUE
 )
 
+-- Active universe: massive bars filtered to the index-membership allowlist
 SELECT
     mb."date",
     mb.ticker,
@@ -73,4 +90,18 @@ FROM massive_base mb
 JOIN ticker_index_summary tis
     ON mb.ticker = tis.ticker
 CROSS JOIN run_time rt
-ORDER BY mb."date" DESC, mb.ticker
+
+UNION ALL
+
+-- Delisted universe: not allowlist-filtered (dead tickers aren't in it)
+SELECT
+    d."date",
+    d.ticker,
+    d.adj_close,
+    d.processed_at,
+    d.ticker_date_id,
+    d.source,
+    d.date_type,
+    rt.query_run_time
+FROM delisted d
+CROSS JOIN run_time rt
