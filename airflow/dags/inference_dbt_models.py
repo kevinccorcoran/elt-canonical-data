@@ -332,6 +332,16 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # --- return_cluster_ticker_global_action_current (global BUY/SELL/SKIP across clusterings) ---
+    bash_tga, env_tga = get_inference_dbt_bash_command(runtime_env, "return_cluster_ticker_global_action_current")
+    dbt_run_ticker_global_action_current = BashOperator(
+        task_id="dbt_run_return_cluster_ticker_global_action_current",
+        bash_command=bash_tga,
+        env=env_tga,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     # --- trigger inference_backtest_dbt_models after prod refresh completes ---
     trigger_inference_backtest = TriggerDagRunOperator(
         task_id="trigger_inference_backtest_dbt_models",
