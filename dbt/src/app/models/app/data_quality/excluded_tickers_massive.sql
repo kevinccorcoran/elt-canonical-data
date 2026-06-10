@@ -25,9 +25,13 @@
    `ingest_combined` falls back to yfinance for those ranges
    but keeps massive for everything else.
 
-   Two rules:
+   Three rules:
      1) Stagnation: ≥ 20 consecutive trading days at same price
      2) Zero close: any row where adj_close = 0
+     3) Huge jump: ticker has any month-over-month min/max move
+        ≥ 500% (typically an unadjusted split or corporate action).
+        Drops the entire ticker history from massive; yfinance
+        provides correctly-adjusted prices.
    -------------------------------------------------------------- */
 
 WITH prices AS (
@@ -79,8 +83,51 @@ zero_close_ranges AS (
         'zero_close' AS reason
     FROM {{ ref('ingest_massive_staging') }}
     WHERE adj_close = 0
+),
+
+monthly AS (
+    SELECT
+        ticker,
+        DATE_TRUNC('month', date)::date AS month,
+        MIN(adj_close) AS min_price,
+        MAX(adj_close) AS max_price
+    FROM {{ ref('ingest_massive_staging') }}
+    WHERE adj_close > 0
+    GROUP BY ticker, DATE_TRUNC('month', date)
+),
+
+monthly_jumps AS (
+    SELECT
+        ticker,
+        GREATEST(
+            ABS((LEAD(min_price) OVER (PARTITION BY ticker ORDER BY month) - min_price)
+                / NULLIF(min_price, 0)),
+            ABS((LEAD(max_price) OVER (PARTITION BY ticker ORDER BY month) - max_price)
+                / NULLIF(max_price, 0))
+        ) AS jump_pct
+    FROM monthly
+),
+
+flagged_jump_tickers AS (
+    SELECT ticker
+    FROM monthly_jumps
+    GROUP BY ticker
+    HAVING MAX(jump_pct) >= 5.0
+),
+
+jump_ranges AS (
+    SELECT
+        s.ticker,
+        MIN(s.date) AS bad_start,
+        MAX(s.date) AS bad_end,
+        'huge_jump' AS reason
+    FROM {{ ref('ingest_massive_staging') }} s
+    JOIN flagged_jump_tickers f USING (ticker)
+    GROUP BY s.ticker
 )
 
 SELECT ticker, bad_start, bad_end, reason FROM stagnation_ranges
 UNION ALL
 SELECT ticker, bad_start, bad_end, reason FROM zero_close_ranges
+UNION ALL
+SELECT ticker, bad_start, bad_end, reason FROM jump_ranges
