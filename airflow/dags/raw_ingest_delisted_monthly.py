@@ -124,13 +124,16 @@ with DAG(
         do_xcom_push=False,
     )
 
-    # Rebuild the delisted cdm model and fold it into ingest_combined, so the
-    # delisted bars actually surface downstream (e.g. the ticker-coverage
-    # dashboard). Without this the raw load never reaches cdm.
+    # Rebuild ingest_combined AND its full upstream so the delisted bars
+    # surface downstream and no dependency is missing. '+ingest_combined'
+    # = ingest_combined plus all its ancestors (the delisted model, staging,
+    # and the data_quality gate models incl. manual_excluded_tickers). Using
+    # the explicit 3-model list broke when manual_excluded_tickers (PR #36)
+    # was added as a new ingest_combined dependency.
     _dbt_env_name = os.environ.get("DB_DATABASE") or "prod"
     _dbt_cmd, _dbt_env = get_dbt_bash_command(
         env=_dbt_env_name,
-        selector="ingest_massive_delisted_inc ingest_massive_staging ingest_combined",
+        selector="+ingest_combined",
     )
     build_dbt = BashOperator(
         task_id="dbt_build_delisted_and_combined",
