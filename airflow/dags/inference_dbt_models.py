@@ -356,4 +356,4 @@ with DAG(
     dbt_run_feature_set >> dbt_run_feature_set_current >> dbt_run_transition_scored_current
     [dbt_run_combined_bucket_stats, dbt_run_lag_viability] >> dbt_run_transition_confidence
     dbt_run_transition_confidence >> dbt_run_cell_score >> dbt_run_pair_recommendation
-    [dbt_run_transition_scored_current, dbt_run_cell_score, dbt_run_pair_recommendation] >> dbt_run_ticker_pair_current >> dbt_run_ticker_summary_current >> trigger_inference_backtest
+    [dbt_run_transition_scored_current, dbt_run_cell_score, dbt_run_pair_recommendation] >> dbt_run_ticker_pair_current >> dbt_run_ticker_summary_current >> dbt_run_ticker_global_action_current >> trigger_inference_backtest
