@@ -54,8 +54,9 @@ bad_ranges AS (
     FROM {{ ref('excluded_tickers_massive') }}
 ),
 
-excluded_yfinance AS (
-    SELECT ticker FROM {{ ref('excluded_tickers_yfinance') }}
+yfinance_bad_ranges AS (
+    SELECT ticker, bad_start, bad_end
+    FROM {{ ref('excluded_tickers_yfinance') }}
 ),
 
 -- Manual ticker exclusions: hand-curated list of tickers to drop entirely
@@ -73,7 +74,11 @@ yfinance AS (
         'yfinance' AS source,
         (CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END || '_' || "date") AS ticker_date_id
     FROM {{ ref('ingest_yfinance_staging') }} yf
-    WHERE NOT EXISTS (SELECT 1 FROM excluded_yfinance ey WHERE ey.ticker = yf.ticker)
+    WHERE NOT EXISTS (
+        SELECT 1 FROM yfinance_bad_ranges br
+        WHERE br.ticker = CASE WHEN yf.ticker = '^GSPC' THEN 'SPY' ELSE yf.ticker END
+          AND yf."date" BETWEEN br.bad_start AND br.bad_end
+    )
 ),
 
 combined AS (
