@@ -25,7 +25,7 @@
    `ingest_combined` falls back to yfinance for those ranges
    but keeps massive for everything else.
 
-   Five rules:
+   Six rules:
      1) Stagnation: ≥ 20 consecutive trading days at same price
      2) Zero close: any row where adj_close = 0
      3) Feed discrepancy: massive shows a month-over-month min/max
@@ -41,13 +41,18 @@
         defaults to exclusion since there's no second source to
         validate against. Removes the ticker entirely.
         Catches: GEHI (0.375 → 9.53 in 2022-10, no yfinance data).
-     5) Ticker reuse: massive's history for the ticker starts more
-        than 365 days before yfinance's history. The pre-yfinance
-        portion almost always belongs to a different (delisted)
-        company that previously held the ticker. Drops the
-        pre-yfinance-start portion of massive only.
-        Catches: MRNA (Moderna IPO 2018, massive has data from 2008),
-        COIN (Coinbase IPO 2021), and similar reuses.
+     5) Ticker reuse (feed-level): massive's history for the ticker
+        starts more than 365 days before yfinance's history. The
+        pre-yfinance portion almost always belongs to a different
+        (delisted) company. Drops the pre-yfinance-start portion only.
+        Catches: MRNA (Moderna IPO 2018), COIN (Coinbase IPO 2021).
+     6) Regime shift: ticker's yearly median price jumps ≥ 50x
+        year-over-year AND remains elevated the next year. Catches
+        post-bankruptcy mergers / corporate identity changes where
+        both feeds carry the legacy entity's prices under the new
+        ticker. Drops everything before the shift year.
+        Catches: CHRD (Chord Energy formed July 2022 from Whiting
+        bankruptcy + Oasis merger; pre-2022 data is Whiting at $0.06).
    -------------------------------------------------------------- */
 
 WITH prices AS (
@@ -221,6 +226,46 @@ ticker_reuse_ranges AS (
     FROM massive_ticker_starts m
     JOIN yfinance_ticker_starts y USING (ticker)
     WHERE m.massive_start < y.yfinance_start - INTERVAL '365 days'
+),
+
+yearly_median AS (
+    SELECT
+        ticker,
+        EXTRACT(YEAR FROM date)::int AS yr,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY adj_close) AS median_price
+    FROM {{ ref('ingest_massive_staging') }}
+    WHERE adj_close > 0
+    GROUP BY ticker, EXTRACT(YEAR FROM date)
+),
+
+yearly_with_neighbors AS (
+    SELECT
+        ticker,
+        yr,
+        median_price,
+        LAG(median_price)  OVER (PARTITION BY ticker ORDER BY yr) AS prev_median,
+        LEAD(median_price) OVER (PARTITION BY ticker ORDER BY yr) AS next_median
+    FROM yearly_median
+),
+
+regime_shift_years AS (
+    SELECT ticker, MAX(yr) AS shift_year
+    FROM yearly_with_neighbors
+    WHERE prev_median IS NOT NULL
+      AND median_price / NULLIF(prev_median, 0) >= 50.0
+      AND (next_median IS NULL OR next_median >= 0.5 * median_price)
+    GROUP BY ticker
+),
+
+regime_shift_ranges AS (
+    SELECT
+        s.ticker,
+        MIN(s.date) AS bad_start,
+        (MAKE_DATE(rs.shift_year, 1, 1) - INTERVAL '1 day')::date AS bad_end,
+        'regime_shift' AS reason
+    FROM {{ ref('ingest_massive_staging') }} s
+    JOIN regime_shift_years rs USING (ticker)
+    GROUP BY s.ticker, rs.shift_year
 )
 
 SELECT ticker, bad_start, bad_end, reason FROM stagnation_ranges
@@ -232,3 +277,5 @@ UNION ALL
 SELECT ticker, bad_start, bad_end, reason FROM no_yfinance_huge_jump_ranges
 UNION ALL
 SELECT ticker, bad_start, bad_end, reason FROM ticker_reuse_ranges
+UNION ALL
+SELECT ticker, bad_start, bad_end, reason FROM regime_shift_ranges
