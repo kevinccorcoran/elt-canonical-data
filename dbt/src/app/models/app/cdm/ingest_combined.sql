@@ -58,6 +58,12 @@ excluded_yfinance AS (
     SELECT ticker FROM {{ ref('excluded_tickers_yfinance') }}
 ),
 
+-- Manual ticker exclusions: hand-curated list of tickers to drop entirely
+-- (typically real-but-extreme price events that distort cluster z-scores).
+manual_excluded AS (
+    SELECT ticker FROM {{ ref('manual_excluded_tickers') }}
+),
+
 -- SECONDARY PROVIDER: YFinance (with special-case mapping for ^GSPC → SPY)
 yfinance AS (
     SELECT
@@ -132,5 +138,8 @@ combined AS (
           )
 )
 
-SELECT *
-FROM combined
+SELECT c.*
+FROM combined c
+WHERE NOT EXISTS (
+    SELECT 1 FROM manual_excluded me WHERE me.ticker = c.ticker
+)
