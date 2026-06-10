@@ -130,7 +130,7 @@ with DAG(
     _dbt_env_name = os.environ.get("DB_DATABASE") or "prod"
     _dbt_cmd, _dbt_env = get_dbt_bash_command(
         env=_dbt_env_name,
-        selector="ingest_massive_delisted_inc ingest_combined",
+        selector="ingest_massive_delisted_inc ingest_massive_staging ingest_combined",
     )
     build_dbt = BashOperator(
         task_id="dbt_build_delisted_and_combined",
