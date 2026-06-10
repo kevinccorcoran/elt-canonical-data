@@ -24,9 +24,15 @@
    be dropped from the yfinance source. Downstream `ingest_combined`
    skips those rows.
 
-   Two rules:
+   Three rules:
      1) Invalid price: adj_close IS NULL or = 0 → drop that day
-     2) Regime shift: ticker's yearly median price jumps ≥ 50x
+     2) Stagnation: ≥ 20 consecutive trading days at same price.
+        Mirrors the massive feed's stagnation rule. Catches
+        forward-filled / unadjusted-split artifacts in yfinance
+        (e.g. HUBB pre-1995 stuck at $0.69 then jumped to $10+).
+        Excluding the bad range lets the rest of the ticker's
+        history flow through cleanly.
+     3) Regime shift: ticker's yearly median price jumps ≥ 50x
         year-over-year AND remains elevated the next year. Catches
         post-bankruptcy mergers / corporate identity changes where
         the legacy entity's pre-shift prices distort downstream
@@ -42,6 +48,38 @@ WITH invalid_price_ranges AS (
         'invalid_price' AS reason
     FROM {{ ref('ingest_yfinance_staging') }}
     WHERE adj_close IS NULL OR adj_close = 0
+),
+
+stagnation_prices AS (
+    SELECT
+        ticker,
+        date,
+        adj_close,
+        LAG(adj_close) OVER (PARTITION BY ticker ORDER BY date) AS prev_close
+    FROM {{ ref('ingest_yfinance_staging') }}
+    WHERE adj_close > 0
+),
+
+stagnation_runs AS (
+    SELECT
+        ticker,
+        date,
+        adj_close,
+        SUM(CASE WHEN adj_close = prev_close THEN 0 ELSE 1 END) OVER (
+            PARTITION BY ticker ORDER BY date ROWS UNBOUNDED PRECEDING
+        ) AS run_id
+    FROM stagnation_prices
+),
+
+stagnation_ranges AS (
+    SELECT
+        ticker,
+        MIN(date) AS bad_start,
+        MAX(date) AS bad_end,
+        'stagnation' AS reason
+    FROM stagnation_runs
+    GROUP BY ticker, run_id
+    HAVING COUNT(*) >= 20
 ),
 
 yearly_median AS (
@@ -85,5 +123,7 @@ regime_shift_ranges AS (
 )
 
 SELECT ticker, bad_start, bad_end, reason FROM invalid_price_ranges
+UNION ALL
+SELECT ticker, bad_start, bad_end, reason FROM stagnation_ranges
 UNION ALL
 SELECT ticker, bad_start, bad_end, reason FROM regime_shift_ranges
