@@ -25,16 +25,23 @@
    `ingest_combined` falls back to yfinance for those ranges
    but keeps massive for everything else.
 
-   Four rules:
+   Five rules:
      1) Stagnation: ≥ 20 consecutive trading days at same price
      2) Zero close: any row where adj_close = 0
-     3) Huge jump: ticker has any month-over-month min/max move
-        ≥ 100% (2x). Conservative threshold — catches unadjusted
-        splits, corporate actions, and high-volatility tickers
-        (penny stocks, post-IPO pops, meme moves). Drops the entire
-        ticker history from massive; yfinance provides
-        correctly-adjusted prices for the dropped tickers.
-     4) Ticker reuse: massive's history for the ticker starts more
+     3) Feed discrepancy: massive shows a month-over-month min/max
+        move ≥ 100% AND that jump is more than 5x the same jump
+        seen in yfinance for the same (ticker, month). Targets
+        unadjusted splits / corporate actions in massive — real
+        moves get corroborated by yfinance so they're never flagged.
+        Drops the entire ticker history from massive; yfinance
+        provides correctly-adjusted prices via ingest_combined.
+     4) No-yfinance huge jump: ticker has any monthly jump ≥ 100%
+        AND ticker has zero coverage in yfinance. Fallback for the
+        discrepancy rule when yfinance can't corroborate at all —
+        defaults to exclusion since there's no second source to
+        validate against. Removes the ticker entirely.
+        Catches: GEHI (0.375 → 9.53 in 2022-10, no yfinance data).
+     5) Ticker reuse: massive's history for the ticker starts more
         than 365 days before yfinance's history. The pre-yfinance
         portion almost always belongs to a different (delisted)
         company that previously held the ticker. Drops the
@@ -94,7 +101,7 @@ zero_close_ranges AS (
     WHERE adj_close = 0
 ),
 
-monthly AS (
+massive_monthly AS (
     SELECT
         ticker,
         DATE_TRUNC('month', date)::date AS month,
@@ -105,33 +112,89 @@ monthly AS (
     GROUP BY ticker, DATE_TRUNC('month', date)
 ),
 
-monthly_jumps AS (
+massive_jumps AS (
     SELECT
         ticker,
+        month,
         GREATEST(
             ABS((LEAD(min_price) OVER (PARTITION BY ticker ORDER BY month) - min_price)
                 / NULLIF(min_price, 0)),
             ABS((LEAD(max_price) OVER (PARTITION BY ticker ORDER BY month) - max_price)
                 / NULLIF(max_price, 0))
         ) AS jump_pct
-    FROM monthly
+    FROM massive_monthly
 ),
 
-flagged_jump_tickers AS (
-    SELECT ticker
-    FROM monthly_jumps
-    GROUP BY ticker
-    HAVING MAX(jump_pct) >= 1.0
+yfinance_monthly AS (
+    SELECT
+        CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END AS ticker,
+        DATE_TRUNC('month', date)::date AS month,
+        MIN(adj_close) AS min_price,
+        MAX(adj_close) AS max_price
+    FROM {{ ref('ingest_yfinance_staging') }}
+    WHERE adj_close > 0
+    GROUP BY CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END, DATE_TRUNC('month', date)
 ),
 
-jump_ranges AS (
+yfinance_jumps AS (
+    SELECT
+        ticker,
+        month,
+        GREATEST(
+            ABS((LEAD(min_price) OVER (PARTITION BY ticker ORDER BY month) - min_price)
+                / NULLIF(min_price, 0)),
+            ABS((LEAD(max_price) OVER (PARTITION BY ticker ORDER BY month) - max_price)
+                / NULLIF(max_price, 0))
+        ) AS jump_pct
+    FROM yfinance_monthly
+),
+
+discrepancy_flagged_tickers AS (
+    SELECT DISTINCT m.ticker
+    FROM massive_jumps m
+    INNER JOIN yfinance_jumps y USING (ticker, month)
+    WHERE m.jump_pct >= 1.0
+      AND y.jump_pct IS NOT NULL
+      AND m.jump_pct > 5.0 * y.jump_pct
+),
+
+discrepancy_ranges AS (
     SELECT
         s.ticker,
         MIN(s.date) AS bad_start,
         MAX(s.date) AS bad_end,
-        'huge_jump' AS reason
+        'feed_discrepancy' AS reason
     FROM {{ ref('ingest_massive_staging') }} s
-    JOIN flagged_jump_tickers f USING (ticker)
+    JOIN discrepancy_flagged_tickers d USING (ticker)
+    GROUP BY s.ticker
+),
+
+yfinance_tickers AS (
+    SELECT DISTINCT CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END AS ticker
+    FROM {{ ref('ingest_yfinance_staging') }}
+),
+
+no_yfinance_huge_jump_flagged AS (
+    -- When yfinance can't corroborate, default to exclusion at the
+    -- same 100% threshold as the discrepancy rule's floor. Cheaper
+    -- to lose a few real movers than to keep unadjusted-split garbage
+    -- that has no backstop source for correction.
+    SELECT mj.ticker
+    FROM massive_jumps mj
+    LEFT JOIN yfinance_tickers yt USING (ticker)
+    WHERE yt.ticker IS NULL
+    GROUP BY mj.ticker
+    HAVING MAX(mj.jump_pct) >= 1.0
+),
+
+no_yfinance_huge_jump_ranges AS (
+    SELECT
+        s.ticker,
+        MIN(s.date) AS bad_start,
+        MAX(s.date) AS bad_end,
+        'no_yfinance_huge_jump' AS reason
+    FROM {{ ref('ingest_massive_staging') }} s
+    JOIN no_yfinance_huge_jump_flagged n USING (ticker)
     GROUP BY s.ticker
 ),
 
@@ -164,6 +227,8 @@ SELECT ticker, bad_start, bad_end, reason FROM stagnation_ranges
 UNION ALL
 SELECT ticker, bad_start, bad_end, reason FROM zero_close_ranges
 UNION ALL
-SELECT ticker, bad_start, bad_end, reason FROM jump_ranges
+SELECT ticker, bad_start, bad_end, reason FROM discrepancy_ranges
+UNION ALL
+SELECT ticker, bad_start, bad_end, reason FROM no_yfinance_huge_jump_ranges
 UNION ALL
 SELECT ticker, bad_start, bad_end, reason FROM ticker_reuse_ranges
