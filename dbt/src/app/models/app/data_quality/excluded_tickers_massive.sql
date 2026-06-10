@@ -25,7 +25,7 @@
    `ingest_combined` falls back to yfinance for those ranges
    but keeps massive for everything else.
 
-   Three rules:
+   Four rules:
      1) Stagnation: ≥ 20 consecutive trading days at same price
      2) Zero close: any row where adj_close = 0
      3) Huge jump: ticker has any month-over-month min/max move
@@ -34,6 +34,13 @@
         (penny stocks, post-IPO pops, meme moves). Drops the entire
         ticker history from massive; yfinance provides
         correctly-adjusted prices for the dropped tickers.
+     4) Ticker reuse: massive's history for the ticker starts more
+        than 365 days before yfinance's history. The pre-yfinance
+        portion almost always belongs to a different (delisted)
+        company that previously held the ticker. Drops the
+        pre-yfinance-start portion of massive only.
+        Catches: MRNA (Moderna IPO 2018, massive has data from 2008),
+        COIN (Coinbase IPO 2021), and similar reuses.
    -------------------------------------------------------------- */
 
 WITH prices AS (
@@ -126,6 +133,31 @@ jump_ranges AS (
     FROM {{ ref('ingest_massive_staging') }} s
     JOIN flagged_jump_tickers f USING (ticker)
     GROUP BY s.ticker
+),
+
+massive_ticker_starts AS (
+    SELECT ticker, MIN(date) AS massive_start
+    FROM {{ ref('ingest_massive_staging') }}
+    GROUP BY ticker
+),
+
+yfinance_ticker_starts AS (
+    SELECT
+        CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END AS ticker,
+        MIN(date) AS yfinance_start
+    FROM {{ ref('ingest_yfinance_staging') }}
+    GROUP BY CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END
+),
+
+ticker_reuse_ranges AS (
+    SELECT
+        m.ticker,
+        m.massive_start AS bad_start,
+        (y.yfinance_start - INTERVAL '1 day')::date AS bad_end,
+        'ticker_reuse' AS reason
+    FROM massive_ticker_starts m
+    JOIN yfinance_ticker_starts y USING (ticker)
+    WHERE m.massive_start < y.yfinance_start - INTERVAL '365 days'
 )
 
 SELECT ticker, bad_start, bad_end, reason FROM stagnation_ranges
@@ -133,3 +165,5 @@ UNION ALL
 SELECT ticker, bad_start, bad_end, reason FROM zero_close_ranges
 UNION ALL
 SELECT ticker, bad_start, bad_end, reason FROM jump_ranges
+UNION ALL
+SELECT ticker, bad_start, bad_end, reason FROM ticker_reuse_ranges
