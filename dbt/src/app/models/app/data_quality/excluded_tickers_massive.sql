@@ -29,9 +29,11 @@
      1) Stagnation: ≥ 20 consecutive trading days at same price
      2) Zero close: any row where adj_close = 0
      3) Huge jump: ticker has any month-over-month min/max move
-        ≥ 500% (typically an unadjusted split or corporate action).
-        Drops the entire ticker history from massive; yfinance
-        provides correctly-adjusted prices.
+        ≥ 100% (2x). Conservative threshold — catches unadjusted
+        splits, corporate actions, and high-volatility tickers
+        (penny stocks, post-IPO pops, meme moves). Drops the entire
+        ticker history from massive; yfinance provides
+        correctly-adjusted prices for the dropped tickers.
    -------------------------------------------------------------- */
 
 WITH prices AS (
@@ -112,7 +114,7 @@ flagged_jump_tickers AS (
     SELECT ticker
     FROM monthly_jumps
     GROUP BY ticker
-    HAVING MAX(jump_pct) >= 5.0
+    HAVING MAX(jump_pct) >= 1.0
 ),
 
 jump_ranges AS (
