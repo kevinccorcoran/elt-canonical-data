@@ -14,7 +14,7 @@ AlphaStream is split into two repositories:
 ## Data Lineage
 
 ### ELT — Canonical Data
-![ELT Canonical Data Lineage](tools/elt_lineage_graph.png)
+![ELT Canonical Data Lineage](tools/elt_lineage_graph.jpg)
 
 From raw ingestion to the standardized, deduplicated tables that serve as the single source of truth for every downstream model.
 
