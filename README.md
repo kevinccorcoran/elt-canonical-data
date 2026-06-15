@@ -25,7 +25,7 @@ Statistical forecasting and signal-generation tables that sit on top of the cano
 
 ## Interactive Analytics Dashboard
 
-![Dashboard](tools/alpha_forecast.jpg)
+![Dashboard](tools/alpha_forecast.jpg?v=2)
 
 Visualizes cohorts that share similar attributes across lag time horizons spanning up to 40 years.
 
@@ -38,11 +38,34 @@ Built with R + Shiny, Plotly, and PostgreSQL. Packaged in Docker.
 
 ## Project Timeline
 
-- **2024 — Foundation.** ELT pipeline in Python, dbt, and Airflow. Initial canonical data model. Separate dev and staging environments.
-- **2025 — Scale.** Migrated ingestion to a new data provider after the previous one was deprecated. Consolidated multiple sources into a single pipeline. Added a metrics layer over the historical dataset. Moved pipeline execution to the cloud.
-- **2026 Q1 — Production Infrastructure.** Codebase split into a public infrastructure repo and a private logic repo. Stack containerized with Docker. Hosting moved to DigitalOcean. Database switched to managed PostgreSQL.
-- **2026 Q2 — Forecasting & Dashboard.** Reworked the forecasting layer for signal quality and data integrity. Added safeguards to flag unreliable results. Dashboard updated. Known model limitations documented and ranked.
-- **Ongoing.** Model refinement, performance tuning, new features.
+**2024 — Foundation**
+- ELT pipeline built on Python, dbt, and Airflow
+- Initial canonical data model
+- Separate dev and staging environments
+
+**2025 — Scale**
+- Migrated ingestion to a new data provider after the previous one was deprecated
+- Consolidated multiple sources into a single pipeline
+- Added a metrics layer over the historical dataset
+- Moved pipeline execution to the cloud
+
+**2026 Q1 — Production Infrastructure**
+- Codebase split into a public infrastructure repo and a private logic repo
+- Stack containerized with Docker
+- Hosting moved to DigitalOcean
+- Database switched to managed PostgreSQL
+
+**2026 Q2 — Forecasting & Dashboard**
+- Reworked the forecasting layer for signal quality and data integrity
+- Added safeguards to flag unreliable results
+- Dashboard refreshed
+- Known model limitations documented and ranked
+
+**Ongoing**
+- **Data quality rules** — programmatic ticker exclusion via cross-feed checks (`ticker_reuse`, `regime_shift`, `feed_discrepancy` with `no_yfinance` fallback, `stagnation`), plus a manual-override gate at `ingest_combined`
+- **Delisted universe backfill** — one-shot Polygon Flat Files pull to recover historical and delisted symbols, wired into `ingest_massive_staging` and the monthly DAG
+- **Inference dependency wiring** — new canonical assets (`ticker_global_action_current`, `ticker_pair_current`, `ticker_summary_current`) linked into the inference DAG
+- Continued model refinement and performance tuning
 
 ---
 
