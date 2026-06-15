@@ -289,6 +289,10 @@ ui <- navbarPage(
         selectInput("id_valT", "ID", choices = c("Connect first..." = ""), selected = ""),
         selectInput("past_fib_lagT", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
         selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = ""),
+        radioButtons("transition_modeT", "View",
+                     choices = c("Empirical (all buckets)" = "empirical",
+                                 "Actionable (current tickers only)" = "actionable"),
+                     selected = "empirical", inline = FALSE),
         tags$div(
           style = "margin-top: 1.5rem; padding: 0.75rem; background: rgba(255,255,255,0.03);
                    border-left: 2px solid #64748b; border-radius: 4px;
@@ -604,6 +608,17 @@ server <- function(input, output, session) {
       status_msgT("Error: Select filters first."); return()
     }
     status_msgT("Running query...")
+    actionable_clause <- if (isTRUE(input$transition_modeT == "actionable")) {
+      "AND EXISTS (
+            SELECT 1 FROM inference.return_cluster_ticker_pair_current tpc
+            WHERE tpc.id = cs.id
+              AND tpc.past_lag = cs.past_fibonacci_lag_value
+              AND tpc.fut_lag = cs.future_fibonacci_lag_value
+              AND tpc.bucket = cs.past_excess_return_z_bucket_num
+        )"
+    } else {
+      ""
+    }
     query <- sprintf("
       SELECT past_excess_return_z_bucket_num AS bucket,
              past_record_count AS past_count,
@@ -625,15 +640,9 @@ server <- function(input, output, session) {
              recommendation_rank
       FROM inference.return_cluster_cell_score cs
       WHERE cs.past_fibonacci_lag_value = %s AND cs.future_fibonacci_lag_value = %s AND cs.id = %s
-        AND EXISTS (
-            SELECT 1 FROM inference.return_cluster_ticker_pair_current tpc
-            WHERE tpc.id = cs.id
-              AND tpc.past_lag = cs.past_fibonacci_lag_value
-              AND tpc.fut_lag = cs.future_fibonacci_lag_value
-              AND tpc.bucket = cs.past_excess_return_z_bucket_num
-        )
+        %s
       ORDER BY past_excess_return_z_bucket_num;",
-      input$past_fib_lagT, input$future_fib_lagT, input$id_valT)
+      input$past_fib_lagT, input$future_fib_lagT, input$id_valT, actionable_clause)
     tryCatch({
       con <- get_con(input, "T")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
