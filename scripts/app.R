@@ -623,8 +623,15 @@ server <- function(input, output, session) {
              combined_score,
              recommendation,
              recommendation_rank
-      FROM inference.return_cluster_cell_score
-      WHERE past_fibonacci_lag_value = %s AND future_fibonacci_lag_value = %s AND id = %s
+      FROM inference.return_cluster_cell_score cs
+      WHERE cs.past_fibonacci_lag_value = %s AND cs.future_fibonacci_lag_value = %s AND cs.id = %s
+        AND EXISTS (
+            SELECT 1 FROM inference.return_cluster_ticker_pair_current tpc
+            WHERE tpc.id = cs.id
+              AND tpc.past_lag = cs.past_fibonacci_lag_value
+              AND tpc.fut_lag = cs.future_fibonacci_lag_value
+              AND tpc.bucket = cs.past_excess_return_z_bucket_num
+        )
       ORDER BY past_excess_return_z_bucket_num;",
       input$past_fib_lagT, input$future_fib_lagT, input$id_valT)
     tryCatch({
