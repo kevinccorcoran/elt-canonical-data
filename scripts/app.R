@@ -526,7 +526,11 @@ ui <- navbarPage(
         DT::DTOutput("clusterOverviewTable"),
         uiOutput("clusterDrilldownUI"),
         tags$hr(style = "border-color: rgba(255,255,255,0.1); margin-top: 2rem;"),
-        h4("Growth vs volatility scatter (raw clusters)",
+        h4("All 14 clusters in one frame — months × growth, sized by tickers, colored by trust rank",
+           style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        plotlyOutput("clusterSummaryPlot", height = "600px"),
+        tags$hr(style = "border-color: rgba(255,255,255,0.1); margin-top: 2rem;"),
+        h4("Per-ticker scatter (raw K-means input, faceted by vol bucket)",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         plotlyOutput("clusterPlot", height = "600px")
       ))
@@ -1561,6 +1565,51 @@ server <- function(input, output, session) {
       DT::formatStyle("global_action",
         backgroundColor = DT::styleEqual(c("BUY","SELL"), c("#10b981","#ef4444")),
         color = "#0b1220", fontWeight = "600")
+  })
+
+  # Single-frame cluster summary plot: all 14 clusters in one XY view
+  output$clusterSummaryPlot <- renderPlotly({
+    req(cluster_summaryK())
+    d <- cluster_summaryK()
+    # Parse months_range "min-max" → midpoint for X axis
+    parts   <- do.call(rbind, strsplit(d$months_range, "-"))
+    mid_mo  <- (as.numeric(parts[,1]) + as.numeric(parts[,2])) / 2
+    trust_col <- c(`1` = "#10b981", `2` = "#fbbf24", `3` = "#64748b", `4` = "#ef4444")
+    d$trust_color <- trust_col[as.character(d$cluster_trust_rank)]
+    d$hover_text <- sprintf(
+      "Cluster %d<br>Vol bucket: %s<br>Tickers: %d<br>Avg growth: %.2f%%/mo<br>Months range: %s<br>Trust rank: %d<br>BUY: %d  SELL: %d  SKIP: %d",
+      d$id, d$vol_bucket, d$ticker_count, d$avg_growth_pct_per_month,
+      d$months_range, d$cluster_trust_rank, d$n_buy, d$n_sell, d$n_skip
+    )
+    plot_ly(
+      data = d,
+      x = mid_mo,
+      y = ~avg_growth_pct_per_month,
+      size = ~ticker_count,
+      color = ~factor(cluster_trust_rank),
+      colors = trust_col,
+      text = ~hover_text,
+      hoverinfo = "text",
+      type = "scatter",
+      mode = "markers+text",
+      marker = list(sizemode = "area", sizeref = 2 * max(d$ticker_count, na.rm = TRUE) / (60^2), sizemin = 6,
+                    line = list(color = "#0b1220", width = 1)),
+      textposition = "top center",
+      texttemplate = "%{customdata}",
+      customdata = ~paste0("id ", id, " · ", n_buy, "B/", n_sell, "S")
+    ) |>
+      layout(
+        paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+        xaxis = list(title = "Avg months of history (midpoint of range)",
+                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+        yaxis = list(title = "Avg growth %/month",
+                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)",
+                     zeroline = TRUE, zerolinecolor = "rgba(255,255,255,0.3)"),
+        legend = list(title = list(text = "Trust rank"),
+                      font = list(color = "#f8fafc")),
+        font = list(color = "#cbd5e1")
+      ) |>
+      config(displayModeBar = FALSE)
   })
 
   output$clusterPlot <- renderPlotly({
