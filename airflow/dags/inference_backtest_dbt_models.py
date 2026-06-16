@@ -81,28 +81,5 @@ with DAG(
         do_xcom_push=False,
     )
 
-    # Walk-forward: loops the train chain across semi-annual cutoffs
-    # (2004-H1 through 2024-H2 = 42 cutoffs) and snapshots
-    # validation_agreement into inference.walk_forward_results per cutoff.
-    # Long-running (~7-10h on prod); manually triggered or scheduled
-    # quarterly. Runs AFTER the single-cutoff validation_agreement so the
-    # baseline cutoff stays the dbt-var default.
-    walk_forward = BashOperator(
-        task_id="run_walk_forward_orchestrator",
-        bash_command=(
-            "set -euo pipefail && "
-            "cd /opt/elt-inference-models && "
-            'if [ "${ENV:-}" = "prod" ] && [ -d .git ]; then '
-            "  git fetch --quiet origin main && "
-            "  git reset --quiet --hard origin/main; "
-            "fi && "
-            "python scripts/walk_forward.py"
-        ),
-        env={"ENV": runtime_env},
-        append_env=True,
-        do_xcom_push=False,
-    )
-
     dbt_run_feature_set_train >> dbt_run_transition_scored_split >> dbt_run_validation_agreement
     dbt_run_transition_scored_split >> dbt_run_payoff_backtest
-    dbt_run_validation_agreement >> walk_forward
