@@ -70,4 +70,16 @@ with DAG(
         do_xcom_push=False,
     )
 
+    bash_pay, env_pay = get_inference_dbt_bash_command(
+        runtime_env, "return_cluster_payoff_backtest"
+    )
+    dbt_run_payoff_backtest = BashOperator(
+        task_id="dbt_run_return_cluster_payoff_backtest",
+        bash_command=bash_pay,
+        env=env_pay,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     dbt_run_feature_set_train >> dbt_run_transition_scored_split >> dbt_run_validation_agreement
+    dbt_run_transition_scored_split >> dbt_run_payoff_backtest
