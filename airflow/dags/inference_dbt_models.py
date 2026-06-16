@@ -342,6 +342,26 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # --- prediction_ledger (append-only forward log of live BUY/SELL calls) ---
+    bash_pl, env_pl = get_inference_dbt_bash_command(runtime_env, "prediction_ledger")
+    dbt_run_prediction_ledger = BashOperator(
+        task_id="dbt_run_prediction_ledger",
+        bash_command=bash_pl,
+        env=env_pl,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    # --- prediction_ledger_scored (running scorecard vs SPY) ---
+    bash_pls, env_pls = get_inference_dbt_bash_command(runtime_env, "prediction_ledger_scored")
+    dbt_run_prediction_ledger_scored = BashOperator(
+        task_id="dbt_run_prediction_ledger_scored",
+        bash_command=bash_pls,
+        env=env_pls,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     # --- trigger inference_backtest_dbt_models after prod refresh completes ---
     trigger_inference_backtest = TriggerDagRunOperator(
         task_id="trigger_inference_backtest_dbt_models",
@@ -357,3 +377,4 @@ with DAG(
     [dbt_run_combined_bucket_stats, dbt_run_lag_viability] >> dbt_run_transition_confidence
     dbt_run_transition_confidence >> dbt_run_cell_score >> dbt_run_pair_recommendation
     [dbt_run_transition_scored_current, dbt_run_cell_score, dbt_run_pair_recommendation] >> dbt_run_ticker_pair_current >> dbt_run_ticker_summary_current >> dbt_run_ticker_global_action_current >> trigger_inference_backtest
+    dbt_run_ticker_global_action_current >> dbt_run_prediction_ledger >> dbt_run_prediction_ledger_scored
