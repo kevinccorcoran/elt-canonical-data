@@ -5,6 +5,7 @@ library(plotly)
 library(jsonlite)
 library(nanoparquet)
 library(DT)
+library(ggplot2)
 
 # ─── QA history parquet (persists across runs, one file across DBs) ───
 QA_HISTORY_DIR  <- "/opt/airflow/scripts/data"
@@ -497,6 +498,37 @@ ui <- navbarPage(
         h4("Ticker history coverage (cdm.ingest_combined)",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         uiOutput("coveragePlotContainer")
+      ))
+    )
+  ),
+
+  # ── Tab: Clusters ──
+  tabPanel("Clusters",
+    sidebarLayout(
+      make_sidebar("K", "Database Connection (Clusters)", tagList(
+        tags$div(
+          style = "padding: 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #64748b; border-radius: 4px;
+                   color: #94a3b8; font-size: 0.75rem; font-family: 'Inter'; line-height: 1.5;",
+          tags$div(style = "color: #f8fafc; font-weight: 600; margin-bottom: 0.4rem;", "What this shows"),
+          "Cluster overview fused with walk-forward credibility + current recommendations. Click a row to drill into ",
+          "trustworthy cells and active BUY/SELL tickers. Color-coded trust rank: green=TRUST, yellow=MAYBE, grey=THIN, red=SKIP."
+        ),
+        tags$hr(style = "border-color: rgba(255,255,255,0.1);"),
+        h4("Filters", style = "color: #f8fafc;"),
+        sliderInput("fK_trust_max", "Trust rank ≤ (1=best)", 1, 4, 4, 1),
+        sliderInput("fK_min_hq",    "Min pct_high_quality",      0, 100, 0, 5),
+        checkboxInput("fK_has_buy",  "Has BUY signal",  FALSE),
+        checkboxInput("fK_has_sell", "Has SELL signal", FALSE)
+      )),
+      mainPanel(div(class = "main-card",
+        h4("Cluster overview", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        DT::DTOutput("clusterOverviewTable"),
+        uiOutput("clusterDrilldownUI"),
+        tags$hr(style = "border-color: rgba(255,255,255,0.1); margin-top: 2rem;"),
+        h4("Growth vs volatility scatter (raw clusters)",
+           style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        plotlyOutput("clusterPlot", height = "600px")
       ))
     )
   )
@@ -1346,6 +1378,220 @@ server <- function(input, output, session) {
         showlegend = FALSE
       ) %>%
       config(scrollZoom = FALSE, displayModeBar = FALSE)
+  })
+
+  # ── CLUSTERS ──
+  app_dataK   <- reactiveVal(NULL)
+  status_msgK <- reactiveVal("Not connected.")
+  output$statusMessageK <- renderText({ status_msgK() })
+  setup_env_switcher(input, session, "K")
+
+  observeEvent(input$connect_btnK, {
+    if (input$db_passK == "") { status_msgK("Error: Password is not set."); return() }
+    status_msgK("Connecting...")
+    tryCatch({
+      con <- get_con(input, "K")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      n <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM analysis.ticker_cluster_segments")$n[1]
+      status_msgK(sprintf("Connected — %s tickers clustered.", n))
+    }, error = function(e) { status_msgK(paste("Error:", e$message)) })
+  })
+
+  observeEvent(input$execute_K, {
+    if (input$db_passK == "") { status_msgK("Error: Password is not set."); return() }
+    status_msgK("Loading clusters...")
+    tryCatch({
+      con <- get_con(input, "K")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      df <- dbGetQuery(con, "
+        SELECT ticker,
+               monthly_growth_vol_z_bucket_num AS bucket,
+               cluster_id,
+               (LN(months_count) - AVG(LN(months_count)) OVER w)
+                 / NULLIF(STDDEV_POP(LN(months_count)) OVER w, 0) AS z_logmo,
+               (growth_pct_per_month - AVG(growth_pct_per_month) OVER w)
+                 / NULLIF(STDDEV_POP(growth_pct_per_month) OVER w, 0) AS z_growth
+        FROM analysis.ticker_cluster_segments
+        WHERE months_count > 0 AND growth_pct_per_month IS NOT NULL
+        WINDOW w AS (PARTITION BY monthly_growth_vol_z_bucket_num)")
+      app_dataK(df)
+      status_msgK(sprintf("Loaded %d tickers across %d buckets.",
+                          nrow(df), length(unique(df$bucket))))
+    }, error = function(e) { status_msgK(paste("Error:", e$message)) })
+  })
+
+  # ── CLUSTERS: cluster summary fused with walk-forward credibility ──
+  cluster_summaryK <- reactiveVal(NULL)
+  trust_palette    <- c(`1` = "#10b981", `2` = "#fbbf24", `3` = "#64748b", `4` = "#ef4444")
+
+  observeEvent(input$execute_K, {
+    if (input$db_passK == "") return()
+    tryCatch({
+      con <- get_con(input, "K")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      summary_df <- dbGetQuery(con, "
+        WITH credibility_rollup AS (
+          SELECT id,
+                 COUNT(*)                            AS n_cells,
+                 ROUND(AVG(wf_agreement)::numeric, 3) AS avg_wf_agreement,
+                 ROUND(100.0 * COUNT(*) FILTER (WHERE tier IN ('high','medium'))
+                              / NULLIF(COUNT(*), 0), 1) AS pct_high_quality
+          FROM inference.cell_credibility
+          GROUP BY id
+        ),
+        action_rollup AS (
+          SELECT id,
+                 COUNT(DISTINCT ticker) FILTER (WHERE global_action = 'BUY')  AS n_buy,
+                 COUNT(DISTINCT ticker) FILTER (WHERE global_action = 'SELL') AS n_sell,
+                 COUNT(DISTINCT ticker) FILTER (WHERE global_action = 'SKIP') AS n_skip
+          FROM inference.return_cluster_ticker_global_action_current
+          GROUP BY id
+        )
+        SELECT v.id,
+               v.monthly_growth_vol_z_bucket                   AS vol_bucket,
+               v.cluster_id,
+               v.ticker_count,
+               v.avg_weighted_growth                           AS avg_growth_pct_per_month,
+               v.min_months_count || '-' || v.max_months_count AS months_range,
+               CASE WHEN COALESCE(c.pct_high_quality,0) >= 60 AND COALESCE(c.n_cells,0) >= 20 THEN 1
+                    WHEN COALESCE(c.pct_high_quality,0) >= 40 THEN 2
+                    WHEN COALESCE(c.n_cells,0) < 20 THEN 3
+                    ELSE 4 END                                  AS cluster_trust_rank,
+               COALESCE(c.pct_high_quality, 0) AS pct_high_quality,
+               COALESCE(c.avg_wf_agreement, 0) AS avg_wf_agreement,
+               COALESCE(c.n_cells, 0)          AS n_cells,
+               COALESCE(a.n_buy,  0)           AS n_buy,
+               COALESCE(a.n_sell, 0)           AS n_sell,
+               COALESCE(a.n_skip, 0)           AS n_skip,
+               array_to_string(v.tickers[1:5], ', ') AS top_5_tickers
+        FROM metrics.ticker_cluster_volatility_summary v
+        LEFT JOIN credibility_rollup c USING (id)
+        LEFT JOIN action_rollup      a USING (id)
+        ORDER BY cluster_trust_rank ASC, v.id ASC")
+      cluster_summaryK(summary_df)
+    }, error = function(e) { status_msgK(paste("Cluster summary error:", e$message)) })
+  })
+
+  filtered_clustersK <- reactive({
+    req(cluster_summaryK())
+    df <- cluster_summaryK()
+    df[df$cluster_trust_rank <= input$fK_trust_max &
+       df$pct_high_quality   >= input$fK_min_hq &
+       (!input$fK_has_buy  | df$n_buy  > 0) &
+       (!input$fK_has_sell | df$n_sell > 0), ]
+  })
+
+  output$clusterOverviewTable <- DT::renderDT({
+    d <- filtered_clustersK()
+    if (is.null(d) || nrow(d) == 0) return(NULL)
+    DT::datatable(d, selection = "single", rownames = FALSE,
+      options = list(pageLength = 14, dom = "tip",
+                     order = list(list(which(names(d) == "cluster_trust_rank") - 1, "asc")))) |>
+      DT::formatStyle("cluster_trust_rank", target = "row",
+        backgroundColor = DT::styleEqual(names(trust_palette), trust_palette),
+        color = "#0b1220", fontWeight = "600") |>
+      DT::formatRound("avg_growth_pct_per_month", 2) |>
+      DT::formatRound(c("avg_wf_agreement"), 3)
+  })
+
+  selected_clusterK <- reactive({
+    i <- input$clusterOverviewTable_rows_selected
+    req(i, length(i) > 0)
+    filtered_clustersK()$id[i]
+  })
+
+  cells_in_clusterK <- reactive({
+    req(selected_clusterK(), input$db_passK != "")
+    con <- get_con(input, "K")
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    dbGetQuery(con,
+      sprintf("SELECT past_lag, fut_lag, bucket, tier, wf_agreement, wf_n_holdout
+               FROM inference.cell_credibility
+               WHERE id = %d
+               ORDER BY wf_agreement DESC NULLS LAST, wf_n_holdout DESC
+               LIMIT 50", as.integer(selected_clusterK())))
+  })
+
+  tickers_in_clusterK <- reactive({
+    req(selected_clusterK(), input$db_passK != "")
+    con <- get_con(input, "K")
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    dbGetQuery(con,
+      sprintf("SELECT ticker, global_action, action, is_active
+               FROM inference.return_cluster_ticker_global_action_current
+               WHERE id = %d AND global_action IN ('BUY','SELL')
+               ORDER BY CASE global_action WHEN 'BUY' THEN 0 ELSE 1 END, ticker",
+              as.integer(selected_clusterK())))
+  })
+
+  output$clusterDrilldownUI <- renderUI({
+    req(selected_clusterK())
+    tagList(
+      tags$hr(style = "border-color: rgba(255,255,255,0.1); margin-top: 1.5rem;"),
+      h4(paste("Cluster", selected_clusterK(), "detail"),
+         style = "color: #f8fafc; margin-bottom: 1rem;"),
+      fluidRow(
+        column(6,
+          h5("Top 50 cells (sorted by walk-forward agreement)", style = "color: #cbd5e1;"),
+          DT::DTOutput("clusterCellsTable")),
+        column(6,
+          h5("Active BUY / SELL tickers in this cluster", style = "color: #cbd5e1;"),
+          DT::DTOutput("clusterTickersTable"))
+      )
+    )
+  })
+
+  output$clusterCellsTable <- DT::renderDT({
+    d <- cells_in_clusterK()
+    if (is.null(d) || nrow(d) == 0) return(NULL)
+    tier_colors <- c(high = "#10b981", medium = "#fbbf24", thin = "#64748b", bad = "#ef4444")
+    DT::datatable(d, rownames = FALSE,
+                  options = list(pageLength = 10, dom = "tip")) |>
+      DT::formatStyle("tier",
+        backgroundColor = DT::styleEqual(names(tier_colors), tier_colors),
+        color = "#0b1220", fontWeight = "600") |>
+      DT::formatRound("wf_agreement", 3)
+  })
+
+  output$clusterTickersTable <- DT::renderDT({
+    d <- tickers_in_clusterK()
+    if (is.null(d) || nrow(d) == 0) return(NULL)
+    DT::datatable(d, rownames = FALSE,
+                  options = list(pageLength = 10, dom = "tip")) |>
+      DT::formatStyle("global_action",
+        backgroundColor = DT::styleEqual(c("BUY","SELL"), c("#10b981","#ef4444")),
+        color = "#0b1220", fontWeight = "600")
+  })
+
+  output$clusterPlot <- renderPlotly({
+    req(app_dataK())
+    df <- app_dataK()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(
+      title = list(text = "No data", font = list(color = "#f8fafc")),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+
+    df <- df[is.finite(df$z_logmo) & is.finite(df$z_growth), ]
+    df$cluster <- factor(df$cluster_id)
+    df$bucket  <- factor(df$bucket)
+
+    p <- ggplot(df, aes(x = z_logmo, y = z_growth, color = cluster, text = ticker)) +
+      geom_point(size = 1.1, alpha = 0.6) +
+      facet_wrap(~ bucket, labeller = labeller(bucket = function(x) paste("bucket", x))) +
+      scale_color_manual(values = c("0"="#f59e0b","1"="#22d3ee","2"="#a855f7",
+                                    "3"="#ef4444","4"="#10b981")) +
+      labs(x = "z(log months)", y = "z(growth)", color = "cluster") +
+      theme_minimal(base_size = 10) +
+      theme(
+        plot.background  = element_rect(fill = "#0b1220", color = NA),
+        panel.background = element_rect(fill = "#0b1220", color = NA),
+        panel.grid       = element_line(color = "#1e293b"),
+        text             = element_text(color = "#cbd5e1"),
+        strip.text       = element_text(color = "#f8fafc")
+      )
+
+    ggplotly(p, tooltip = "text") %>%
+      layout(paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)") %>%
+      config(displayModeBar = FALSE)
   })
 }
 
