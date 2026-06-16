@@ -322,6 +322,16 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # --- cell_credibility (walk-forward credibility per cell; gates ticker_summary_current) ---
+    bash_cc, env_cc = get_inference_dbt_bash_command(runtime_env, "cell_credibility")
+    dbt_run_cell_credibility = BashOperator(
+        task_id="dbt_run_cell_credibility",
+        bash_command=bash_cc,
+        env=env_cc,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     # --- return_cluster_ticker_summary_current (ticker-grain rollup; dashboard landing) ---
     bash_tsc, env_tsc = get_inference_dbt_bash_command(runtime_env, "return_cluster_ticker_summary_current")
     dbt_run_ticker_summary_current = BashOperator(
@@ -376,5 +386,6 @@ with DAG(
     dbt_run_feature_set >> dbt_run_feature_set_current >> dbt_run_transition_scored_current
     [dbt_run_combined_bucket_stats, dbt_run_lag_viability] >> dbt_run_transition_confidence
     dbt_run_transition_confidence >> dbt_run_cell_score >> dbt_run_pair_recommendation
-    [dbt_run_transition_scored_current, dbt_run_cell_score, dbt_run_pair_recommendation] >> dbt_run_ticker_pair_current >> dbt_run_ticker_summary_current >> dbt_run_ticker_global_action_current >> trigger_inference_backtest
+    [dbt_run_transition_scored_current, dbt_run_cell_score, dbt_run_pair_recommendation] >> dbt_run_ticker_pair_current
+    [dbt_run_ticker_pair_current, dbt_run_cell_credibility] >> dbt_run_ticker_summary_current >> dbt_run_ticker_global_action_current >> trigger_inference_backtest
     dbt_run_ticker_global_action_current >> dbt_run_prediction_ledger >> dbt_run_prediction_ledger_scored
