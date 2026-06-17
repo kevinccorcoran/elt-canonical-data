@@ -614,6 +614,12 @@ render_single_boxplot <- function(df, title, x_title, box_color = '#a855f7', fil
 # ─── Server ───
 server <- function(input, output, session) {
 
+  # Keep the session alive across browser idle periods. Without this, Shiny
+  # blanks the page to white when its websocket times out and the user has
+  # to manually refresh. allowReconnect("force") makes the client auto-
+  # reconnect to the same session silently.
+  session$allowReconnect("force")
+
   # ── TRANSITION: Reactive values ──
   app_dataT <- reactiveVal(NULL)
   status_msgT <- reactiveVal("Ready")
