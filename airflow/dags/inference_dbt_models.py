@@ -302,6 +302,20 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # --- return_cluster_cell_score_extended (DASHBOARD-ONLY uncapped twin) ---
+    # Same scoring as cell_score but without the 1..54 cap / extrapolation-ratio
+    # guard, so long-horizon lags (88, 143, 232) are visible in the Shiny
+    # Transition Range + Heatmap tabs. Terminal leaf: NOTHING downstream reads it,
+    # so it cannot affect BUY/SELL recommendations.
+    bash_cse, env_cse = get_inference_dbt_bash_command(runtime_env, "return_cluster_cell_score_extended")
+    dbt_run_cell_score_extended = BashOperator(
+        task_id="dbt_run_return_cluster_cell_score_extended",
+        bash_command=bash_cse,
+        env=env_cse,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     # --- return_cluster_pair_recommendation (use_pair flag per id/past_lag/future_lag) ---
     bash_pr, env_pr = get_inference_dbt_bash_command(runtime_env, "return_cluster_pair_recommendation")
     dbt_run_pair_recommendation = BashOperator(
@@ -386,6 +400,7 @@ with DAG(
     dbt_run_feature_set >> dbt_run_feature_set_current >> dbt_run_transition_scored_current
     [dbt_run_combined_bucket_stats, dbt_run_lag_viability] >> dbt_run_transition_confidence
     dbt_run_transition_confidence >> dbt_run_cell_score >> dbt_run_pair_recommendation
+    dbt_run_transition_confidence >> dbt_run_cell_score_extended
     [dbt_run_transition_scored_current, dbt_run_cell_score, dbt_run_pair_recommendation] >> dbt_run_ticker_pair_current
     [dbt_run_ticker_pair_current, dbt_run_cell_credibility] >> dbt_run_ticker_summary_current >> dbt_run_ticker_global_action_current >> trigger_inference_backtest
     dbt_run_ticker_global_action_current >> dbt_run_prediction_ledger >> dbt_run_prediction_ledger_scored

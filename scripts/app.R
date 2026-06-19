@@ -680,7 +680,7 @@ server <- function(input, output, session) {
              combined_score,
              recommendation,
              recommendation_rank
-      FROM inference.return_cluster_cell_score cs
+      FROM inference.return_cluster_cell_score_extended cs
       WHERE cs.past_fibonacci_lag_value = %s AND cs.future_fibonacci_lag_value = %s AND cs.id = %s
         %s
       ORDER BY past_excess_return_z_bucket_num;",
@@ -875,10 +875,10 @@ server <- function(input, output, session) {
       con <- get_con(input, "H")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
-        "SELECT DISTINCT id FROM inference.return_cluster_cell_score ORDER BY 1")
+        "SELECT DISTINCT id FROM inference.return_cluster_cell_score_extended ORDER BY 1")
       bucket_vals <- dbGetQuery(con,
         "SELECT DISTINCT past_excess_return_z_bucket, past_excess_return_z_bucket_num
-         FROM inference.return_cluster_cell_score
+         FROM inference.return_cluster_cell_score_extended
          ORDER BY past_excess_return_z_bucket_num")
       bucket_choices <- c("All" = "ALL", setNames(bucket_vals[[1]], bucket_vals[[1]]))
       updateSelectInput(session, "id_valH", choices = id_vals[[1]], selected = id_vals[[1]][1])
@@ -912,7 +912,7 @@ server <- function(input, output, session) {
              recommendation,
              signal,
              is_viable
-      FROM inference.return_cluster_cell_score
+      FROM inference.return_cluster_cell_score_extended
       WHERE id = %s %s %s
       ORDER BY past_fibonacci_lag_value, future_fibonacci_lag_value;",
       input$id_valH, bucket_clause, viable_clause)
