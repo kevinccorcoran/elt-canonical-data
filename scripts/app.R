@@ -530,7 +530,7 @@ ui <- navbarPage(
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         plotlyOutput("clusterSummaryPlot", height = "600px"),
         tags$hr(style = "border-color: rgba(255,255,255,0.1); margin-top: 2rem;"),
-        h4("Per-ticker scatter (raw K-means input, faceted by vol bucket)",
+        h4("Per-ticker scatter colored by cluster id (months since IPO × monthly growth)",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         plotlyOutput("clusterPlot", height = "600px")
       ))
@@ -1414,12 +1414,15 @@ server <- function(input, output, session) {
       con <- get_con(input, "K")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
-        SELECT ticker,
-               cluster_id,
-               months_count,
-               growth_pct_per_month
-        FROM analysis.ticker_cluster_segments
-        WHERE months_count > 0 AND growth_pct_per_month IS NOT NULL")
+        SELECT s.ticker,
+               v.id,
+               s.months_count,
+               s.growth_pct_per_month
+        FROM analysis.ticker_cluster_segments s
+        JOIN metrics.ticker_cluster_volatility_summary v
+          ON v.monthly_growth_vol_z_bucket_num = s.monthly_growth_vol_z_bucket_num
+         AND v.cluster_id = s.cluster_id
+        WHERE s.months_count > 0 AND s.growth_pct_per_month IS NOT NULL")
       app_dataK(df)
       status_msgK(sprintf("Loaded %d tickers across %d buckets.",
                           nrow(df), length(unique(df$bucket))))
@@ -1627,15 +1630,19 @@ server <- function(input, output, session) {
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
 
     df <- df[is.finite(df$months_count) & is.finite(df$growth_pct_per_month), ]
-    df$cluster <- factor(df$cluster_id)
+    df$id_factor <- factor(df$id)
+    # 20-color palette so each id is visually distinct.
+    palette20 <- c("#ef4444","#f97316","#eab308","#84cc16","#22c55e","#10b981",
+                   "#14b8a6","#06b6d4","#0ea5e9","#3b82f6","#6366f1","#8b5cf6",
+                   "#a855f7","#d946ef","#ec4899","#f43f5e","#fbbf24","#a3e635",
+                   "#2dd4bf","#7c3aed")
+    id_levels <- sort(unique(df$id))
+    color_map <- setNames(palette20[seq_along(id_levels)], as.character(id_levels))
 
-    p <- ggplot(df, aes(x = months_count, y = growth_pct_per_month, color = cluster, text = ticker)) +
+    p <- ggplot(df, aes(x = months_count, y = growth_pct_per_month, color = id_factor, text = ticker)) +
       geom_point(size = 1.1, alpha = 0.6) +
-      scale_color_manual(values = c("0"="#f59e0b","1"="#22d3ee","2"="#a855f7",
-                                    "3"="#ef4444","4"="#10b981","5"="#3b82f6",
-                                    "6"="#ec4899","7"="#84cc16","8"="#06b6d4",
-                                    "9"="#eab308","10"="#d946ef","11"="#0ea5e9")) +
-      labs(x = "months since IPO", y = "avg monthly growth (%)", color = "cluster") +
+      scale_color_manual(values = color_map) +
+      labs(x = "months since IPO", y = "avg monthly growth (%)", color = "id") +
       theme_minimal(base_size = 10) +
       theme(
         plot.background  = element_rect(fill = "#0b1220", color = NA),
