@@ -13,8 +13,8 @@ AlphaStream is split into two repositories:
 
 ## Environments
 
-- Two pipeline setups: local and production (cloud)
-- Three databases: dev, staging, and prod
+- Two pipeline setups: local and cloud (production)
+- Three databases: dev and staging (local), prod (managed)
 
 ## Data Lineage
 
