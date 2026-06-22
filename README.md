@@ -11,6 +11,11 @@ AlphaStream is split into two repositories:
 - **`elt-canonical-data`** (this repo, public) — the data layer. Ingestion, raw storage, cleaned canonical tables, and shared infrastructure and documentation.
 - **`inference-models`** (private) — the forecasting and signal-generation layer that sits on top of the canonical tables.
 
+## Environments
+
+- Two pipeline setups: local and production (cloud)
+- Three databases: dev, staging, and prod
+
 ## Data Lineage
 
 ### ELT — Canonical Data
