@@ -1415,15 +1415,11 @@ server <- function(input, output, session) {
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
         SELECT ticker,
-               monthly_growth_vol_z_bucket_num AS bucket,
                cluster_id,
-               (LN(months_count) - AVG(LN(months_count)) OVER w)
-                 / NULLIF(STDDEV_POP(LN(months_count)) OVER w, 0) AS z_logmo,
-               (growth_pct_per_month - AVG(growth_pct_per_month) OVER w)
-                 / NULLIF(STDDEV_POP(growth_pct_per_month) OVER w, 0) AS z_growth
+               months_count,
+               growth_pct_per_month
         FROM analysis.ticker_cluster_segments
-        WHERE months_count > 0 AND growth_pct_per_month IS NOT NULL
-        WINDOW w AS (PARTITION BY monthly_growth_vol_z_bucket_num)")
+        WHERE months_count > 0 AND growth_pct_per_month IS NOT NULL")
       app_dataK(df)
       status_msgK(sprintf("Loaded %d tickers across %d buckets.",
                           nrow(df), length(unique(df$bucket))))
@@ -1441,13 +1437,13 @@ server <- function(input, output, session) {
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       summary_df <- dbGetQuery(con, "
         WITH credibility_rollup AS (
-          SELECT id,
+          SELECT vol_bucket_num, cluster_id,
                  COUNT(*)                            AS n_cells,
                  ROUND(AVG(wf_agreement)::numeric, 3) AS avg_wf_agreement,
                  ROUND(100.0 * COUNT(*) FILTER (WHERE tier IN ('high','medium'))
                               / NULLIF(COUNT(*), 0), 1) AS pct_high_quality
           FROM inference.cell_credibility
-          GROUP BY id
+          GROUP BY vol_bucket_num, cluster_id
         ),
         action_rollup AS (
           SELECT id,
@@ -1475,8 +1471,10 @@ server <- function(input, output, session) {
                COALESCE(a.n_skip, 0)           AS n_skip,
                array_to_string(v.tickers[1:5], ', ') AS top_5_tickers
         FROM metrics.ticker_cluster_volatility_summary v
-        LEFT JOIN credibility_rollup c USING (id)
-        LEFT JOIN action_rollup      a USING (id)
+        LEFT JOIN credibility_rollup c
+          ON c.vol_bucket_num = v.monthly_growth_vol_z_bucket_num
+         AND c.cluster_id     = v.cluster_id
+        LEFT JOIN action_rollup a USING (id)
         ORDER BY cluster_trust_rank ASC, v.id ASC")
       cluster_summaryK(summary_df)
     }, error = function(e) { status_msgK(paste("Cluster summary error:", e$message)) })
@@ -1628,16 +1626,16 @@ server <- function(input, output, session) {
       title = list(text = "No data", font = list(color = "#f8fafc")),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
 
-    df <- df[is.finite(df$z_logmo) & is.finite(df$z_growth), ]
+    df <- df[is.finite(df$months_count) & is.finite(df$growth_pct_per_month), ]
     df$cluster <- factor(df$cluster_id)
-    df$bucket  <- factor(df$bucket)
 
-    p <- ggplot(df, aes(x = z_logmo, y = z_growth, color = cluster, text = ticker)) +
+    p <- ggplot(df, aes(x = months_count, y = growth_pct_per_month, color = cluster, text = ticker)) +
       geom_point(size = 1.1, alpha = 0.6) +
-      facet_wrap(~ bucket, labeller = labeller(bucket = function(x) paste("bucket", x))) +
       scale_color_manual(values = c("0"="#f59e0b","1"="#22d3ee","2"="#a855f7",
-                                    "3"="#ef4444","4"="#10b981")) +
-      labs(x = "z(log months)", y = "z(growth)", color = "cluster") +
+                                    "3"="#ef4444","4"="#10b981","5"="#3b82f6",
+                                    "6"="#ec4899","7"="#84cc16","8"="#06b6d4",
+                                    "9"="#eab308","10"="#d946ef","11"="#0ea5e9")) +
+      labs(x = "months since IPO", y = "avg monthly growth (%)", color = "cluster") +
       theme_minimal(base_size = 10) +
       theme(
         plot.background  = element_rect(fill = "#0b1220", color = NA),
