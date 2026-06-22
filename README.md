@@ -27,7 +27,7 @@ Statistical forecasting and signal-generation tables that sit on top of the cano
 
 ![Dashboard](tools/alpha_forecast.jpg?v=2)
 
-Visualizes cohorts that share similar attributes across lag time horizons spanning up to 40 years.
+Visualizes cohorts that share similar attributes across lag time horizons spanning up to 60 years.
 
 Supports:
 - Side-by-side comparison of past and future distributions across groups.
