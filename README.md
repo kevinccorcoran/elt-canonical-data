@@ -36,6 +36,17 @@ Supports:
 
 Built with R + Shiny, Plotly, and PostgreSQL. Packaged in Docker.
 
+### Clusters
+
+![Cluster scatter](tools/clusters_scatter.jpg)
+
+Groups items that behave alike into clusters and plots every member in a single view.
+
+Supports:
+- One point per member, placed by age and rate of change.
+- Color-coding by cluster to compare groups at a glance.
+- Toggling clusters on or off and switching environments.
+
 ## Project Timeline
 
 **2024 — Foundation**
@@ -56,16 +67,14 @@ Built with R + Shiny, Plotly, and PostgreSQL. Packaged in Docker.
 - Database switched to managed PostgreSQL
 
 **2026 Q2 — Forecasting & Dashboard**
-- Reworked the forecasting layer for signal quality and data integrity
-- Added safeguards to flag unreliable results
-- Dashboard refreshed
-- Known model limitations documented and ranked
+- Reworked the forecasting layer with walk-forward validation and trust scoring
+- Expanded the dashboard with new views for ranges, coverage, and clusters
+- Introduced new automated data-quality rules
+- Added 200% data coverage, removing survivorship bias
 
 **Ongoing**
-- **Data quality rules** — programmatic ticker exclusion via cross-feed checks (`ticker_reuse`, `regime_shift`, `feed_discrepancy` with `no_yfinance` fallback, `stagnation`), plus a manual-override gate at `ingest_combined`
-- **Delisted universe backfill** — one-shot Polygon Flat Files pull to recover historical and delisted symbols, wired into `ingest_massive_staging` and the monthly DAG
-- **Inference dependency wiring** — new canonical assets (`ticker_global_action_current`, `ticker_pair_current`, `ticker_summary_current`) linked into the inference DAG
-- Continued model refinement and performance tuning
+- Continued model refinement
+- Data QA, bug fixes, and optimization
 
 ---
 
