@@ -1580,8 +1580,11 @@ server <- function(input, output, session) {
     # Parse months_range "min-max" → midpoint for X axis
     parts   <- do.call(rbind, strsplit(d$months_range, "-"))
     mid_mo  <- (as.numeric(parts[,1]) + as.numeric(parts[,2])) / 2
-    trust_col <- c(`1` = "#10b981", `2` = "#fbbf24", `3` = "#64748b", `4` = "#ef4444")
-    d$trust_color <- trust_col[as.character(d$cluster_trust_rank)]
+    # 20-color palette so each cluster id renders distinctly. Cycles if more.
+    palette20 <- c("#ef4444","#f97316","#eab308","#84cc16","#22c55e","#10b981",
+                   "#14b8a6","#06b6d4","#0ea5e9","#3b82f6","#6366f1","#8b5cf6",
+                   "#a855f7","#d946ef","#ec4899","#f43f5e","#fbbf24","#a3e635",
+                   "#2dd4bf","#7c3aed")
     d$hover_text <- sprintf(
       "Cluster %d<br>Vol bucket: %s<br>Tickers: %d<br>Avg growth: %.2f%%/mo<br>Months range: %s<br>Trust rank: %d<br>BUY: %d  SELL: %d  SKIP: %d",
       d$id, d$vol_bucket, d$ticker_count, d$avg_growth_pct_per_month,
@@ -1592,8 +1595,8 @@ server <- function(input, output, session) {
       x = mid_mo,
       y = ~avg_growth_pct_per_month,
       size = ~ticker_count,
-      color = ~factor(cluster_trust_rank),
-      colors = trust_col,
+      color = ~factor(id),
+      colors = palette20[seq_len(nrow(d))],
       text = ~hover_text,
       hoverinfo = "text",
       type = "scatter",
@@ -1602,7 +1605,7 @@ server <- function(input, output, session) {
                     line = list(color = "#0b1220", width = 1)),
       textposition = "top center",
       texttemplate = "%{customdata}",
-      customdata = ~paste0("id ", id, " · ", n_buy, "B/", n_sell, "S")
+      customdata = ~paste0("id ", id)
     ) |>
       layout(
         paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
@@ -1611,7 +1614,7 @@ server <- function(input, output, session) {
         yaxis = list(title = "Avg growth %/month",
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)",
                      zeroline = TRUE, zerolinecolor = "rgba(255,255,255,0.3)"),
-        legend = list(title = list(text = "Trust rank"),
+        legend = list(title = list(text = "Cluster id"),
                       font = list(color = "#f8fafc")),
         font = list(color = "#cbd5e1")
       ) |>
