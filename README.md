@@ -18,8 +18,8 @@ AlphaStream is split into two repositories:
 
 From raw ingestion to the standardized, deduplicated tables that serve as the single source of truth for every downstream model.
 
-### ETL — Forecasting & Signals
-![ETL Inference Lineage](tools/inference_lineage_graph.jpg)
+### ELT — Forecasting & Signals
+![ELT Inference Lineage](tools/inference_lineage_graph.jpg)
 
 Statistical forecasting and signal-generation tables that sit on top of the canonical layer.
 
