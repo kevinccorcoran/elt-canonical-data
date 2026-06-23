@@ -4,6 +4,8 @@
 
 AlphaStream is an end-to-end data and analytics platform. It ingests time-series data, cleans and standardizes it, and produces statistical forecasts with an interactive dashboard on top.
 
+Walk-forward backtesting shows 61.2% sign agreement across 643,466 cells (June 2026).
+
 ## Repositories
 
 AlphaStream is split into two repositories:
@@ -78,7 +80,6 @@ Supports:
 - Added 300% data coverage, removing survivorship bias
 
 **Ongoing**
-- Walk-forward backtesting shows 61.2% sign agreement across 643,466 cells
 - Continued model refinement
 - Data QA, bug fixes, and optimization
 
