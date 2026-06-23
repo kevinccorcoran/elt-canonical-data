@@ -78,6 +78,7 @@ Supports:
 - Added 300% data coverage, removing survivorship bias
 
 **Ongoing**
+- Walk-forward backtesting shows 61.2% sign agreement across 643,466 cells
 - Continued model refinement
 - Data QA, bug fixes, and optimization
 
