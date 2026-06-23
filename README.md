@@ -75,7 +75,7 @@ Supports:
 - Reworked the forecasting layer with walk-forward validation and trust scoring
 - Expanded the dashboard with new views for ranges, coverage, and clusters
 - Introduced new automated data-quality rules
-- Added 200% data coverage, removing survivorship bias
+- Added 300% data coverage, removing survivorship bias
 
 **Ongoing**
 - Continued model refinement
