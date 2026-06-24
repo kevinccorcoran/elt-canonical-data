@@ -38,6 +38,7 @@ edge_cfg = {
     "ingest": {"color": "#2E7D32"},
     "transform": {"color": "#1565C0"},
     "serve": {"color": "#7B1FA2", "penwidth": "2.5"},
+    "feedback": {"color": "#EF6C00", "style": "dashed"},
 }
 
 out_name = os.environ.get("DIAGRAM_OUTPUT", "alphastream_system_architecture")
@@ -99,5 +100,7 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
     # Serve
     analysis >> Edge(**edge_cfg["serve"], label="Serve") >> dashboard
     inference >> Edge(**edge_cfg["serve"]) >> dashboard
-    backtest >> Edge(**edge_cfg["serve"], label="Credibility") >> dashboard
     dashboard >> Edge(**edge_cfg["serve"], label="Explore") >> analysts
+
+    # Validation feedback: walk-forward credibility gates the inference summary
+    backtest >> Edge(**edge_cfg["feedback"], label="Credibility") >> inference
