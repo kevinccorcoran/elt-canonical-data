@@ -1,6 +1,6 @@
 # AlphaStream
 
-![Architecture Diagram](tools/alphastream_system_architecture.png)
+![Architecture Diagram](tools/alphastream_system_architecture.png?v=2)
 
 AlphaStream is an end-to-end data and analytics platform. It ingests time-series data, cleans and standardizes it, and produces statistical forecasts with an interactive dashboard on top.
 

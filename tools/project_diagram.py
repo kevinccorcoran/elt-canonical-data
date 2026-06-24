@@ -1,94 +1,103 @@
 from diagrams.aws.general import InternetAlt1
 from diagrams import Diagram, Cluster, Edge
 from diagrams.onprem.workflow import Airflow
-from diagrams.onprem.container import Docker
 from diagrams.digitalocean.database import DbaasPrimary
-from diagrams.programming.language import Python
+from diagrams.programming.language import Python, R
 from diagrams.onprem.analytics import Dbt
-from diagrams.onprem.database import Postgresql
+from diagrams.onprem.client import Users
+import os
 
 # ---------------------------------------------------------------------
-# FINAL POLISH & TERMINOLOGY ALIGNMENT
+# Clean left-to-right spine: Sources -> Ingest -> Postgres layers
+# (raw -> cdm -> metrics -> analysis -> inference) -> Dashboard -> Analysts,
+# with Airflow orchestrating and a walk-forward backtest validating inference.
 # ---------------------------------------------------------------------
 
 graph_attr = {
-    "fontsize": "24",
+    "fontsize": "26",
     "bgcolor": "white",
     "splines": "ortho",
-    "nodesep": "1.2",         # More horizontal space between nodes
-    "ranksep": "1.5",         # More vertical space between ranks
-    "pad": "1.0",             
+    "nodesep": "0.35",
+    "ranksep": "0.8",
+    "pad": "0.4",
     "pencolor": "#263238",
-    "fontname": "Sans-Serif"
+    "fontname": "Sans-Serif",
+    "newrank": "true",
 }
 
-# Smaller nodes = smaller icons = labels don't get covered
 node_attr = {
-    "width": "1.5",           
-    "height": "1.5",
-    "fontsize": "13",
+    "fontsize": "15",
     "fontname": "Sans-Serif",
-    "fixedsize": "true"
+    "width": "1.4",
+    "height": "1.4",
+    "fixedsize": "true",
 }
 
 edge_cfg = {
-    "deploy": {"style": "dotted", "color": "#B0BEC5"},
     "orchestrate": {"style": "dashed", "color": "#D32F2F"},
     "ingest": {"color": "#2E7D32"},
-    "transform": {"color": "#1565C0", "style": "bold"},
-    "serve": {"color": "#7B1FA2", "penwidth": "3.0"}
+    "transform": {"color": "#1565C0"},
+    "serve": {"color": "#7B1FA2", "penwidth": "2.5"},
 }
 
-with Diagram("AlphaStream System Architecture", show=False, direction="LR", 
-             graph_attr=graph_attr, node_attr=node_attr):
+out_name = os.environ.get("DIAGRAM_OUTPUT", "alphastream_system_architecture")
 
-    # 1. Global Data Sources (Input)
+with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
+             direction="LR", graph_attr=graph_attr, node_attr=node_attr):
+
+    # Sources (grouped tidily in one box)
     with Cluster("External APIs", graph_attr={"bgcolor": "white", "pencolor": "#BDBDBD", "style": "dashed"}):
         massive = InternetAlt1("Massive Data API")
         yfinance = InternetAlt1("Yahoo Finance API")
+        delisted = InternetAlt1("Polygon Delisted\n(Flat Files)")
 
-    # 2. Production System
-    with Cluster("DigitalOcean Production Environment", graph_attr={"bgcolor": "#E1F5FE", "pencolor": "#0288D1", "penwidth": "2.0"}):
-        
-        # A. COMPUTE RUNTIME
-        with Cluster("Docker Container Layer", graph_attr={"bgcolor": "#FFFFFF", "style": "dashed", "pencolor": "#455A64"}):
-             docker_img = Docker("Docker Runtime")
-             
-             with Cluster("Workloads"):
-                 airflow = Airflow("Orchestrator")
-                 ingestor = Python("Ingestion Scripts")
-                 dbt_runner = Dbt("dbt Transforms")
+    with Cluster("DigitalOcean Production (Docker)", graph_attr={"bgcolor": "#E1F5FE", "pencolor": "#0288D1", "penwidth": "2.0"}):
 
-        # B. DATA STORE (Managed Postgres)
-        with Cluster("Data Store (Managed PostgreSQL)", graph_attr={"bgcolor": "#E8EAF6", "pencolor": "#3F51B5", "penwidth": "2.0"}):
-            
-            # Layer 1: The Raw Landing
-            with Cluster("1. Ingestion"):
-                raw = DbaasPrimary("Raw Schema")
-            
-            # Layer 2: THE CANONICAL DATA MODEL (The Foundation)
-            with Cluster("2. Canonical Layer"):
-                cdm = DbaasPrimary("CDM Schema\n(Canonical Data)")
-                
-            # Layer 3 & 4: ADVANCED ANALYTICS (The Outcomes)
-            with Cluster("3. Prediction Engine"):
-                metrics = DbaasPrimary("Metrics Schema")
-                inference = DbaasPrimary("Inference Schema")
+        # Control plane
+        with Cluster("Orchestration", graph_attr={"bgcolor": "#FFFFFF", "style": "dashed", "pencolor": "#455A64"}):
+            airflow = Airflow("Airflow")
+            ingestor = Python("Ingestion")
+            dbt_runner = Dbt("dbt Transforms")
 
-    # ---------------------------------------------------------
-    # DATA VALUE CHAIN
+        # Data plane (left-to-right layers)
+        with Cluster("Managed PostgreSQL", graph_attr={"bgcolor": "#E8EAF6", "pencolor": "#3F51B5", "penwidth": "2.0"}):
+            raw = DbaasPrimary("Raw")
+            cdm = DbaasPrimary("CDM")
+            metrics = DbaasPrimary("Metrics")
+            analysis = DbaasPrimary("Analysis\n(Clusters)")
+            inference = DbaasPrimary("Inference")
 
-    # Orchestration
-    airflow - Edge(**edge_cfg["orchestrate"], label="Trigger") - ingestor
-    airflow - Edge(**edge_cfg["orchestrate"], label="Trigger") - dbt_runner
+        # Validation
+        with Cluster("Validation", graph_attr={"bgcolor": "#FFF3E0", "pencolor": "#EF6C00", "penwidth": "2.0"}):
+            backtest = Dbt("Backtest\n(Walk-forward)")
 
-    # Ingestion (Python)
+        # Serving
+        with Cluster("Serving", graph_attr={"bgcolor": "#F3E5F5", "pencolor": "#7B1FA2", "penwidth": "2.0"}):
+            dashboard = R("Shiny Dashboard")
+
+    analysts = Users("Analysts")
+
+    # Ingest
     massive >> Edge(**edge_cfg["ingest"], label="Fetch") >> ingestor
     yfinance >> Edge(**edge_cfg["ingest"]) >> ingestor
+    delisted >> Edge(**edge_cfg["ingest"], label="Backfill") >> ingestor
     ingestor >> Edge(**edge_cfg["ingest"], label="Load") >> raw
-    
-    # Transformation (DBT)
-    # Visualizing the progression through the layers
+
+    # Transform
     raw >> Edge(**edge_cfg["transform"], label="Standardize") >> cdm
     cdm >> Edge(**edge_cfg["transform"], label="Aggregate") >> metrics
-    metrics >> Edge(**edge_cfg["transform"], label="Predict") >> inference
+    metrics >> Edge(**edge_cfg["transform"], label="Cluster") >> analysis
+    analysis >> Edge(**edge_cfg["transform"], label="Predict") >> inference
+
+    # Orchestrate
+    airflow >> Edge(**edge_cfg["orchestrate"], label="Trigger") >> ingestor
+    airflow >> Edge(**edge_cfg["orchestrate"]) >> dbt_runner
+
+    # Validate
+    inference >> Edge(**edge_cfg["transform"], label="Validate") >> backtest
+
+    # Serve
+    analysis >> Edge(**edge_cfg["serve"], label="Serve") >> dashboard
+    inference >> Edge(**edge_cfg["serve"]) >> dashboard
+    backtest >> Edge(**edge_cfg["serve"], label="Credibility") >> dashboard
+    dashboard >> Edge(**edge_cfg["serve"], label="Explore") >> analysts
