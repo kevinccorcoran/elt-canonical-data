@@ -267,7 +267,7 @@ make_sidebar <- function(suffix, title, filter_widgets) {
     textInput(paste0("db_port", suffix), "Port", value = "5432"),
     textInput(paste0("db_user", suffix), "User", value = "postgres"),
     passwordInput(paste0("db_pass", suffix), "Password", value = ""),
-    actionButton(paste0("connect_btn", suffix), "Connect & Load Filters", class = "btn-primary"),
+    actionButton(paste0("connect_btn", suffix), "Connect", class = "btn-primary"),
     hr(),
     h5("Filters"),
     div(id = paste0("filter_panel", suffix), filter_widgets),
@@ -349,6 +349,8 @@ ui <- navbarPage(
         )
       )),
       mainPanel(div(class = "main-card", style = "height: calc(100vh - 4rem); display: flex; flex-direction: column;",
+        h4("Transition range — inference.return_cluster_cell_score_extended",
+           style = "color: #f8fafc; margin-bottom: 0.5rem; font-weight: 600;"),
         uiOutput("transitionHeader"),
         div(style = "flex: 1; min-height: 0;", plotlyOutput("transitionPlot", height = "100%"))
       ))
@@ -495,7 +497,7 @@ ui <- navbarPage(
         )
       )),
       mainPanel(div(class = "main-card",
-        h4("Ticker history coverage (cdm.ingest_combined)",
+        h4("Ticker history coverage — cdm.ingest_combined",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         uiOutput("coveragePlotContainer")
       ))
@@ -505,34 +507,103 @@ ui <- navbarPage(
   # ── Tab: Clusters ──
   tabPanel("Clusters",
     sidebarLayout(
-      make_sidebar("K", "Database Connection (Clusters)", tagList(
-        tags$div(
-          style = "padding: 0.75rem; background: rgba(255,255,255,0.03);
-                   border-left: 2px solid #64748b; border-radius: 4px;
-                   color: #94a3b8; font-size: 0.75rem; font-family: 'Inter'; line-height: 1.5;",
-          tags$div(style = "color: #f8fafc; font-weight: 600; margin-bottom: 0.4rem;", "What this shows"),
-          "Cluster overview fused with walk-forward credibility + current recommendations. Click a row to drill into ",
-          "trustworthy cells and active BUY/SELL tickers. Color-coded trust rank: green=TRUST, yellow=MAYBE, grey=THIN, red=SKIP."
+      make_sidebar("K", "Database Connection (Clusters)", tagList()),
+      mainPanel(div(class = "main-card",
+        h4("Per-ticker scatter — analysis.ticker_cluster_segments × metrics.ticker_cluster_volatility_summary",
+           style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        tags$div(style = "margin-bottom: 0.75rem;",
+          actionButton("clusterShowAll", "Show all", class = "btn-primary",
+                       style = "margin-right: 0.5rem;"),
+          actionButton("clusterHideAll", "Hide all", class = "btn-primary")
         ),
-        tags$hr(style = "border-color: rgba(255,255,255,0.1);"),
-        h4("Filters", style = "color: #f8fafc;"),
-        sliderInput("fK_trust_max", "Trust rank ≤ (1=best)", 1, 4, 4, 1),
-        sliderInput("fK_min_hq",    "Min pct_high_quality",      0, 100, 0, 5),
-        checkboxInput("fK_has_buy",  "Has BUY signal",  FALSE),
-        checkboxInput("fK_has_sell", "Has SELL signal", FALSE)
+        plotlyOutput("clusterPlot", height = "600px")
+      ))
+    )
+  ),
+
+  # ── Tab: Top Picks ──
+  tabPanel("Top Picks",
+    sidebarLayout(
+      make_sidebar("P", "Database Connection (Top Picks)", tagList(
+        selectInput("id_valP", "Cluster ID", choices = c("Connect first..." = ""), selected = ""),
+        sliderInput("top_n_valP", "Top N tickers", min = 5, max = 400, value = 30, step = 5)
       )),
       mainPanel(div(class = "main-card",
-        h4("Cluster overview", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-        DT::DTOutput("clusterOverviewTable"),
-        uiOutput("clusterDrilldownUI"),
-        tags$hr(style = "border-color: rgba(255,255,255,0.1); margin-top: 2rem;"),
-        h4("All 14 clusters in one frame — months × growth, sized by tickers, colored by trust rank",
+        h4("Top picks across horizons — inference.return_cluster_ticker_summary_current x return_cluster_ticker_pair_current",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-        plotlyOutput("clusterSummaryPlot", height = "600px"),
-        tags$hr(style = "border-color: rgba(255,255,255,0.1); margin-top: 2rem;"),
-        h4("Per-ticker scatter colored by cluster id (months since IPO × monthly growth)",
+        tags$div(
+          style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #38bdf8; border-radius: 4px;
+                   color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
+                   margin-bottom: 0.75rem;",
+          "Rows: top-N tickers by agg_rank in the selected cluster (rank 1 at top). ",
+          "Columns: fut_lag (1 to 54 months). ",
+          "Color: SIGNED RELIABILITY EDGE = (wilson_lower - 0.5) x direction, averaged over cells with a directional vote. ",
+          "wilson_lower is the conservative lower bound of the walk-forward agreement rate, so thin-sample cells get penalized vs dense-sample cells with the same raw agreement. ",
+          "Bright green = reliable BUY with dense evidence. Bright red = reliable AVOID with dense evidence. Yellow = vote near coin flip OR thin-evidence cell whose raw agreement is high but wilson_lower is modest. Blank = no directional vote. ",
+          "Scale fixed at -0.3 to +0.3 (clips extreme cells but spans p90 of high-tier cells). Row label format: #rank ticker (n=coverage_cell_count). Hover shows raw wilson_lower and cell count."
+        ),
+        tags$div(
+          style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #fbbf24; border-radius: 4px;
+                   color: #f8fafc; font-size: 0.85rem; line-height: 1.4;
+                   margin-bottom: 0.75rem; font-family: 'JetBrains Mono', monospace;",
+          textOutput("clusterIcDisplayP")
+        ),
+        plotlyOutput("topPicksPlot", height = "900px")
+      ))
+    )
+  ),
+
+  # ── Tab: Rank Stability ──
+  tabPanel("Rank Stability",
+    sidebarLayout(
+      make_sidebar("RS", "Database Connection (Rank Stability)", tagList(
+        selectInput("id_valRS", "Cluster ID",
+                    choices = c("Connect first..." = ""), selected = ""),
+        sliderInput("top_n_valRS", "Max vingtile to display (1 = top 5%, 20 = bottom 5%)",
+                    min = 5, max = 20, value = 20, step = 1),
+        selectInput("metric_valRS", "Metric",
+                    choices = c("Mean return" = "mean_return",
+                                "Median return" = "median_return",
+                                "Hit rate (% correct direction)" = "hit_rate",
+                                "Sharpe-like (mean/sd)" = "sharpe_like",
+                                "Combo: hit + median (quadrants)" = "combo_quadrants"),
+                    selected = "mean_return"),
+        dateRangeInput("cutoff_rangeRS", "Cutoff range",
+                       start = NULL, end = NULL,
+                       startview = "year", separator = " to ")
+      )),
+      mainPanel(div(class = "main-card",
+        h4("Rank stability across walk-forward cohorts - inference.walk_forward_ticker_rank",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-        plotlyOutput("clusterPlot", height = "600px")
+        tags$div(
+          style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #f59e0b; border-radius: 4px;
+                   color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
+                   margin-bottom: 0.75rem;",
+          tags$b(style = "color: #fbbf24;", "Caveat: "),
+          "cluster_id is NOT identity-stable across walk-forward refits. ",
+          "Treat the cluster selector as a ", tags$i("growth-tier alignment"),
+          " filter (tickers that landed in the same growth-vol regime as the selected cluster id at each cutoff), ",
+          "not as a fixed-membership cohort. ",
+          "Slot performance is cluster-agnostic by design (aggregated across all 84 cohorts)."
+        ),
+        textOutput("cutoffCountRS"),
+        tags$br(),
+        h5("Slot performance - mean realized forward return per rank slot",
+           style = "color: #f8fafc; font-weight: 600;"),
+        plotlyOutput("slotPerfPlotRS", height = "380px"),
+        tags$br(),
+        h5("Vingtile (5% bin) vs fut_lag heatmap - mean realized return at each (vingtile, horizon) across 84 cohorts. Rank normalized to within-cluster vingtile so different cluster sizes compare fairly.",
+           style = "color: #f8fafc; font-weight: 600;"),
+        plotlyOutput("stabilityHeatmapRS", height = "800px"),
+        tags$br(),
+        actionButton("execute_all_RS", "Generate small-multiples for ALL ids",
+                     class = "btn-primary", style = "margin-bottom: 1rem;"),
+        h5("All 19 ids - green = model was right (sign-adjusted: longs up = green, shorts down = green). For combo: gray=neither, blue=hit only, gold=median-only (Bessembinder), green=both high.",
+           style = "color: #f8fafc; font-weight: 600;"),
+        plotlyOutput("allIdsGridRS", height = "1200px")
       ))
     )
   )
@@ -542,14 +613,18 @@ ui <- navbarPage(
 get_con <- function(input, suffix) {
   env   <- input[[paste0("db_env", suffix)]]
   db_string <- if (env == "Production") "prod" else if (env == "Staging") "staging" else "dev"
-  dbConnect(RPostgres::Postgres(),
+  con <- dbConnect(RPostgres::Postgres(),
     dbname   = db_string,
     host     = input[[paste0("db_host", suffix)]],
     port     = as.integer(input[[paste0("db_port", suffix)]]),
     user     = input[[paste0("db_user", suffix)]],
     password = input[[paste0("db_pass", suffix)]],
-    sslmode  = "prefer"
+    sslmode  = "prefer",
+    connect_timeout = 10
   )
+  # Hard cap so a slow or stuck query can never freeze the single-threaded app
+  DBI::dbExecute(con, "SET statement_timeout = '60s'")
+  con
 }
 
 # ─── Helper: wire up env-switcher for a given suffix ───
@@ -1420,206 +1495,12 @@ server <- function(input, output, session) {
                s.growth_pct_per_month
         FROM analysis.ticker_cluster_segments s
         JOIN metrics.ticker_cluster_volatility_summary v
-          ON v.monthly_growth_vol_z_bucket_num = s.monthly_growth_vol_z_bucket_num
-         AND v.cluster_id = s.cluster_id
+          ON v.cluster_id = s.cluster_id
         WHERE s.months_count > 0 AND s.growth_pct_per_month IS NOT NULL")
       app_dataK(df)
-      status_msgK(sprintf("Loaded %d tickers across %d buckets.",
-                          nrow(df), length(unique(df$bucket))))
+      status_msgK(sprintf("Loaded %d tickers across %d clusters.",
+                          nrow(df), length(unique(df$id))))
     }, error = function(e) { status_msgK(paste("Error:", e$message)) })
-  })
-
-  # ── CLUSTERS: cluster summary fused with walk-forward credibility ──
-  cluster_summaryK <- reactiveVal(NULL)
-  trust_palette    <- c(`1` = "#10b981", `2` = "#fbbf24", `3` = "#64748b", `4` = "#ef4444")
-
-  observeEvent(input$execute_K, {
-    if (input$db_passK == "") return()
-    tryCatch({
-      con <- get_con(input, "K")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      summary_df <- dbGetQuery(con, "
-        WITH credibility_rollup AS (
-          SELECT vol_bucket_num, cluster_id,
-                 COUNT(*)                            AS n_cells,
-                 ROUND(AVG(wf_agreement)::numeric, 3) AS avg_wf_agreement,
-                 ROUND(100.0 * COUNT(*) FILTER (WHERE tier IN ('high','medium'))
-                              / NULLIF(COUNT(*), 0), 1) AS pct_high_quality
-          FROM inference.cell_credibility
-          GROUP BY vol_bucket_num, cluster_id
-        ),
-        action_rollup AS (
-          SELECT id,
-                 COUNT(DISTINCT ticker) FILTER (WHERE global_action = 'BUY')  AS n_buy,
-                 COUNT(DISTINCT ticker) FILTER (WHERE global_action = 'SELL') AS n_sell,
-                 COUNT(DISTINCT ticker) FILTER (WHERE global_action = 'SKIP') AS n_skip
-          FROM inference.return_cluster_ticker_global_action_current
-          GROUP BY id
-        )
-        SELECT v.id,
-               v.monthly_growth_vol_z_bucket                   AS vol_bucket,
-               v.cluster_id,
-               v.ticker_count,
-               v.avg_weighted_growth                           AS avg_growth_pct_per_month,
-               v.min_months_count || '-' || v.max_months_count AS months_range,
-               CASE WHEN COALESCE(c.pct_high_quality,0) >= 60 AND COALESCE(c.n_cells,0) >= 20 THEN 1
-                    WHEN COALESCE(c.pct_high_quality,0) >= 40 THEN 2
-                    WHEN COALESCE(c.n_cells,0) < 20 THEN 3
-                    ELSE 4 END                                  AS cluster_trust_rank,
-               COALESCE(c.pct_high_quality, 0) AS pct_high_quality,
-               COALESCE(c.avg_wf_agreement, 0) AS avg_wf_agreement,
-               COALESCE(c.n_cells, 0)          AS n_cells,
-               COALESCE(a.n_buy,  0)           AS n_buy,
-               COALESCE(a.n_sell, 0)           AS n_sell,
-               COALESCE(a.n_skip, 0)           AS n_skip,
-               array_to_string(v.tickers[1:5], ', ') AS top_5_tickers
-        FROM metrics.ticker_cluster_volatility_summary v
-        LEFT JOIN credibility_rollup c
-          ON c.vol_bucket_num = v.monthly_growth_vol_z_bucket_num
-         AND c.cluster_id     = v.cluster_id
-        LEFT JOIN action_rollup a USING (id)
-        ORDER BY cluster_trust_rank ASC, v.id ASC")
-      cluster_summaryK(summary_df)
-    }, error = function(e) { status_msgK(paste("Cluster summary error:", e$message)) })
-  })
-
-  filtered_clustersK <- reactive({
-    req(cluster_summaryK())
-    df <- cluster_summaryK()
-    df[df$cluster_trust_rank <= input$fK_trust_max &
-       df$pct_high_quality   >= input$fK_min_hq &
-       (!input$fK_has_buy  | df$n_buy  > 0) &
-       (!input$fK_has_sell | df$n_sell > 0), ]
-  })
-
-  output$clusterOverviewTable <- DT::renderDT({
-    d <- filtered_clustersK()
-    if (is.null(d) || nrow(d) == 0) return(NULL)
-    DT::datatable(d, selection = "single", rownames = FALSE,
-      options = list(pageLength = 14, dom = "tip",
-                     order = list(list(which(names(d) == "cluster_trust_rank") - 1, "asc")))) |>
-      DT::formatStyle("cluster_trust_rank", target = "row",
-        backgroundColor = DT::styleEqual(names(trust_palette), trust_palette),
-        color = "#0b1220", fontWeight = "600") |>
-      DT::formatRound("avg_growth_pct_per_month", 2) |>
-      DT::formatRound(c("avg_wf_agreement"), 3)
-  })
-
-  selected_clusterK <- reactive({
-    i <- input$clusterOverviewTable_rows_selected
-    req(i, length(i) > 0)
-    filtered_clustersK()$id[i]
-  })
-
-  cells_in_clusterK <- reactive({
-    req(selected_clusterK(), input$db_passK != "")
-    con <- get_con(input, "K")
-    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    dbGetQuery(con,
-      sprintf("SELECT past_lag, fut_lag, bucket, tier, wf_agreement, wf_n_holdout
-               FROM inference.cell_credibility
-               WHERE id = %d
-               ORDER BY wf_agreement DESC NULLS LAST, wf_n_holdout DESC
-               LIMIT 50", as.integer(selected_clusterK())))
-  })
-
-  tickers_in_clusterK <- reactive({
-    req(selected_clusterK(), input$db_passK != "")
-    con <- get_con(input, "K")
-    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    dbGetQuery(con,
-      sprintf("SELECT ticker, global_action, action, is_active
-               FROM inference.return_cluster_ticker_global_action_current
-               WHERE id = %d AND global_action IN ('BUY','SELL')
-               ORDER BY CASE global_action WHEN 'BUY' THEN 0 ELSE 1 END, ticker",
-              as.integer(selected_clusterK())))
-  })
-
-  output$clusterDrilldownUI <- renderUI({
-    req(selected_clusterK())
-    tagList(
-      tags$hr(style = "border-color: rgba(255,255,255,0.1); margin-top: 1.5rem;"),
-      h4(paste("Cluster", selected_clusterK(), "detail"),
-         style = "color: #f8fafc; margin-bottom: 1rem;"),
-      fluidRow(
-        column(6,
-          h5("Top 50 cells (sorted by walk-forward agreement)", style = "color: #cbd5e1;"),
-          DT::DTOutput("clusterCellsTable")),
-        column(6,
-          h5("Active BUY / SELL tickers in this cluster", style = "color: #cbd5e1;"),
-          DT::DTOutput("clusterTickersTable"))
-      )
-    )
-  })
-
-  output$clusterCellsTable <- DT::renderDT({
-    d <- cells_in_clusterK()
-    if (is.null(d) || nrow(d) == 0) return(NULL)
-    tier_colors <- c(high = "#10b981", medium = "#fbbf24", thin = "#64748b", bad = "#ef4444")
-    DT::datatable(d, rownames = FALSE,
-                  options = list(pageLength = 10, dom = "tip")) |>
-      DT::formatStyle("tier",
-        backgroundColor = DT::styleEqual(names(tier_colors), tier_colors),
-        color = "#0b1220", fontWeight = "600") |>
-      DT::formatRound("wf_agreement", 3)
-  })
-
-  output$clusterTickersTable <- DT::renderDT({
-    d <- tickers_in_clusterK()
-    if (is.null(d) || nrow(d) == 0) return(NULL)
-    DT::datatable(d, rownames = FALSE,
-                  options = list(pageLength = 10, dom = "tip")) |>
-      DT::formatStyle("global_action",
-        backgroundColor = DT::styleEqual(c("BUY","SELL"), c("#10b981","#ef4444")),
-        color = "#0b1220", fontWeight = "600")
-  })
-
-  # Single-frame cluster summary plot: all 14 clusters in one XY view
-  output$clusterSummaryPlot <- renderPlotly({
-    req(cluster_summaryK())
-    d <- cluster_summaryK()
-    # Parse months_range "min-max" → midpoint for X axis
-    parts   <- do.call(rbind, strsplit(d$months_range, "-"))
-    mid_mo  <- (as.numeric(parts[,1]) + as.numeric(parts[,2])) / 2
-    # 20-color palette so each cluster id renders distinctly. Cycles if more.
-    palette20 <- c("#ef4444","#f97316","#eab308","#84cc16","#22c55e","#10b981",
-                   "#14b8a6","#06b6d4","#0ea5e9","#3b82f6","#6366f1","#8b5cf6",
-                   "#a855f7","#d946ef","#ec4899","#f43f5e","#fbbf24","#a3e635",
-                   "#2dd4bf","#7c3aed")
-    d$hover_text <- sprintf(
-      "Cluster %d<br>Vol bucket: %s<br>Tickers: %d<br>Avg growth: %.2f%%/mo<br>Months range: %s<br>Trust rank: %d<br>BUY: %d  SELL: %d  SKIP: %d",
-      d$id, d$vol_bucket, d$ticker_count, d$avg_growth_pct_per_month,
-      d$months_range, d$cluster_trust_rank, d$n_buy, d$n_sell, d$n_skip
-    )
-    plot_ly(
-      data = d,
-      x = mid_mo,
-      y = ~avg_growth_pct_per_month,
-      size = ~ticker_count,
-      color = ~factor(id),
-      colors = palette20[seq_len(nrow(d))],
-      text = ~hover_text,
-      hoverinfo = "text",
-      type = "scatter",
-      mode = "markers+text",
-      marker = list(sizemode = "area", sizeref = 2 * max(d$ticker_count, na.rm = TRUE) / (60^2), sizemin = 6,
-                    line = list(color = "#0b1220", width = 1)),
-      textposition = "top center",
-      texttemplate = "%{customdata}",
-      customdata = ~paste0("id ", id)
-    ) |>
-      layout(
-        paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
-        xaxis = list(title = "Avg months of history (midpoint of range)",
-                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-        yaxis = list(title = "Avg growth %/month",
-                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)",
-                     zeroline = TRUE, zerolinecolor = "rgba(255,255,255,0.3)"),
-        legend = list(title = list(text = "Cluster id"),
-                      font = list(color = "#f8fafc")),
-        font = list(color = "#cbd5e1")
-      ) |>
-      config(displayModeBar = FALSE)
   })
 
   output$clusterPlot <- renderPlotly({
@@ -1630,19 +1511,31 @@ server <- function(input, output, session) {
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
 
     df <- df[is.finite(df$months_count) & is.finite(df$growth_pct_per_month), ]
+    # Draw lower-priority ids first so id=1 ends up on top of the stack.
+    df <- df[order(-df$id), ]
     df$id_factor <- factor(df$id)
-    # 20-color palette so each id is visually distinct.
     palette20 <- c("#ef4444","#f97316","#eab308","#84cc16","#22c55e","#10b981",
                    "#14b8a6","#06b6d4","#0ea5e9","#3b82f6","#6366f1","#8b5cf6",
                    "#a855f7","#d946ef","#ec4899","#f43f5e","#fbbf24","#a3e635",
                    "#2dd4bf","#7c3aed")
     id_levels <- sort(unique(df$id))
-    color_map <- setNames(palette20[seq_along(id_levels)], as.character(id_levels))
+    color_map <- setNames(palette20[((seq_along(id_levels) - 1) %% length(palette20)) + 1],
+                          as.character(id_levels))
+
+    # Clip y-axis using p0.5..p99.5 with a generous ceiling so high-growth
+    # clusters (id=1, 2) stay visible while penny-stock crashes (-50%) don't
+    # compress the bulk into y=0. Min ceiling 25 because the highest-growth
+    # cluster (id=1) typically has 14-50 tickers with growth 12-25%/mo, which
+    # the p99.5 of the bulk distribution (~8%) would clip out of view.
+    y_lo <- min(-10, quantile(df$growth_pct_per_month, 0.005, na.rm = TRUE))
+    y_hi <- max( 25, quantile(df$growth_pct_per_month, 0.995, na.rm = TRUE))
+    x_hi <- quantile(df$months_count,         0.995, na.rm = TRUE)
 
     p <- ggplot(df, aes(x = months_count, y = growth_pct_per_month, color = id_factor, text = ticker)) +
-      geom_point(size = 1.1, alpha = 0.6) +
+      geom_point(size = 0.25, alpha = 0.7) +
       scale_color_manual(values = color_map) +
-      labs(x = "months since IPO", y = "avg monthly growth (%)", color = "id") +
+      coord_cartesian(xlim = c(0, x_hi), ylim = c(y_lo, y_hi), expand = FALSE) +
+      labs(x = "Tenure (months)", y = "Growth rate (%/mo)", color = "id") +
       theme_minimal(base_size = 10) +
       theme(
         plot.background  = element_rect(fill = "#0b1220", color = NA),
@@ -1656,7 +1549,693 @@ server <- function(input, output, session) {
       layout(paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)") %>%
       config(displayModeBar = FALSE)
   })
+
+  observeEvent(input$clusterShowAll, {
+    plotlyProxy("clusterPlot", session) %>%
+      plotlyProxyInvoke("restyle", list(visible = TRUE))
+  })
+
+  observeEvent(input$clusterHideAll, {
+    plotlyProxy("clusterPlot", session) %>%
+      plotlyProxyInvoke("restyle", list(visible = "legendonly"))
+  })
+
+  # ── TOP PICKS: Reactive values ──
+  app_dataP <- reactiveVal(NULL)
+  cluster_ic_metaP <- reactiveVal(NULL)
+  status_msgP <- reactiveVal("Ready")
+  output$statusMessageP <- renderText({ status_msgP() })
+  setup_env_switcher(input, session, "P")
+
+  # ── TOP PICKS: Connect ──
+  observeEvent(input$connect_btnP, {
+    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
+    status_msgP("Connecting...")
+    tryCatch({
+      con <- get_con(input, "P")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      id_vals <- dbGetQuery(con,
+        "SELECT DISTINCT id FROM inference.return_cluster_ticker_summary_current ORDER BY 1")
+      updateSelectInput(session, "id_valP", choices = id_vals[[1]], selected = id_vals[[1]][1])
+      status_msgP("Filters loaded!")
+    }, error = function(e) { status_msgP(paste("Error:", e$message)) })
+  })
+
+  # ── TOP PICKS: Execute ──
+  observeEvent(input$execute_P, {
+    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
+    if (input$id_valP == "") { status_msgP("Error: Select a cluster first."); return() }
+    status_msgP("Running query...")
+
+    query <- sprintf("
+      WITH top_picks AS (
+          SELECT ticker, agg_rank, coverage_cell_count, agg_directional_score
+          FROM inference.return_cluster_ticker_summary_current
+          WHERE id = %s AND agg_rank <= %d
+      )
+      SELECT
+          tp.agg_rank,
+          tp.ticker,
+          tp.coverage_cell_count,
+          tp.agg_directional_score,
+          p.fut_lag,
+          AVG(
+              CASE
+                  WHEN p.recommendation IN ('STRONG_PICK','BUY','OUTLIER_BUY')   THEN  c.wilson_lower - 0.5
+                  WHEN p.recommendation IN ('AVOID','SIGNAL_TRAP','OUTLIER_AVOID') THEN -(c.wilson_lower - 0.5)
+              END
+          ) FILTER (
+              WHERE c.wilson_lower IS NOT NULL
+                AND p.recommendation IN
+                    ('STRONG_PICK','BUY','AVOID','SIGNAL_TRAP','OUTLIER_BUY','OUTLIER_AVOID')
+          ) AS signed_edge,
+          AVG(c.wilson_lower) FILTER (
+              WHERE c.wilson_lower IS NOT NULL
+                AND p.recommendation IN
+                    ('STRONG_PICK','BUY','AVOID','SIGNAL_TRAP','OUTLIER_BUY','OUTLIER_AVOID')
+          ) AS avg_sign_agreement,
+          COUNT(*) FILTER (
+              WHERE c.wilson_lower IS NOT NULL
+                AND p.recommendation IN
+                    ('STRONG_PICK','BUY','AVOID','SIGNAL_TRAP','OUTLIER_BUY','OUTLIER_AVOID')
+          ) AS n_directional_cells_with_cred,
+          COUNT(*) FILTER (
+              WHERE p.recommendation IN
+                  ('STRONG_PICK','BUY','AVOID','SIGNAL_TRAP','OUTLIER_BUY','OUTLIER_AVOID')
+          ) AS n_directional_cells_total,
+          COUNT(*) AS n_total_cells
+      FROM top_picks tp
+      JOIN inference.return_cluster_ticker_pair_current p
+        ON p.ticker = tp.ticker AND p.id = %s
+      LEFT JOIN analysis.ticker_cluster_segments s
+        ON s.ticker = p.ticker
+      LEFT JOIN inference.cell_credibility c
+        ON c.vol_bucket_num = s.monthly_growth_vol_z_bucket_num
+       AND c.id            = p.id
+       AND c.past_lag      = p.past_lag
+       AND c.fut_lag       = p.fut_lag
+       AND c.bucket        = p.bucket
+      GROUP BY tp.agg_rank, tp.ticker, tp.coverage_cell_count,
+               tp.agg_directional_score, p.fut_lag
+      ORDER BY tp.agg_rank, p.fut_lag;",
+      input$id_valP, input$top_n_valP, input$id_valP)
+
+    tryCatch({
+      con <- get_con(input, "P")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      res <- dbGetQuery(con, query)
+      res$agg_rank <- as.integer(res$agg_rank)
+      res$fut_lag <- as.integer(res$fut_lag)
+      res$coverage_cell_count <- as.integer(res$coverage_cell_count)
+      res$signed_edge <- as.numeric(res$signed_edge)
+      res$avg_sign_agreement <- as.numeric(res$avg_sign_agreement)
+      res$n_directional_cells_with_cred  <- as.integer(res$n_directional_cells_with_cred)
+      res$n_directional_cells_total      <- as.integer(res$n_directional_cells_total)
+      res$n_directional_cells            <- res$n_directional_cells_with_cred
+      res$n_total_cells <- as.integer(res$n_total_cells)
+      app_dataP(res)
+
+      ic_query <- sprintf("
+        SELECT
+          ROUND(mean_ic::numeric, 4) AS mean_ic,
+          ROUND(median_ic::numeric, 4) AS median_ic,
+          n_cohorts,
+          n_positive,
+          ROUND(mean_decile_spread::numeric, 4) AS mean_decile_spread
+        FROM inference.walk_forward_id_ic
+        WHERE id = %s AND fut_lag = 12;",
+        input$id_valP)
+      ic_df <- tryCatch(dbGetQuery(con, ic_query), error = function(e) NULL)
+      cluster_ic_metaP(ic_df)
+
+      status_msgP(paste("Loaded", nrow(res), "rows."))
+    }, error = function(e) { status_msgP(paste("Error:", e$message)) })
+  })
+
+  output$clusterIcDisplayP <- renderText({
+    df <- cluster_ic_metaP()
+    if (is.null(df) || nrow(df) == 0 || is.na(df$mean_ic[1])) {
+      return("Walk-forward IC: no data for this cluster (run walk_forward_ticker_ic.py)")
+    }
+    sprintf(
+      "Walk-forward IC for cluster %s (fut_lag=12, %d cohorts): mean=%.4f  median=%.4f  positive=%d/%d  decile_spread=%.4f",
+      input$id_valP,
+      as.integer(df$n_cohorts[1]),
+      as.numeric(df$mean_ic[1]),
+      as.numeric(df$median_ic[1]),
+      as.integer(df$n_positive[1]),
+      as.integer(df$n_cohorts[1]),
+      as.numeric(df$mean_decile_spread[1])
+    )
+  })
+
+  # ── TOP PICKS: Render heatmap ──
+  output$topPicksPlot <- renderPlotly({
+    req(app_dataP())
+    df <- app_dataP()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(
+      title = list(text = "No data found", font = list(color = "#f8fafc")),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+
+    df <- df[order(df$agg_rank, df$fut_lag), ]
+    row_keys <- unique(df[, c("agg_rank", "ticker", "coverage_cell_count")])
+    row_keys <- row_keys[order(row_keys$agg_rank), ]
+    row_labels <- sprintf("#%d %s (n=%d)",
+                          row_keys$agg_rank, row_keys$ticker, row_keys$coverage_cell_count)
+
+    fut_lag_vals <- sort(unique(df$fut_lag))
+    # Proportional spacing via sqrt(fut_lag) so adjacent small lags (1,2) stay
+    # similar in width while larger lags (33,54,88) get visibly wider cells.
+    # Linear axis with sqrt-positioned ticks; tick labels show real fut_lag.
+    fut_lag_pos  <- sqrt(fut_lag_vals)
+
+    z_mat   <- matrix(NA_real_, nrow = nrow(row_keys), ncol = length(fut_lag_vals),
+                      dimnames = list(row_labels, as.character(fut_lag_vals)))
+    sa_mat  <- matrix(NA_real_, nrow = nrow(row_keys), ncol = length(fut_lag_vals),
+                      dimnames = list(row_labels, as.character(fut_lag_vals)))
+    n_mat   <- matrix(NA_integer_, nrow = nrow(row_keys), ncol = length(fut_lag_vals),
+                      dimnames = list(row_labels, as.character(fut_lag_vals)))
+    for (i in seq_len(nrow(df))) {
+      row_i <- which(row_keys$agg_rank == df$agg_rank[i] & row_keys$ticker == df$ticker[i])
+      col_i <- which(fut_lag_vals == df$fut_lag[i])
+      if (length(row_i) > 0 && length(col_i) > 0) {
+        z_mat[row_i, col_i]  <- df$signed_edge[i]
+        sa_mat[row_i, col_i] <- df$avg_sign_agreement[i]
+        n_mat[row_i, col_i]  <- df$n_directional_cells[i]
+      }
+    }
+
+    max_abs <- 0.3
+
+    colorscale <- list(
+      c(0.00, '#dc2626'),
+      c(0.25, '#f97316'),
+      c(0.50, '#facc15'),
+      c(0.75, '#84cc16'),
+      c(1.00, '#16a34a')
+    )
+
+    custom_arr <- array(NA_real_, dim = c(dim(z_mat), 2))
+    custom_arr[,,1] <- sa_mat
+    custom_arr[,,2] <- n_mat
+
+    plot_ly(
+      x = fut_lag_pos, y = row_labels, z = z_mat, type = "heatmap",
+      colorscale = colorscale, zmin = -max_abs, zmax = max_abs,
+      customdata = custom_arr,
+      text = matrix(rep(as.character(fut_lag_vals), each = nrow(z_mat)), nrow = nrow(z_mat)),
+      hovertemplate = paste0(
+        "%{y}<br>",
+        "fut_lag: %{text}<br>",
+        "signed edge (wilson_lower - 0.5) x dir: %{z:.3f}<br>",
+        "avg wilson_lower: %{customdata[0]:.3f}<br>",
+        "n directional cells: %{customdata[1]}<extra></extra>"),
+      colorbar = list(
+        title = list(text = "Signed edge\n(wilson_lower\n- 0.5, × dir;\n0 = coin flip)",
+                     font = list(color = "#f8fafc")),
+        tickfont = list(color = "#94a3b8"))
+    ) %>% layout(
+      title = list(
+        text = sprintf("Cluster %s — Top %d picks: signed reliability edge (green=reliable BUY, red=reliable AVOID, yellow=coin flip)",
+                       input$id_valP, input$top_n_valP),
+        font = list(color = "#f8fafc", family = "Inter", size = 14)),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+      xaxis = list(title = "Future lag (months, sqrt-spaced)", type = "linear",
+                   tickvals = fut_lag_pos, ticktext = as.character(fut_lag_vals),
+                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+      yaxis = list(title = "Ticker (by agg_rank)", type = "category",
+                   autorange = "reversed",
+                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+      margin = list(l = 160, r = 60, b = 60, t = 60)
+    )
+  })
+
+  # ── RANK STABILITY: Reactive values ──
+  app_dataRS_slot     <- reactiveVal(NULL)
+  app_dataRS_heatmap  <- reactiveVal(NULL)
+  app_dataRS_meta     <- reactiveVal(NULL)
+  status_msgRS <- reactiveVal("Ready")
+  output$statusMessageRS <- renderText({ status_msgRS() })
+  setup_env_switcher(input, session, "RS")
+
+  observeEvent(input$connect_btnRS, {
+    if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
+    status_msgRS("Connecting...")
+    tryCatch({
+      con <- get_con(input, "RS")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      id_vals <- dbGetQuery(con,
+        "SELECT DISTINCT id FROM inference.walk_forward_pctile_summary ORDER BY id")
+      cl_choices <- c("All ids" = "ALL",
+                      setNames(as.character(id_vals$id), as.character(id_vals$id)))
+      updateSelectInput(session, "id_valRS", choices = cl_choices, selected = "ALL")
+      cutoff_bounds <- dbGetQuery(con,
+        "SELECT MIN(train_cutoff_date) AS min_d, MAX(train_cutoff_date) AS max_d
+         FROM inference.walk_forward_ticker_rank")
+      if (!is.na(cutoff_bounds$min_d[1]) && !is.na(cutoff_bounds$max_d[1])) {
+        updateDateRangeInput(session, "cutoff_rangeRS",
+                             start = cutoff_bounds$min_d[1],
+                             end   = cutoff_bounds$max_d[1],
+                             min   = cutoff_bounds$min_d[1],
+                             max   = cutoff_bounds$max_d[1])
+      }
+      status_msgRS("Filters loaded!")
+    }, error = function(e) { status_msgRS(paste("Error:", e$message)) })
+  })
+
+  observeEvent(input$execute_RS, {
+    if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
+    if (is.null(input$id_valRS) || input$id_valRS == "") {
+      status_msgRS("Error: Select a cluster (or 'All clusters') first."); return()
+    }
+    status_msgRS("Running queries...")
+    date_lo <- format(input$cutoff_rangeRS[1], "%Y-%m-%d")
+    date_hi <- format(input$cutoff_rangeRS[2], "%Y-%m-%d")
+    slot_cluster_filter <- if (input$id_valRS == "ALL") "" else
+      sprintf("AND m.id = %s", input$id_valRS)
+
+    slot_query <- sprintf("
+      SELECT
+        r.rank_within_cluster,
+        COUNT(*) AS n_obs,
+        AVG(r.forward_return) AS mean_fwd,
+        STDDEV(r.forward_return) AS sd_fwd
+      FROM inference.walk_forward_ticker_rank r
+      JOIN inference.walk_forward_cluster_id_map m
+        ON m.train_cutoff_date = r.train_cutoff_date
+       AND m.cluster_id = r.cluster_id
+      WHERE r.train_cutoff_date BETWEEN '%s' AND '%s' %s
+      GROUP BY r.rank_within_cluster
+      ORDER BY r.rank_within_cluster;",
+      date_lo, date_hi, slot_cluster_filter)
+
+    summary_cluster_filter <- if (input$id_valRS == "ALL") "" else
+      sprintf("AND id = %s", input$id_valRS)
+    metric_col <- input$metric_valRS
+    # combo_quadrants is computed in R (needs both hit_rate and median_return),
+    # not a column in the table. Use a special SQL that returns both, then
+    # combine in the render function.
+    if (metric_col == "combo_quadrants") {
+      # Align median per-cluster INSIDE the aggregation (long: +1, short: -1),
+      # otherwise the weighted average of raw medians across long+short clusters
+      # cancels out when ALL ids are selected.
+      topn_query <- sprintf("
+        SELECT
+          pctile_bin AS rank_within_cluster,
+          fut_lag,
+          SUM(hit_rate * n_obs) / NULLIF(SUM(n_obs), 0) AS hit_rate,
+          SUM(
+            (CASE WHEN id <= 12 THEN median_return ELSE -median_return END)
+            * n_obs
+          ) / NULLIF(SUM(n_obs), 0) AS aligned_median,
+          SUM(n_obs) AS n_tickers
+        FROM inference.walk_forward_pctile_summary
+        WHERE pctile_bin <= %d
+          AND fut_lag <= 88
+          %s
+        GROUP BY pctile_bin, fut_lag
+        ORDER BY pctile_bin, fut_lag;",
+        input$top_n_valRS, summary_cluster_filter)
+    } else {
+      metric_expr <- if (metric_col %in% c("hit_rate", "sharpe_like", "median_return")) {
+        sprintf("AVG(%s)", metric_col)
+      } else {
+        sprintf("SUM(%s * n_obs) / NULLIF(SUM(n_obs), 0)", metric_col)
+      }
+      topn_query <- sprintf("
+        SELECT
+          pctile_bin AS rank_within_cluster,
+          fut_lag,
+          %s AS realized_return,
+          SUM(n_obs) AS n_tickers
+        FROM inference.walk_forward_pctile_summary
+        WHERE pctile_bin <= %d
+          AND fut_lag <= 88
+          %s
+        GROUP BY pctile_bin, fut_lag
+        ORDER BY pctile_bin, fut_lag;",
+        metric_expr, input$top_n_valRS, summary_cluster_filter)
+    }
+
+    tryCatch({
+      con <- get_con(input, "RS")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      slot_df <- dbGetQuery(con, slot_query)
+      slot_df$rank_within_cluster <- as.integer(slot_df$rank_within_cluster)
+      slot_df$mean_fwd <- as.numeric(slot_df$mean_fwd)
+      slot_df$sd_fwd   <- as.numeric(slot_df$sd_fwd)
+      slot_df$n_obs    <- as.integer(slot_df$n_obs)
+      app_dataRS_slot(slot_df)
+
+      hm_df <- dbGetQuery(con, topn_query)
+      if (nrow(hm_df) == 0) {
+        app_dataRS_heatmap(data.frame())
+      } else {
+        hm_df$fut_lag           <- as.integer(hm_df$fut_lag)
+        hm_df$rank_within_cluster <- as.integer(hm_df$rank_within_cluster)
+        hm_df$n_tickers         <- as.integer(hm_df$n_tickers)
+        if (metric_col == "combo_quadrants") {
+          # Median was already aligned per-cluster inside the SQL aggregation.
+          hm_df$hit_rate <- as.numeric(hm_df$hit_rate)
+          hm_df$aligned_median <- as.numeric(hm_df$aligned_median)
+          hm_df$realized_return <- ifelse(
+            hm_df$hit_rate > 0.5 & hm_df$aligned_median > 0, 0.875,
+            ifelse(hm_df$hit_rate <= 0.5 & hm_df$aligned_median > 0, 0.625,
+              ifelse(hm_df$hit_rate > 0.5 & hm_df$aligned_median <= 0, 0.375,
+                0.125)))
+        } else {
+          hm_df$realized_return <- as.numeric(hm_df$realized_return)
+        }
+        app_dataRS_heatmap(hm_df)
+      }
+
+      n_cut_filter <- if (input$id_valRS == "ALL") "" else
+        sprintf("AND m.id = %s", input$id_valRS)
+      n_cut <- dbGetQuery(con, sprintf("
+        SELECT COUNT(DISTINCT r.train_cutoff_date) AS n
+        FROM inference.walk_forward_ticker_rank r
+        JOIN inference.walk_forward_cluster_id_map m
+          ON m.train_cutoff_date = r.train_cutoff_date
+         AND m.cluster_id = r.cluster_id
+        WHERE r.train_cutoff_date BETWEEN '%s' AND '%s' %s;",
+        date_lo, date_hi, n_cut_filter))$n[1]
+      app_dataRS_meta(list(n_cutoffs = n_cut, lo = date_lo, hi = date_hi,
+                           cluster = input$id_valRS,
+                           metric = input$metric_valRS))
+      status_msgRS(sprintf("Loaded: %d slot rows, %d cutoffs.",
+                           as.integer(nrow(slot_df)), as.integer(n_cut)))
+    }, error = function(e) { status_msgRS(paste("Error:", e$message)) })
+  })
+
+  output$cutoffCountRS <- renderText({
+    meta <- app_dataRS_meta()
+    if (is.null(meta)) return("")
+    sprintf("Cluster filter: %s   |   %d distinct cutoffs in window [%s -> %s]",
+            meta$cluster, as.integer(meta$n_cutoffs), meta$lo, meta$hi)
+  })
+
+  output$slotPerfPlotRS <- renderPlotly({
+    req(app_dataRS_slot())
+    df <- app_dataRS_slot()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(
+      title = list(text = "No data", font = list(color = "#f8fafc")),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    df$se <- df$sd_fwd / sqrt(pmax(df$n_obs, 1))
+    plot_ly(df, x = ~rank_within_cluster, y = ~mean_fwd,
+            type = "scatter", mode = "lines+markers",
+            error_y = list(type = "data", array = ~se,
+                           color = "rgba(148,163,184,0.5)"),
+            marker = list(size = 8, color = "#38bdf8"),
+            line = list(color = "#38bdf8", width = 2),
+            hovertemplate = paste0(
+              "rank slot: %{x}<br>",
+              "mean fwd return: %{y:.4f}<br>",
+              "n obs: %{customdata}<extra></extra>"),
+            customdata = ~n_obs) %>%
+      layout(
+        paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+        xaxis = list(title = "rank_within_cluster (1 = top)",
+                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+        yaxis = list(title = "Mean forward return (+/- SE)",
+                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)",
+                     zeroline = TRUE, zerolinecolor = "rgba(255,255,255,0.25)"),
+        margin = list(l = 70, r = 30, b = 50, t = 30))
+  })
+
+  output$stabilityHeatmapRS <- renderPlotly({
+    req(app_dataRS_heatmap())
+    df <- app_dataRS_heatmap()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(
+      title = list(text = "No tickers met threshold", font = list(color = "#f8fafc")),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    fut_lags <- sort(unique(df$fut_lag))
+    ranks    <- sort(unique(df$rank_within_cluster))
+    z_mat <- matrix(NA_real_, nrow = length(ranks), ncol = length(fut_lags),
+                    dimnames = list(as.character(ranks), as.character(fut_lags)))
+    n_mat <- matrix(NA_integer_, nrow = length(ranks), ncol = length(fut_lags),
+                    dimnames = list(as.character(ranks), as.character(fut_lags)))
+    for (i in seq_len(nrow(df))) {
+      r <- which(ranks == df$rank_within_cluster[i])
+      c <- which(fut_lags == df$fut_lag[i])
+      if (length(r) && length(c)) {
+        z_mat[r, c] <- df$realized_return[i]
+        n_mat[r, c] <- df$n_tickers[i]
+      }
+    }
+    metric <- isolate(app_dataRS_meta()$metric)
+    if (is.null(metric)) metric <- "mean_return"
+    if (metric == "hit_rate") {
+      # purple → yellow → teal centered at coin flip 0.5
+      colorscale <- list(
+        c(0.00, '#762a83'),
+        c(0.25, '#c2a5cf'),
+        c(0.50, '#f7f7b6'),
+        c(0.75, '#5ab4ac'),
+        c(1.00, '#01665e')
+      )
+      max_abs <- 0.2
+      z_center <- 0.5
+    } else if (metric == "sharpe_like") {
+      colorscale <- list(
+        c(0.00, '#dc2626'),
+        c(0.25, '#f97316'),
+        c(0.50, '#facc15'),
+        c(0.75, '#84cc16'),
+        c(1.00, '#16a34a')
+      )
+      max_abs <- 1
+      z_center <- 0
+    } else if (metric == "combo_quadrants") {
+      # Discrete bands: gray (neither), blue (hit only),
+      # gold (median only = Bessembinder), green (both high).
+      colorscale <- list(
+        c(0.00, '#888888'), c(0.25, '#888888'),
+        c(0.25, '#3b82f6'), c(0.50, '#3b82f6'),
+        c(0.50, '#f59e0b'), c(0.75, '#f59e0b'),
+        c(0.75, '#10b981'), c(1.00, '#10b981')
+      )
+      max_abs <- 0.5
+      z_center <- 0.5
+    } else {
+      colorscale <- list(
+        c(0.00, '#dc2626'),
+        c(0.25, '#f97316'),
+        c(0.50, '#facc15'),
+        c(0.75, '#84cc16'),
+        c(1.00, '#16a34a')
+      )
+      max_abs <- 50
+      p95 <- quantile(abs(z_mat - 0), 0.95, na.rm = TRUE)
+      if (is.finite(p95) && p95 > 0) max_abs <- min(max_abs, max(p95, 5))
+      z_center <- 0
+    }
+    metric_label <- switch(metric,
+      "hit_rate" = "Hit rate\n(coin flip = 0.5)",
+      "sharpe_like" = "Sharpe-like\n(mean/sd)",
+      "median_return" = "Median\nreturn",
+      "combo_quadrants" = "Quadrant\n0.875=both high\n0.625=median only\n(Bessembinder)\n0.375=hit only\n0.125=neither",
+      "Mean\nrealized\nreturn")
+    fut_lag_pos <- fut_lags   # linear spacing: cell width proportional to actual horizon
+    text_mat <- matrix(rep(as.character(fut_lags), each = nrow(z_mat)), nrow = nrow(z_mat))
+    plot_ly(
+      x = fut_lag_pos, y = as.character(ranks), z = z_mat, type = "heatmap",
+      colorscale = colorscale,
+      xgap = 1, ygap = 1,
+      zmin = z_center - max_abs, zmax = z_center + max_abs,
+      customdata = n_mat,
+      text = text_mat,
+      hovertemplate = paste0(
+        "rank: %{y}<br>",
+        "fut_lag: %{text}<br>",
+        metric_label, ": %{z:.4f}<br>",
+        "n observations: %{customdata}<extra></extra>"),
+      colorbar = list(
+        title = list(text = metric_label, font = list(color = "#f8fafc")),
+        tickfont = list(color = "#94a3b8"))
+    ) %>% layout(
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+      xaxis = list(title = "fut_lag (months, to scale)", type = "linear",
+                   tickvals = fut_lag_pos, ticktext = as.character(fut_lags),
+                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+      yaxis = list(title = "vingtile (1 = top 5%, 20 = bottom 5%)",
+                   type = "category",
+                   autorange = "reversed",
+                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+      margin = list(l = 90, r = 60, b = 60, t = 30))
+  })
+
+  # ── RANK STABILITY: Small-multiples grid of all ids ──
+  app_dataRS_allIds <- reactiveVal(NULL)
+
+  observeEvent(input$execute_all_RS, {
+    if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
+    status_msgRS("Querying all ids...")
+    tryCatch({
+      con <- get_con(input, "RS")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      df <- dbGetQuery(con, "
+        SELECT id, pctile_bin, fut_lag, mean_return, median_return, hit_rate, sharpe_like, n_obs
+        FROM inference.walk_forward_pctile_summary
+        WHERE fut_lag <= 88
+        ORDER BY id, pctile_bin, fut_lag;")
+      df$id <- as.integer(df$id)
+      df$pctile_bin <- as.integer(df$pctile_bin)
+      df$fut_lag <- as.integer(df$fut_lag)
+      df$mean_return <- as.numeric(df$mean_return)
+      df$median_return <- as.numeric(df$median_return)
+      df$hit_rate <- as.numeric(df$hit_rate)
+      df$sharpe_like <- as.numeric(df$sharpe_like)
+      df$active_metric <- input$metric_valRS
+      app_dataRS_allIds(df)
+      status_msgRS(sprintf("Loaded all ids: %d rows across %d distinct ids.",
+                           as.integer(nrow(df)),
+                           as.integer(length(unique(df$id)))))
+    }, error = function(e) { status_msgRS(paste("Error:", e$message)) })
+  })
+
+  output$allIdsGridRS <- renderPlotly({
+    req(app_dataRS_allIds())
+    df_subset <- app_dataRS_allIds()
+    if (nrow(df_subset) == 0) return(plot_ly() %>% layout(
+      title = list(text = "No data", font = list(color = "#f8fafc")),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+
+    metric_col <- df_subset$active_metric[1]
+    if (is.null(metric_col) || is.na(metric_col)) metric_col <- "mean_return"
+
+    if (metric_col == "hit_rate") {
+      df_subset$signal <- df_subset$hit_rate - 0.5
+      max_abs <- 0.2
+      z_center <- 0
+    } else if (metric_col == "sharpe_like") {
+      df_subset$direction_sign <- ifelse(df_subset$id <= 12, 1, -1)
+      df_subset$signal <- df_subset$direction_sign * df_subset$sharpe_like
+      max_abs <- 1
+      z_center <- 0
+    } else if (metric_col == "combo_quadrants") {
+      # Quadrant categorical view: hit_rate (already direction-aligned in
+      # pctile_summary) crossed with aligned median return. Bessembinder cells
+      # show up as MEDIAN ONLY (low hit but positive median = rare big wins).
+      df_subset$direction_sign <- ifelse(df_subset$id <= 12, 1, -1)
+      df_subset$aligned_median <- df_subset$direction_sign * df_subset$median_return
+      df_subset$signal <- ifelse(
+        df_subset$hit_rate > 0.5 & df_subset$aligned_median > 0, 0.875,
+        ifelse(df_subset$hit_rate <= 0.5 & df_subset$aligned_median > 0, 0.625,
+          ifelse(df_subset$hit_rate > 0.5 & df_subset$aligned_median <= 0, 0.375,
+            0.125)))
+      max_abs <- 1
+      z_center <- 0.5
+    } else {
+      val_col <- if (metric_col == "median_return") "median_return" else "mean_return"
+      df_subset$val <- df_subset[[val_col]]
+      horizon_median <- aggregate(val ~ fut_lag, data = df_subset,
+                                  FUN = function(x) median(x, na.rm = TRUE))
+      names(horizon_median)[2] <- "horizon_median"
+      df_subset <- merge(df_subset, horizon_median, by = "fut_lag", all.x = TRUE)
+      df_subset$direction_sign <- ifelse(df_subset$id <= 12, 1, -1)
+      df_subset$signal <- df_subset$direction_sign *
+                         (df_subset$val - df_subset$horizon_median)
+      max_abs <- 10
+      p90 <- quantile(abs(df_subset$signal), 0.90, na.rm = TRUE)
+      if (is.finite(p90) && p90 > 0) max_abs <- min(max_abs, max(p90, 3))
+      z_center <- 0
+    }
+    colorscale <- if (metric_col == "hit_rate") list(
+      c(0.00, '#762a83'),
+      c(0.25, '#c2a5cf'),
+      c(0.50, '#f7f7b6'),
+      c(0.75, '#5ab4ac'),
+      c(1.00, '#01665e')
+    ) else if (metric_col == "combo_quadrants") list(
+      # Four discrete bands: gray (neither), blue (hit only),
+      # gold (median only = Bessembinder), green (both high)
+      c(0.00, '#888888'), c(0.25, '#888888'),
+      c(0.25, '#3b82f6'), c(0.50, '#3b82f6'),
+      c(0.50, '#f59e0b'), c(0.75, '#f59e0b'),
+      c(0.75, '#10b981'), c(1.00, '#10b981')
+    ) else list(
+      c(0.00, '#dc2626'),
+      c(0.25, '#f97316'),
+      c(0.50, '#facc15'),
+      c(0.75, '#84cc16'),
+      c(1.00, '#16a34a')
+    )
+
+    ids <- sort(unique(df_subset$id))
+    n_ids <- length(ids)
+    n_cols <- 4
+    n_rows <- ceiling(n_ids / n_cols)
+
+    # Consistent axes across all subplots: full vingtile range 1-20, fut_lag from data
+    all_ranks <- 1:20
+    all_fut_lags <- sort(unique(df_subset$fut_lag))
+    all_fut_lag_pos <- sqrt(all_fut_lags)
+
+    plots <- lapply(ids, function(this_id) {
+      sub <- df_subset[df_subset$id == this_id, ]
+      # Pad to full vingtile range so all subplots have same axis
+      z_mat <- matrix(NA_real_, nrow = length(all_ranks), ncol = length(all_fut_lags),
+                      dimnames = list(as.character(all_ranks), as.character(all_fut_lags)))
+      for (i in seq_len(nrow(sub))) {
+        r <- which(all_ranks == sub$pctile_bin[i])
+        c <- which(all_fut_lags == sub$fut_lag[i])
+        if (length(r) && length(c)) z_mat[r, c] <- sub$signal[i]
+      }
+      # Reverse rows so vingtile 1 is at top of plot (matches single-id view)
+      z_mat_rev <- z_mat[rev(seq_len(nrow(z_mat))), , drop = FALSE]
+      text_mat <- matrix(rep(as.character(all_fut_lags), each = nrow(z_mat_rev)),
+                         nrow = nrow(z_mat_rev))
+      # combo_quadrants uses categorical [0,1] range; others use centered [-max_abs, max_abs]
+      zmin_val <- if (metric_col == "combo_quadrants") 0 else -max_abs
+      zmax_val <- if (metric_col == "combo_quadrants") 1 else  max_abs
+      plot_ly(
+        x = all_fut_lag_pos,
+        y = rev(as.character(all_ranks)),
+        z = z_mat_rev,
+        type = "heatmap", colorscale = colorscale,
+        zmin = zmin_val, zmax = zmax_val, showscale = FALSE,
+        xgap = 1, ygap = 1,
+        text = text_mat,
+        hovertemplate = if (metric_col == "combo_quadrants") paste0(
+          "id ", this_id,
+          " (", ifelse(this_id <= 12, "long", "short"), ")",
+          "<br>vingtile: %{y}<br>fut_lag: %{text}<br>",
+          "0.125=neither | 0.375=hit-only | 0.625=median-only (Bessembinder) | 0.875=both-high",
+          "<br>value: %{z:.3f}<extra></extra>") else paste0(
+          "id ", this_id,
+          " (", ifelse(this_id <= 12, "long", "short"), ")",
+          "<br>vingtile: %{y}<br>fut_lag: %{text}<br>",
+          "model-aligned signal: %{z:+.2f}<extra></extra>")
+      ) %>% layout(
+        annotations = list(
+          list(text = paste0("id ", this_id),
+               xref = "paper", yref = "paper", x = 0.5, y = 1.05,
+               showarrow = FALSE,
+               font = list(color = "#f8fafc", size = 11, family = "Inter"))
+        ),
+        yaxis = list(type = "category",
+                     categoryorder = "array",
+                     categoryarray = rev(as.character(all_ranks)),
+                     tickvals = c("1","5","10","15","20"),
+                     showgrid = FALSE, zeroline = FALSE,
+                     color = "#94a3b8", tickfont = list(size = 8)),
+        xaxis = list(type = "linear",
+                     tickvals = all_fut_lag_pos,
+                     ticktext = as.character(all_fut_lags),
+                     showgrid = FALSE, zeroline = FALSE,
+                     color = "#94a3b8", tickfont = list(size = 8))
+      )
+    })
+
+    subplot(plots, nrows = n_rows, shareX = FALSE, shareY = FALSE,
+            margin = 0.025, titleY = TRUE) %>%
+      layout(
+        paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+        showlegend = FALSE,
+        font = list(color = "#94a3b8", size = 9),
+        margin = list(l = 40, r = 30, b = 40, t = 40))
+  })
 }
 
-# Run the application 
+# Run the application
 runApp(list(ui = ui, server = server), host="0.0.0.0", port=3838)
