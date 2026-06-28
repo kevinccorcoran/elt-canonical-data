@@ -18,6 +18,12 @@ AlphaStream is split into two repositories:
 - Two pipeline setups: local and cloud (production)
 - Three databases: dev and staging (local), prod (managed)
 
+## Pipeline
+
+![Pipeline](tools/pipeline_grouped.png)
+
+The end-to-end flow grouped by stage: data is pulled in, screened for quality, standardized into a canonical layer, then turned into metrics, clusters, and forecasts that walk-forward backtesting validates before the dashboard serves them.
+
 ## Data Lineage
 
 ### ELT — Canonical Data
