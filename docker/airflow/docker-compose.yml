@@ -13,6 +13,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DATABASE_URL}
     PROJECT_ROOT: /opt/elt-canonical-data
     PYTHONPATH: /opt/elt-canonical-data/src
+    QUALSTREAM_ROOT: /opt/qualstream
   volumes:
     - ../../airflow/dags:/opt/airflow/dags
     - ../../src:/opt/elt-canonical-data/src
@@ -21,6 +22,7 @@ x-airflow-common: &airflow-common
     - ../../tools:/opt/elt-canonical-data/tools
     - ../../.dbt:/home/airflow/.dbt
     - ../../../elt-inference-models:/opt/elt-inference-models
+    - ../../../qualstream:/opt/qualstream
     - ../../scripts:/opt/airflow/scripts
   depends_on:
     postgres:
@@ -96,14 +98,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: >
-      bash -c "
-        Rscript /opt/airflow/scripts/app.R > /opt/airflow/scripts/shiny.log 2>&1 &
-        SHINY_PID=$$!;
-        Rscript /opt/airflow/scripts/app_violin.R > /opt/airflow/scripts/shiny_violin.log 2>&1 &
-        VIOLIN_PID=$$!;
-        wait -n $$SHINY_PID $$VIOLIN_PID
-      "
+    # Resilient launcher: app.R in a restart loop (crash/OOM self-heals) plus a
+    # watchdog that restarts it if 3838 stops responding (hang self-heals).
+    command: bash /opt/airflow/scripts/shiny_entrypoint.sh
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 8 http://localhost:3838/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     ports:
       - "3838:3838"
-      - "3839:3839"

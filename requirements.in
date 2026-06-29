@@ -29,3 +29,8 @@ scikit-learn
 # dbt hard constraints (REQUIRED)
 pathspec<0.13
 sqlparse<0.5.5
+
+# qualstream (LLM qualitative grader -- shelled out from the qual_ticker_grades_weekly DAG)
+anthropic>=0.49
+psycopg[binary]>=3.1
+python-dotenv>=1.0
