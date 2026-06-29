@@ -595,9 +595,15 @@ ui <- navbarPage(
            style = "color: #f8fafc; font-weight: 600;"),
         plotlyOutput("slotPerfPlotRS", height = "380px"),
         tags$br(),
-        h5("Vingtile (5% bin) vs fut_lag heatmap - mean realized return at each (vingtile, horizon) across 84 cohorts. Rank normalized to within-cluster vingtile so different cluster sizes compare fairly.",
-           style = "color: #f8fafc; font-weight: 600;"),
-        plotlyOutput("stabilityHeatmapRS", height = "800px"),
+        div(style = "display: flex; align-items: center; gap: 0.75rem;",
+            h5("Vingtile (5% bin) vs fut_lag heatmap - mean realized return at each (vingtile, horizon) across 84 cohorts. Rank normalized to within-cluster vingtile so different cluster sizes compare fairly.",
+               style = "color: #f8fafc; font-weight: 600; margin: 0; flex: 1;"),
+            checkboxInput("show_vingtile_heatmap", "Show", value = TRUE)
+        ),
+        conditionalPanel(
+          condition = "input.show_vingtile_heatmap",
+          plotlyOutput("stabilityHeatmapRS", height = "800px")
+        ),
         tags$br(),
         actionButton("execute_all_RS", "Generate small-multiples for ALL ids",
                      class = "btn-primary", style = "margin-bottom: 1rem;"),
