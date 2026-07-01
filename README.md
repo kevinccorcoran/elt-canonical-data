@@ -64,11 +64,11 @@ Supports:
 
 ![Rank Stability across walk-forward cohorts](tools/rank_stability.jpg)
 
-Small multiples of rank stability across 84 walk-forward cohorts, one heatmap per cluster id. Each cell is the mean realized forward return at a given vingtile (5% rank bin) and horizon, normalized within cluster so clusters of different sizes compare fairly.
+Small multiples of rank stability across 84 walk-forward cohorts, one heatmap per cluster id. Each cell combines two signals at a given vingtile (5% rank bin) and horizon: whether the median beat its benchmark and whether the forecast direction was correct.
 
 Supports:
-- Sign-adjusted coloring, so green always means the model was right (longs that rose, shorts that fell).
-- Long ids and short ids shown together, with quadrant shading for hit rate and median.
+- Green means the model was right: the median beat the benchmark and the forecast direction was correct.
+- Longs (id 1-12) shade green when both hold; shorts (id 13-19) shade purple when the short worked.
 - Filtering by environment, cluster, vingtile depth, metric, and cutoff range.
 
 ## Project Timeline
