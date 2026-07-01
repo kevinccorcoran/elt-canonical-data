@@ -537,7 +537,7 @@ ui <- navbarPage(
                    color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
                    margin-bottom: 0.75rem;",
           "Rows: top-N tickers by agg_rank in the selected cluster (rank 1 at top). ",
-          "Columns: fut_lag (1 to 54 months). ",
+          "Columns: fut_lag (1 to 33 months). ",
           "Color: SIGNED RELIABILITY EDGE = (wilson_lower - 0.5) x direction, averaged over cells with a directional vote. ",
           "wilson_lower is the conservative lower bound of the walk-forward agreement rate, so thin-sample cells get penalized vs dense-sample cells with the same raw agreement. ",
           "Bright green = reliable BUY with dense evidence. Bright red = reliable AVOID with dense evidence. Yellow = vote near coin flip OR thin-evidence cell whose raw agreement is high but wilson_lower is modest. Blank = no directional vote. ",
@@ -1738,7 +1738,7 @@ server <- function(input, output, session) {
 
     fut_lag_vals <- sort(unique(df$fut_lag))
     # Proportional spacing via sqrt(fut_lag) so adjacent small lags (1,2) stay
-    # similar in width while larger lags (33,54,88) get visibly wider cells.
+    # similar in width while larger lags (20,33) get visibly wider cells.
     # Linear axis with sqrt-positioned ticks; tick labels show real fut_lag.
     fut_lag_pos  <- sqrt(fut_lag_vals)
 
@@ -1836,6 +1836,27 @@ server <- function(input, output, session) {
     }, error = function(e) { status_msgRS(paste("Error:", e$message)) })
   })
 
+  # Auto-tier the display depth to the selected cluster's size: 5 / 10 / 20.
+  observeEvent(input$id_valRS, {
+    id_sel <- input$id_valRS
+    if (is.null(id_sel) || id_sel == "" || id_sel == "ALL") {
+      updateSliderInput(session, "top_n_valRS", value = 20); return()
+    }
+    con <- tryCatch(get_con(input, "RS"), error = function(e) NULL)
+    if (is.null(con)) return()
+    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+    med <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY r.cluster_size) AS med
+       FROM inference.walk_forward_ticker_rank r
+       JOIN inference.walk_forward_cluster_id_map m
+         ON m.train_cutoff_date = r.train_cutoff_date AND m.cluster_id = r.cluster_id
+       WHERE m.id = %s AND r.fut_lag = 12;", id_sel))$med[1],
+      error = function(e) NA_real_)
+    if (length(med) == 0 || is.na(med)) return()
+    tier <- if (med >= 20) 20L else if (med >= 10) 10L else 5L
+    updateSliderInput(session, "top_n_valRS", value = tier)
+  }, ignoreInit = TRUE)
+
   observeEvent(input$execute_RS, {
     if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
     if (is.null(input$id_valRS) || input$id_valRS == "") {
@@ -1884,7 +1905,7 @@ server <- function(input, output, session) {
           SUM(n_obs) AS n_tickers
         FROM inference.walk_forward_pctile_summary
         WHERE pctile_bin <= %d
-          AND fut_lag <= 88
+          AND fut_lag <= 33
           %s
         GROUP BY pctile_bin, fut_lag
         ORDER BY pctile_bin, fut_lag;",
@@ -1904,7 +1925,7 @@ server <- function(input, output, session) {
           SUM(n_obs) AS n_tickers
         FROM inference.walk_forward_pctile_summary
         WHERE pctile_bin <= %d
-          AND fut_lag <= 88
+          AND fut_lag <= 33
           %s
         GROUP BY pctile_bin, fut_lag
         ORDER BY pctile_bin, fut_lag;",
@@ -1923,7 +1944,7 @@ server <- function(input, output, session) {
           SUM(n_obs) AS n_tickers
         FROM inference.walk_forward_pctile_summary
         WHERE pctile_bin <= %d
-          AND fut_lag <= 88
+          AND fut_lag <= 33
           %s
         GROUP BY pctile_bin, fut_lag
         ORDER BY pctile_bin, fut_lag;",
@@ -2143,7 +2164,7 @@ server <- function(input, output, session) {
       df <- dbGetQuery(con, "
         SELECT id, pctile_bin, fut_lag, mean_return, median_return, hit_rate, sharpe_like, n_obs
         FROM inference.walk_forward_pctile_summary
-        WHERE fut_lag <= 88
+        WHERE fut_lag <= 33
         ORDER BY id, pctile_bin, fut_lag;")
       df$id <- as.integer(df$id)
       df$pctile_bin <- as.integer(df$pctile_bin)
@@ -2152,6 +2173,19 @@ server <- function(input, output, session) {
       df$median_return <- as.numeric(df$median_return)
       df$hit_rate <- as.numeric(df$hit_rate)
       df$sharpe_like <- as.numeric(df$sharpe_like)
+      tiers <- dbGetQuery(con, "
+        SELECT m.id AS id,
+               CASE WHEN percentile_cont(0.5) WITHIN GROUP (ORDER BY r.cluster_size) >= 20 THEN 20
+                    WHEN percentile_cont(0.5) WITHIN GROUP (ORDER BY r.cluster_size) >= 10 THEN 10
+                    ELSE 5 END AS tier
+        FROM inference.walk_forward_ticker_rank r
+        JOIN inference.walk_forward_cluster_id_map m
+          ON m.train_cutoff_date = r.train_cutoff_date AND m.cluster_id = r.cluster_id
+        WHERE r.fut_lag = 12
+        GROUP BY m.id;")
+      tier_map <- setNames(as.integer(tiers$tier), as.character(as.integer(tiers$id)))
+      df$tier <- tier_map[as.character(df$id)]
+      df$tier[is.na(df$tier)] <- 20L
       df$active_metric <- input$metric_valRS
       app_dataRS_allIds(df)
       status_msgRS(sprintf("Loaded all ids: %d rows across %d distinct ids.",
@@ -2166,6 +2200,24 @@ server <- function(input, output, session) {
     if (nrow(df_subset) == 0) return(plot_ly() %>% layout(
       title = list(text = "No data", font = list(color = "#f8fafc")),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+
+    # Adaptive bins: collapse the 20 vingtiles into each cluster's tier (5/10/20)
+    # so small clusters render fewer rows. Rebin the raw metrics (weighted by
+    # n_obs) BEFORE the signal is derived, so the quadrant recomputes on the
+    # merged bin instead of averaging categorical codes.
+    if (!is.null(df_subset$tier)) {
+      df_subset$pctile_bin <- pmax(1L, as.integer(ceiling(df_subset$pctile_bin * df_subset$tier / 20)))
+      df_subset <- df_subset %>%
+        group_by(id, tier, pctile_bin, fut_lag, active_metric) %>%
+        summarise(
+          mean_return   = weighted.mean(mean_return,   n_obs, na.rm = TRUE),
+          median_return = weighted.mean(median_return, n_obs, na.rm = TRUE),
+          hit_rate      = weighted.mean(hit_rate,      n_obs, na.rm = TRUE),
+          sharpe_like   = weighted.mean(sharpe_like,   n_obs, na.rm = TRUE),
+          n_obs         = sum(n_obs, na.rm = TRUE),
+          .groups = "drop") %>%
+        as.data.frame()
+    }
 
     metric_col <- df_subset$active_metric[1]
     if (is.null(metric_col) || is.na(metric_col)) metric_col <- "mean_return"
@@ -2243,6 +2295,9 @@ server <- function(input, output, session) {
 
     plots <- lapply(ids, function(this_id) {
       sub <- df_subset[df_subset$id == this_id, ]
+      # Per-cluster row count: 5 / 10 / 20 by its tier (shadows the outer 1:20).
+      this_tier <- if (!is.null(sub$tier) && length(sub$tier) && !is.na(sub$tier[1])) sub$tier[1] else 20L
+      all_ranks <- 1:this_tier
       # Pad to full vingtile range so all subplots have same axis
       z_mat <- matrix(NA_real_, nrow = length(all_ranks), ncol = length(all_fut_lags),
                       dimnames = list(as.character(all_ranks), as.character(all_fut_lags)))
