@@ -568,7 +568,8 @@ ui <- navbarPage(
                                 "Median return" = "median_return",
                                 "Hit rate (% correct direction)" = "hit_rate",
                                 "Sharpe-like (mean/sd)" = "sharpe_like",
-                                "Combo: hit + median (quadrants)" = "combo_quadrants"),
+                                "Combo: hit + median (quadrants)" = "combo_quadrants",
+                                "Combo: hit + mean (quadrants)" = "combo_mean_quadrants"),
                     selected = "mean_return"),
         dateRangeInput("cutoff_rangeRS", "Cutoff range",
                        start = NULL, end = NULL,
@@ -591,9 +592,15 @@ ui <- navbarPage(
         ),
         textOutput("cutoffCountRS"),
         tags$br(),
-        h5("Slot performance - mean realized forward return per rank slot",
-           style = "color: #f8fafc; font-weight: 600;"),
-        plotlyOutput("slotPerfPlotRS", height = "380px"),
+        div(style = "display: flex; align-items: center; gap: 0.75rem;",
+            h5("Slot performance - mean realized forward return per rank slot",
+               style = "color: #f8fafc; font-weight: 600; margin: 0; flex: 1;"),
+            checkboxInput("show_slot_perf", "Show", value = TRUE)
+        ),
+        conditionalPanel(
+          condition = "input.show_slot_perf",
+          plotlyOutput("slotPerfPlotRS", height = "380px")
+        ),
         tags$br(),
         div(style = "display: flex; align-items: center; gap: 0.75rem;",
             h5("Vingtile (5% bin) vs fut_lag heatmap - mean realized return at each (vingtile, horizon) across 84 cohorts. Rank normalized to within-cluster vingtile so different cluster sizes compare fairly.",
@@ -607,7 +614,7 @@ ui <- navbarPage(
         tags$br(),
         actionButton("execute_all_RS", "Generate small-multiples for ALL ids",
                      class = "btn-primary", style = "margin-bottom: 1rem;"),
-        h5("All 19 ids - green = model was right (sign-adjusted: longs up = green, shorts down = green). For combo: gray=neither, blue=hit only, gold=median-only (Bessembinder), green=both high.",
+        h5("All 19 ids - green = model was right (sign-adjusted: longs up = green, shorts down = profitable short). Combo - longs (id 1-12): gray=neither, blue=hit only, gold=Bessembinder, green=both high. Shorts (id 13-19): gray=neither, light purple=hit only, medium purple=Bessembinder, deep purple=both high (shorting worked).",
            style = "color: #f8fafc; font-weight: 600;"),
         plotlyOutput("allIdsGridRS", height = "1200px")
       ))
@@ -619,15 +626,35 @@ ui <- navbarPage(
 get_con <- function(input, suffix) {
   env   <- input[[paste0("db_env", suffix)]]
   db_string <- if (env == "Production") "prod" else if (env == "Staging") "staging" else "dev"
-  con <- dbConnect(RPostgres::Postgres(),
-    dbname   = db_string,
-    host     = input[[paste0("db_host", suffix)]],
-    port     = as.integer(input[[paste0("db_port", suffix)]]),
-    user     = input[[paste0("db_user", suffix)]],
-    password = input[[paste0("db_pass", suffix)]],
-    sslmode  = "prefer",
-    connect_timeout = 10
-  )
+
+  # In-container DNS hiccups surface as "could not translate host name ...
+  # Temporary failure in name resolution" (EAI_AGAIN). They are transient, so
+  # retry a few times before surfacing a raw error to the user. Non-transient
+  # failures (bad password, refused) are raised immediately.
+  transient <- "name resolution|translate host name|EAI_AGAIN|could not connect|server closed the connection|connection timed out"
+  attempts  <- 3
+  con <- NULL
+  for (i in seq_len(attempts)) {
+    con <- tryCatch(
+      dbConnect(RPostgres::Postgres(),
+        dbname   = db_string,
+        host     = input[[paste0("db_host", suffix)]],
+        port     = as.integer(input[[paste0("db_port", suffix)]]),
+        user     = input[[paste0("db_user", suffix)]],
+        password = input[[paste0("db_pass", suffix)]],
+        sslmode  = "prefer",
+        connect_timeout = 10
+      ),
+      error = function(e) {
+        if (i < attempts && grepl(transient, e$message, ignore.case = TRUE)) {
+          Sys.sleep(1.5)   # let the resolver / DB recover, then retry
+          return(NULL)
+        }
+        stop(e)            # non-transient, or out of retries
+      }
+    )
+    if (!is.null(con)) break
+  }
   # Hard cap so a slow or stuck query can never freeze the single-threaded app
   DBI::dbExecute(con, "SET statement_timeout = '60s'")
   con
@@ -1862,6 +1889,26 @@ server <- function(input, output, session) {
         GROUP BY pctile_bin, fut_lag
         ORDER BY pctile_bin, fut_lag;",
         input$top_n_valRS, summary_cluster_filter)
+    } else if (metric_col == "combo_mean_quadrants") {
+      # Same shape as combo_quadrants but uses mean_return instead of
+      # median_return for the magnitude axis.
+      topn_query <- sprintf("
+        SELECT
+          pctile_bin AS rank_within_cluster,
+          fut_lag,
+          SUM(hit_rate * n_obs) / NULLIF(SUM(n_obs), 0) AS hit_rate,
+          SUM(
+            (CASE WHEN id <= 12 THEN mean_return ELSE -mean_return END)
+            * n_obs
+          ) / NULLIF(SUM(n_obs), 0) AS aligned_median,
+          SUM(n_obs) AS n_tickers
+        FROM inference.walk_forward_pctile_summary
+        WHERE pctile_bin <= %d
+          AND fut_lag <= 88
+          %s
+        GROUP BY pctile_bin, fut_lag
+        ORDER BY pctile_bin, fut_lag;",
+        input$top_n_valRS, summary_cluster_filter)
     } else {
       metric_expr <- if (metric_col %in% c("hit_rate", "sharpe_like", "median_return")) {
         sprintf("AVG(%s)", metric_col)
@@ -1900,7 +1947,7 @@ server <- function(input, output, session) {
         hm_df$fut_lag           <- as.integer(hm_df$fut_lag)
         hm_df$rank_within_cluster <- as.integer(hm_df$rank_within_cluster)
         hm_df$n_tickers         <- as.integer(hm_df$n_tickers)
-        if (metric_col == "combo_quadrants") {
+        if (metric_col %in% c("combo_quadrants", "combo_mean_quadrants")) {
           # Median was already aligned per-cluster inside the SQL aggregation.
           hm_df$hit_rate <- as.numeric(hm_df$hit_rate)
           hm_df$aligned_median <- as.numeric(hm_df$aligned_median)
@@ -2011,15 +2058,28 @@ server <- function(input, output, session) {
       )
       max_abs <- 1
       z_center <- 0
-    } else if (metric == "combo_quadrants") {
+    } else if (metric %in% c("combo_quadrants", "combo_mean_quadrants")) {
       # Discrete bands: gray (neither), blue (hit only),
       # gold (median only = Bessembinder), green (both high).
-      colorscale <- list(
-        c(0.00, '#888888'), c(0.25, '#888888'),
-        c(0.25, '#3b82f6'), c(0.50, '#3b82f6'),
-        c(0.50, '#f59e0b'), c(0.75, '#f59e0b'),
-        c(0.75, '#10b981'), c(1.00, '#10b981')
-      )
+      # Short clusters (id > 12) get a purple palette so green never appears
+      # on declining clusters; longs keep the green palette.
+      sel_id <- suppressWarnings(as.integer(input$id_valRS))
+      is_short_selected <- !is.na(sel_id) && sel_id > 12
+      colorscale <- if (is_short_selected) {
+        list(
+          c(0.00, '#888888'), c(0.25, '#888888'),
+          c(0.25, '#c4b5fd'), c(0.50, '#c4b5fd'),
+          c(0.50, '#a78bfa'), c(0.75, '#a78bfa'),
+          c(0.75, '#7c3aed'), c(1.00, '#7c3aed')
+        )
+      } else {
+        list(
+          c(0.00, '#888888'), c(0.25, '#888888'),
+          c(0.25, '#3b82f6'), c(0.50, '#3b82f6'),
+          c(0.50, '#f59e0b'), c(0.75, '#f59e0b'),
+          c(0.75, '#10b981'), c(1.00, '#10b981')
+        )
+      }
       max_abs <- 0.5
       z_center <- 0.5
     } else {
@@ -2040,6 +2100,7 @@ server <- function(input, output, session) {
       "sharpe_like" = "Sharpe-like\n(mean/sd)",
       "median_return" = "Median\nreturn",
       "combo_quadrants" = "Quadrant\n0.875=both high\n0.625=median only\n(Bessembinder)\n0.375=hit only\n0.125=neither",
+      "combo_mean_quadrants" = "Quadrant (mean)\n0.875=both high\n0.625=mean only\n(Bessembinder)\n0.375=hit only\n0.125=neither",
       "Mean\nrealized\nreturn")
     fut_lag_pos <- fut_lags   # linear spacing: cell width proportional to actual horizon
     text_mat <- matrix(rep(as.character(fut_lags), each = nrow(z_mat)), nrow = nrow(z_mat))
@@ -2118,12 +2179,15 @@ server <- function(input, output, session) {
       df_subset$signal <- df_subset$direction_sign * df_subset$sharpe_like
       max_abs <- 1
       z_center <- 0
-    } else if (metric_col == "combo_quadrants") {
-      # Quadrant categorical view: hit_rate (already direction-aligned in
-      # pctile_summary) crossed with aligned median return. Bessembinder cells
-      # show up as MEDIAN ONLY (low hit but positive median = rare big wins).
+    } else if (metric_col %in% c("combo_quadrants", "combo_mean_quadrants")) {
+      # Quadrant categorical view: hit_rate crossed with aligned return.
+      # combo_quadrants uses median_return; combo_mean_quadrants uses mean_return.
       df_subset$direction_sign <- ifelse(df_subset$id <= 12, 1, -1)
-      df_subset$aligned_median <- df_subset$direction_sign * df_subset$median_return
+      df_subset$aligned_median <- if (metric_col == "combo_quadrants") {
+        df_subset$direction_sign * df_subset$median_return
+      } else {
+        df_subset$direction_sign * df_subset$mean_return
+      }
       df_subset$signal <- ifelse(
         df_subset$hit_rate > 0.5 & df_subset$aligned_median > 0, 0.875,
         ifelse(df_subset$hit_rate <= 0.5 & df_subset$aligned_median > 0, 0.625,
@@ -2152,7 +2216,7 @@ server <- function(input, output, session) {
       c(0.50, '#f7f7b6'),
       c(0.75, '#5ab4ac'),
       c(1.00, '#01665e')
-    ) else if (metric_col == "combo_quadrants") list(
+    ) else if (metric_col %in% c("combo_quadrants", "combo_mean_quadrants")) list(
       # Four discrete bands: gray (neither), blue (hit only),
       # gold (median only = Bessembinder), green (both high)
       c(0.00, '#888888'), c(0.25, '#888888'),
@@ -2192,17 +2256,31 @@ server <- function(input, output, session) {
       text_mat <- matrix(rep(as.character(all_fut_lags), each = nrow(z_mat_rev)),
                          nrow = nrow(z_mat_rev))
       # combo_quadrants uses categorical [0,1] range; others use centered [-max_abs, max_abs]
-      zmin_val <- if (metric_col == "combo_quadrants") 0 else -max_abs
-      zmax_val <- if (metric_col == "combo_quadrants") 1 else  max_abs
+      zmin_val <- if (metric_col %in% c("combo_quadrants", "combo_mean_quadrants")) 0 else -max_abs
+      zmax_val <- if (metric_col %in% c("combo_quadrants", "combo_mean_quadrants")) 1 else  max_abs
+      # For combo_quadrants ONLY: short clusters (id > 12) get a purple
+      # palette so green never appears on declining clusters. Same 4-tier
+      # information (gray/light purple/medium purple/deep purple), distinct
+      # palette from the long-cluster green family.
+      this_colorscale <- if (metric_col %in% c("combo_quadrants", "combo_mean_quadrants") && this_id > 12) {
+        list(
+          c(0.00, '#888888'), c(0.25, '#888888'),
+          c(0.25, '#c4b5fd'), c(0.50, '#c4b5fd'),
+          c(0.50, '#a78bfa'), c(0.75, '#a78bfa'),
+          c(0.75, '#7c3aed'), c(1.00, '#7c3aed')
+        )
+      } else {
+        colorscale
+      }
       plot_ly(
         x = all_fut_lag_pos,
         y = rev(as.character(all_ranks)),
         z = z_mat_rev,
-        type = "heatmap", colorscale = colorscale,
+        type = "heatmap", colorscale = this_colorscale,
         zmin = zmin_val, zmax = zmax_val, showscale = FALSE,
         xgap = 1, ygap = 1,
         text = text_mat,
-        hovertemplate = if (metric_col == "combo_quadrants") paste0(
+        hovertemplate = if (metric_col %in% c("combo_quadrants", "combo_mean_quadrants")) paste0(
           "id ", this_id,
           " (", ifelse(this_id <= 12, "long", "short"), ")",
           "<br>vingtile: %{y}<br>fut_lag: %{text}<br>",

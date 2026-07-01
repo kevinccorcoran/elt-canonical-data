@@ -60,6 +60,17 @@ Supports:
 - Color-coding by cluster to compare groups at a glance.
 - Toggling clusters on or off and switching environments.
 
+### Rank Stability
+
+![Rank Stability across walk-forward cohorts](tools/rank_stability.jpg)
+
+Small multiples of rank stability across 84 walk-forward cohorts, one heatmap per cluster id. Each cell is the mean realized forward return at a given vingtile (5% rank bin) and horizon, normalized within cluster so clusters of different sizes compare fairly.
+
+Supports:
+- Sign-adjusted coloring, so green always means the model was right (longs that rose, shorts that fell).
+- Long ids and short ids shown together, with quadrant shading for hit rate and median.
+- Filtering by environment, cluster, vingtile depth, metric, and cutoff range.
+
 ## Project Timeline
 
 **2024 — Foundation**
