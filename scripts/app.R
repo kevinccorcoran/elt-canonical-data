@@ -1660,11 +1660,8 @@ server <- function(input, output, session) {
       FROM top_picks tp
       JOIN inference.return_cluster_ticker_pair_current p
         ON p.ticker = tp.ticker AND p.id = %s
-      LEFT JOIN analysis.ticker_cluster_segments s
-        ON s.ticker = p.ticker
       LEFT JOIN inference.cell_credibility c
-        ON c.vol_bucket_num = s.monthly_growth_vol_z_bucket_num
-       AND c.id            = p.id
+        ON c.id            = p.id
        AND c.past_lag      = p.past_lag
        AND c.fut_lag       = p.fut_lag
        AND c.bucket        = p.bucket
