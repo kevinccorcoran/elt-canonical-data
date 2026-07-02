@@ -25,7 +25,10 @@
    skips those rows.
 
    Three rules:
-     1) Invalid price: adj_close IS NULL or = 0 → drop that day
+     1) Invalid price: adj_close IS NULL, = 0, or sub-nickel
+        (< $0.05) → drop that day. Sub-nickel prints are cent-
+        rounding artifacts / untradeable quotes whose tiny
+        denominators produced labels up to 259,200% (audit L6).
      2) Stagnation: ≥ 20 consecutive trading days at same price.
         Mirrors the massive feed's stagnation rule. Catches
         forward-filled / unadjusted-split artifacts in yfinance
@@ -47,7 +50,8 @@ WITH invalid_price_ranges AS (
         date AS bad_end,
         'invalid_price' AS reason
     FROM {{ ref('ingest_yfinance_staging') }}
-    WHERE adj_close IS NULL OR adj_close = 0
+    -- audit L6: was `= 0` only; sub-nickel prints are degenerate too
+    WHERE adj_close IS NULL OR adj_close < 0.05
 ),
 
 stagnation_prices AS (
