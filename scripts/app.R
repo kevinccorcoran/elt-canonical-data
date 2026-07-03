@@ -2173,6 +2173,12 @@ server <- function(input, output, session) {
       df$median_return <- as.numeric(df$median_return)
       df$hit_rate <- as.numeric(df$hit_rate)
       df$sharpe_like <- as.numeric(df$sharpe_like)
+      # n_obs arrives from Postgres as integer64 (bit64). Left as-is, it is the
+      # weight in weighted.mean() during the adaptive rebin below, where bit64
+      # arithmetic truncates the fractional metric to an integer BEFORE dividing
+      # (hit_rate 0.75 -> 0), collapsing every long cell to hit<=0.5 and washing
+      # all green into gold. Cast to double so the weighting is exact.
+      df$n_obs <- as.numeric(df$n_obs)
       tiers <- dbGetQuery(con, "
         SELECT m.id AS id,
                CASE WHEN percentile_cont(0.5) WITHIN GROUP (ORDER BY r.cluster_size) >= 20 THEN 20
