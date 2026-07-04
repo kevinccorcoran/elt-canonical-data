@@ -93,7 +93,17 @@ CROSS JOIN run_time rt
 
 UNION ALL
 
--- Delisted universe: not allowlist-filtered (dead tickers aren't in it)
+-- Delisted universe: not allowlist-filtered (dead tickers aren't in it).
+-- Anti-join against the active universe so a (ticker, date) that exists in
+-- both feeds is emitted ONCE, from the active (massive) side. ~50 tickers
+-- appear in both feeds; without this the UNION ALL double-counts every
+-- overlapping bar (n_obs inflation) and, where the two feeds disagree on
+-- adj_close (~3.9% of overlaps, up to ~7%), leaves duplicate (ticker, date)
+-- rows that make downstream FIRST_VALUE / DISTINCT tie-break nondeterministically.
+-- Active wins because it is the continuously split/dividend-adjusted feed;
+-- the delisted feed is a static monthly backfill. Every dual-feed ticker's
+-- delisted date range is a strict subset of its active range, so this drops
+-- only genuine overlaps and preserves all delisted-only history (COMM/NGD).
 SELECT
     d."date",
     d.ticker,
@@ -105,3 +115,11 @@ SELECT
     rt.query_run_time
 FROM delisted d
 CROSS JOIN run_time rt
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM massive_base mb
+    JOIN ticker_index_summary tis
+        ON mb.ticker = tis.ticker
+    WHERE mb.ticker = d.ticker
+      AND mb."date" = d."date"
+)

@@ -27,7 +27,11 @@
 
    Six rules:
      1) Stagnation: ≥ 20 consecutive trading days at same price
-     2) Zero close: any row where adj_close = 0
+     2) Invalid price: any row where adj_close IS NULL, = 0, or
+        sub-nickel (< $0.05). Cent-rounded feeds print 0.01-0.04
+        artifacts whose divide-by-tiny denominators produced labels
+        up to 259,200% downstream (audit L6); sub-nickel prints are
+        not tradeable prices.
      3) Feed discrepancy: massive shows a month-over-month min/max
         move ≥ 100% AND that jump is more than 5x the same jump
         seen in yfinance for the same (ticker, month). Targets
@@ -101,9 +105,11 @@ zero_close_ranges AS (
         ticker,
         date AS bad_start,
         date AS bad_end,
-        'zero_close' AS reason
+        'invalid_price' AS reason
     FROM {{ ref('ingest_massive_staging') }}
-    WHERE adj_close = 0
+    -- audit L6: sub-nickel prints (< $0.05) are degenerate denominators, not
+    -- tradeable prices; was `= 0` only
+    WHERE adj_close IS NULL OR adj_close < 0.05
 ),
 
 massive_monthly AS (
