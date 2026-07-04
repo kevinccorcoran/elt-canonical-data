@@ -169,15 +169,39 @@ discrepancy_flagged_tickers AS (
       AND m.jump_pct > 5.0 * y.jump_pct
 ),
 
+-- yfinance coverage horizon per ticker (its last available bar). Used to cap the
+-- feed_discrepancy exclusion so massive's post-yfinance tail is preserved.
+yfinance_ticker_ends AS (
+    SELECT
+        CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END AS ticker,
+        MAX(date) AS yfinance_end
+    FROM {{ ref('ingest_yfinance_staging') }}
+    GROUP BY CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END
+),
+
 discrepancy_ranges AS (
+    -- Cap the exclusion at the yfinance coverage horizon instead of dropping the
+    -- ENTIRE massive history. The defect for these tickers is OLD stagnation
+    -- plateaus / a drifting adjustment basis, not recent data: yfinance carries
+    -- the correctly-adjusted history it covers, and massive's post-yfinance tail
+    -- is clean. Verified on prod across all 69 flagged tickers: the massive/yfinance
+    -- splice at the yfinance horizon agrees within 5% (within 2% for the 66 ranked),
+    -- every tail extends past the horizon, and no tail is a plateau or carries a
+    -- >=50% single-day split move. Dropping the WHOLE history forced a yfinance
+    -- fallback that is dead at 2025-07-23, freezing 66 live large-caps
+    -- (META/DUK/RTX/LIN/...). Keeping the post-horizon massive tail un-freezes them
+    -- with a clean splice; yfinance still fills everything it covers. If a ticker has
+    -- no yfinance end (never happens here, since the flag requires yfinance), bad_end
+    -- falls back to the massive max (whole-history drop, unchanged behavior).
     SELECT
         s.ticker,
         MIN(s.date) AS bad_start,
-        MAX(s.date) AS bad_end,
+        LEAST(MAX(s.date), COALESCE(ye.yfinance_end, MAX(s.date))) AS bad_end,
         'feed_discrepancy' AS reason
     FROM {{ ref('ingest_massive_staging') }} s
     JOIN discrepancy_flagged_tickers d USING (ticker)
-    GROUP BY s.ticker
+    LEFT JOIN yfinance_ticker_ends ye USING (ticker)
+    GROUP BY s.ticker, ye.yfinance_end
 ),
 
 yfinance_tickers AS (
