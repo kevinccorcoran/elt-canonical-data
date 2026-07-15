@@ -11,6 +11,12 @@ from utils.dbt_helpers import get_dbt_bash_command
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/opt/elt-canonical-data")
 LOCAL_TZ = pendulum.timezone("Europe/Amsterdam")
 
+# Delisted-bar backfill cap. Dev fetches a small subset so local runs are fast
+# (the per-ticker bar fetch + detail enrichment are the slow steps);
+# staging/prod fetch the full monthly delta.
+_RUNTIME_ENV = os.environ.get("ENV", "dev")
+DELISTED_LIMIT = 25 if _RUNTIME_ENV == "dev" else 1000
+
 
 default_args = {
     "owner": "airflow",
@@ -85,7 +91,7 @@ with DAG(
         python -m datapipeline.ingestion.massive_backfill_delisted_aggregates \
             --exchanges XNYS,XNAS \
             --min-delisted-since "{min_delisted_since}" \
-            --limit 1000
+            --limit {DELISTED_LIMIT}
         """,
         env=_env(),
         append_env=True,

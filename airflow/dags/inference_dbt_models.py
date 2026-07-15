@@ -60,9 +60,9 @@ def batch_create_transition_scored(**context):
     cur.execute("SET max_parallel_workers_per_gather = 4")
 
     logging.info("Creating empty transition_scored table...")
-    cur.execute("DROP TABLE IF EXISTS inference.return_cluster_transition_scored CASCADE")
+    cur.execute("DROP TABLE IF EXISTS scoring.return_cluster_transition_scored CASCADE")
     cur.execute("""
-        CREATE TABLE inference.return_cluster_transition_scored AS
+        CREATE TABLE scoring.return_cluster_transition_scored AS
         SELECT
             fs.id,
             fs.cluster_id,
@@ -76,15 +76,15 @@ def batch_create_transition_scored(**context):
             CAST(NULL AS double precision) AS past_num_stddevs_away,
             CAST(NULL AS text) AS past_excess_return_z_bucket,
             CAST(NULL AS int) AS past_excess_return_z_bucket_num
-        FROM inference.return_cluster_feature_set fs
+        FROM scoring.return_cluster_feature_set fs
         WHERE false
     """)
 
     # Get distinct (id, cluster_id, fibonacci_lag_value)
     cur.execute("""
         SELECT DISTINCT c.id, c.cluster_id, e.fibonacci_lag_value 
-        FROM metrics.ticker_cluster_volatility_summary c
-        CROSS JOIN (SELECT DISTINCT fibonacci_lag_value FROM metrics.excess_return_joined) e
+        FROM clustering.ticker_cluster_volatility_summary c
+        CROSS JOIN (SELECT DISTINCT fibonacci_lag_value FROM features.excess_return_joined) e
         ORDER BY c.id, c.cluster_id, e.fibonacci_lag_value
     """)
     id_clusters = cur.fetchall()
@@ -93,10 +93,10 @@ def batch_create_transition_scored(**context):
     for batch_id, cluster_id, fib_val in id_clusters:
         logging.info(f"Processing id={batch_id}, cluster_id={cluster_id}, fibonacci={fib_val}...")
         cur.execute("""
-            INSERT INTO inference.return_cluster_transition_scored
+            INSERT INTO scoring.return_cluster_transition_scored
             WITH base AS (
                 SELECT *
-                FROM inference.return_cluster_feature_set
+                FROM scoring.return_cluster_feature_set
                 WHERE id = %s AND cluster_id = %s AND fibonacci_lag_value = %s
                   AND past_excess_return_vs_spy IS NOT NULL
             ),
@@ -187,7 +187,7 @@ def batch_create_transition_scored(**context):
     logging.info("Creating index on transition_scored...")
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_rcts_partition
-        ON inference.return_cluster_transition_scored (id, cluster_id, fibonacci_lag_value, future_fibonacci_lag_value)
+        ON scoring.return_cluster_transition_scored (id, cluster_id, fibonacci_lag_value, future_fibonacci_lag_value)
     """)
     logging.info("transition_scored complete!")
 

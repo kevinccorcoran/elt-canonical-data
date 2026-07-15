@@ -9,6 +9,13 @@ from utils.dbt_helpers import get_inference_dbt_bash_command
 
 runtime_env = Variable.get("ENV", default_var="dev")
 
+# Dev fast-iteration: run only a few cutoffs so the walk exercises the full
+# chain in minutes instead of the full 84-quarter walk (~9-12h). Staging/prod
+# run the complete walk (WF_CUTOFFS unset).
+_WF_ENV = {"ENV": runtime_env}
+if runtime_env == "dev":
+    _WF_ENV["WF_CUTOFFS"] = "2018-12-31,2019-12-31,2020-12-31,2021-12-31"
+
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
@@ -51,7 +58,7 @@ with DAG(
             "fi && "
             "python scripts/walk_forward.py"
         ),
-        env={"ENV": runtime_env},
+        env=_WF_ENV,
         append_env=True,
         do_xcom_push=False,
         # 84 quarterly cutoffs; historical prod runs fit inside 14h but with

@@ -48,7 +48,7 @@ TRANSFORM_SCRIPT = (
 
 # Runtime environment is driven by Environment Variables (fast)
 # or Airflow Variables if env vars are missing.
-runtime_env = os.environ.get("ENV", "dev")
+runtime_env = Variable.get("ENV", default_var="dev")  # Airflow Variable wins (matches the other DAGs)
 
 # Number of parallel ingestion slices
 # Chosen to balance API load and DB pressure

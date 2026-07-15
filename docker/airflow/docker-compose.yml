@@ -16,6 +16,11 @@ x-airflow-common: &airflow-common
     - timeout:2
     - attempts:3
     - rotate
+  # host.docker.internal must resolve for the local trading DB (host Postgres).
+  # The dns: override above drops the auto-provided mapping, so pin it explicitly
+  # to the host gateway (works regardless of DNS servers).
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
