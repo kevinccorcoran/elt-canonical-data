@@ -96,9 +96,11 @@ Supports:
 - Introduced new automated data-quality rules
 - Added 300% data coverage, removing survivorship bias
 
-**Ongoing**
-- Tightened data-quality exclusions and capped the forecast horizon to its reliable range
-- Automated credibility rebuilds after each walk-forward run
+**2026 Q3 — Reliability & Data Quality**
+- Restructured the database into clean, clearly named layers
+- Cut out unreliable data so the models train on trustworthy inputs
+- Focused forecasts on the ranges the model handles well
+- Automated monthly retraining and validation to keep the system honest
 
 ---
 
