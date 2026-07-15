@@ -8,9 +8,15 @@ from diagrams.onprem.client import Users
 import os
 
 # ---------------------------------------------------------------------
-# Clean left-to-right spine: Sources -> Ingest -> Postgres layers
-# (raw -> cdm -> metrics -> analysis -> inference) -> Dashboard -> Analysts,
-# with Airflow orchestrating and a walk-forward backtest validating inference.
+# Clean left-to-right spine: Sources -> Ingest -> Postgres schemas -> Dashboard.
+# Postgres is organized into stage-named schemas split across the two repos:
+#   Canonical (elt-canonical-data):   raw -> cdm
+#   Inference (elt-inference-models):  features -> clustering -> scoring
+#                                      -> serving, plus validation
+#                                      (walk-forward) and monitoring
+#                                      (prediction ledger).
+# Airflow orchestrates; walk-forward validation feeds credibility back into
+# the serving rollup.
 # ---------------------------------------------------------------------
 
 graph_attr = {
@@ -60,20 +66,27 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
             ingestor = Python("Ingestion")
             dbt_runner = Dbt("dbt Transforms")
 
-        # Data plane (left-to-right layers)
+        # Data plane: stage-named schemas, grouped by owning repo
         with Cluster("Managed PostgreSQL", graph_attr={"bgcolor": "#E8EAF6", "pencolor": "#3F51B5", "penwidth": "2.0"}):
-            raw = DbaasPrimary("Raw")
-            cdm = DbaasPrimary("CDM")
-            metrics = DbaasPrimary("Metrics")
-            analysis = DbaasPrimary("Analysis\n(Clusters)")
-            inference = DbaasPrimary("Inference")
 
-        # Validation
-        with Cluster("Validation", graph_attr={"bgcolor": "#FFF3E0", "pencolor": "#EF6C00", "penwidth": "2.0"}):
-            backtest = Dbt("Backtest\n(Walk-forward)")
+            with Cluster("Canonical  |  elt-canonical-data", graph_attr={"bgcolor": "#E3F2FD", "pencolor": "#1E88E5"}):
+                raw = DbaasPrimary("raw")
+                cdm = DbaasPrimary("cdm")
 
-        # Serving
-        with Cluster("Serving", graph_attr={"bgcolor": "#F3E5F5", "pencolor": "#7B1FA2", "penwidth": "2.0"}):
+            with Cluster("Inference  |  elt-inference-models", graph_attr={"bgcolor": "#E8F5E9", "pencolor": "#2E7D32"}):
+                features = DbaasPrimary("features")
+                clustering = DbaasPrimary("clustering")
+                analysis = DbaasPrimary("analysis")   # python-produced clustering intermediate
+                scoring = DbaasPrimary("scoring")
+                serving = DbaasPrimary("serving")
+                monitoring = DbaasPrimary("monitoring")
+
+            # Validation schema (holds the walk-forward backtest output)
+            with Cluster("Validation (walk-forward)", graph_attr={"bgcolor": "#FFF3E0", "pencolor": "#EF6C00", "penwidth": "2.0"}):
+                validation = DbaasPrimary("validation")
+
+        # Dashboard app (reads the serving + monitoring schemas)
+        with Cluster("Dashboard", graph_attr={"bgcolor": "#F3E5F5", "pencolor": "#7B1FA2", "penwidth": "2.0"}):
             dashboard = R("Shiny Dashboard")
 
     analysts = Users("Analysts")
@@ -84,23 +97,43 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
     delisted >> Edge(**edge_cfg["ingest"], label="Backfill") >> ingestor
     ingestor >> Edge(**edge_cfg["ingest"], label="Load") >> raw
 
-    # Transform
+    # Canonical layer: raw -> cdm
     raw >> Edge(**edge_cfg["transform"], label="Standardize") >> cdm
-    cdm >> Edge(**edge_cfg["transform"], label="Aggregate") >> metrics
-    metrics >> Edge(**edge_cfg["transform"], label="Cluster") >> analysis
-    analysis >> Edge(**edge_cfg["transform"], label="Predict") >> inference
+
+    # Two PARALLEL branches off the canonical layer, both consumed by scoring:
+    #   features    = excess returns + Fibonacci-offset sampling (from cdm/raw)
+    #   clustering  = growth ranking + volatility groups (from cdm)
+    cdm >> Edge(**edge_cfg["transform"], label="Returns") >> features
+    cdm >> Edge(**edge_cfg["transform"], label="Rank") >> clustering
+
+    # clustering <-> analysis loop: a Python step segments the growth ranking
+    # into analysis.ticker_cluster_segments, which clustering reads back for
+    # its volatility summary.
+    clustering >> Edge(**edge_cfg["transform"], label="Segments (py)") >> analysis
+    analysis >> Edge(**edge_cfg["transform"]) >> clustering
+
+    # scoring consumes BOTH features and clustering
+    features >> Edge(**edge_cfg["transform"], label="Score") >> scoring
+    clustering >> Edge(**edge_cfg["transform"]) >> scoring
+
+    # serving rolls up scoring and also joins clustering labels
+    scoring >> Edge(**edge_cfg["transform"], label="Roll up") >> serving
+    clustering >> Edge(**edge_cfg["transform"]) >> serving
+
+    # monitoring logs the served calls
+    serving >> Edge(**edge_cfg["transform"], label="Log calls") >> monitoring
 
     # Orchestrate
     airflow >> Edge(**edge_cfg["orchestrate"], label="Trigger") >> ingestor
     airflow >> Edge(**edge_cfg["orchestrate"]) >> dbt_runner
 
-    # Validate
-    inference >> Edge(**edge_cfg["transform"], label="Validate") >> backtest
+    # Validate: scoring is backtested into the validation schema
+    scoring >> Edge(**edge_cfg["transform"], label="Backtest") >> validation
 
     # Serve
-    analysis >> Edge(**edge_cfg["serve"], label="Serve") >> dashboard
-    inference >> Edge(**edge_cfg["serve"]) >> dashboard
+    serving >> Edge(**edge_cfg["serve"], label="Serve") >> dashboard
+    monitoring >> Edge(**edge_cfg["serve"]) >> dashboard
     dashboard >> Edge(**edge_cfg["serve"], label="Explore") >> analysts
 
-    # Validation feedback: walk-forward credibility gates the inference summary
-    backtest >> Edge(**edge_cfg["feedback"], label="Credibility") >> inference
+    # Feedback: walk-forward credibility gates the serving rollup
+    validation >> Edge(**edge_cfg["feedback"], label="Credibility") >> serving
