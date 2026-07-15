@@ -97,8 +97,8 @@ Supports:
 - Added 300% data coverage, removing survivorship bias
 
 **Ongoing**
-- Continued model refinement
-- Data QA, bug fixes, and optimization
+- Tightened data-quality exclusions and capped the forecast horizon to its reliable range
+- Automated credibility rebuilds after each walk-forward run
 
 ---
 
