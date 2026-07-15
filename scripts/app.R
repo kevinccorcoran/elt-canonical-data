@@ -349,7 +349,7 @@ ui <- navbarPage(
         )
       )),
       mainPanel(div(class = "main-card", style = "height: calc(100vh - 4rem); display: flex; flex-direction: column;",
-        h4("Transition range — inference.return_cluster_cell_score_extended",
+        h4("Transition range — scoring.return_cluster_cell_score_extended",
            style = "color: #f8fafc; margin-bottom: 0.5rem; font-weight: 600;"),
         uiOutput("transitionHeader"),
         div(style = "flex: 1; min-height: 0;", plotlyOutput("transitionPlot", height = "100%"))
@@ -509,7 +509,7 @@ ui <- navbarPage(
     sidebarLayout(
       make_sidebar("K", "Database Connection (Clusters)", tagList()),
       mainPanel(div(class = "main-card",
-        h4("Per-ticker scatter — analysis.ticker_cluster_segments × metrics.ticker_cluster_volatility_summary",
+        h4("Per-ticker scatter — analysis.ticker_cluster_segments × clustering.ticker_cluster_volatility_summary",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         tags$div(style = "margin-bottom: 0.75rem;",
           actionButton("clusterShowAll", "Show all", class = "btn-primary",
@@ -529,7 +529,7 @@ ui <- navbarPage(
         sliderInput("top_n_valP", "Top N tickers", min = 5, max = 400, value = 30, step = 5)
       )),
       mainPanel(div(class = "main-card",
-        h4("Top picks across horizons — inference.return_cluster_ticker_summary_current x return_cluster_ticker_pair_current",
+        h4("Top picks across horizons — serving.return_cluster_ticker_summary_current x return_cluster_ticker_pair_current",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         tags$div(
           style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
@@ -576,7 +576,7 @@ ui <- navbarPage(
                        startview = "year", separator = " to ")
       )),
       mainPanel(div(class = "main-card",
-        h4("Rank stability across walk-forward cohorts - inference.walk_forward_ticker_rank",
+        h4("Rank stability across walk-forward cohorts - validation.walk_forward_ticker_rank",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         tags$div(
           style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
@@ -741,9 +741,9 @@ server <- function(input, output, session) {
     tryCatch({
       con <- get_con(input, "T")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      id_vals         <- dbGetQuery(con, "SELECT DISTINCT id FROM inference.return_cluster_lag_viability ORDER BY 1")
-      past_fib_vals   <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM inference.return_cluster_lag_viability ORDER BY 1")
-      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM inference.return_cluster_lag_viability ORDER BY 1")
+      id_vals         <- dbGetQuery(con, "SELECT DISTINCT id FROM scoring.return_cluster_lag_viability ORDER BY 1")
+      past_fib_vals   <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM scoring.return_cluster_lag_viability ORDER BY 1")
+      future_fib_vals <- dbGetQuery(con, "SELECT DISTINCT future_fibonacci_lag_value FROM scoring.return_cluster_lag_viability ORDER BY 1")
       updateSelectInput(session, "id_valT", choices = id_vals[[1]], selected = id_vals[[1]][1])
       updateSelectInput(session, "past_fib_lagT", choices = past_fib_vals[[1]], selected = past_fib_vals[[1]][1])
       updateSelectInput(session, "future_fib_lagT", choices = future_fib_vals[[1]], selected = future_fib_vals[[1]][1])
@@ -760,7 +760,7 @@ server <- function(input, output, session) {
     status_msgT("Running query...")
     actionable_clause <- if (isTRUE(input$transition_modeT == "actionable")) {
       "AND EXISTS (
-            SELECT 1 FROM inference.return_cluster_ticker_pair_current tpc
+            SELECT 1 FROM serving.return_cluster_ticker_pair_current tpc
             WHERE tpc.id = cs.id
               AND tpc.past_lag = cs.past_fibonacci_lag_value
               AND tpc.fut_lag = cs.future_fibonacci_lag_value
@@ -788,7 +788,7 @@ server <- function(input, output, session) {
              combined_score,
              recommendation,
              recommendation_rank
-      FROM inference.return_cluster_cell_score_extended cs
+      FROM scoring.return_cluster_cell_score_extended cs
       WHERE cs.past_fibonacci_lag_value = %s AND cs.future_fibonacci_lag_value = %s AND cs.id = %s
         %s
       ORDER BY past_excess_return_z_bucket_num;",
@@ -983,10 +983,10 @@ server <- function(input, output, session) {
       con <- get_con(input, "H")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
-        "SELECT DISTINCT id FROM inference.return_cluster_cell_score_extended ORDER BY 1")
+        "SELECT DISTINCT id FROM scoring.return_cluster_cell_score_extended ORDER BY 1")
       bucket_vals <- dbGetQuery(con,
         "SELECT DISTINCT past_excess_return_z_bucket, past_excess_return_z_bucket_num
-         FROM inference.return_cluster_cell_score_extended
+         FROM scoring.return_cluster_cell_score_extended
          ORDER BY past_excess_return_z_bucket_num")
       bucket_choices <- c("All" = "ALL", setNames(bucket_vals[[1]], bucket_vals[[1]]))
       updateSelectInput(session, "id_valH", choices = id_vals[[1]], selected = id_vals[[1]][1])
@@ -1020,7 +1020,7 @@ server <- function(input, output, session) {
              recommendation,
              signal,
              is_viable
-      FROM inference.return_cluster_cell_score_extended
+      FROM scoring.return_cluster_cell_score_extended
       WHERE id = %s %s %s
       ORDER BY past_fibonacci_lag_value, future_fibonacci_lag_value;",
       input$id_valH, bucket_clause, viable_clause)
@@ -1527,7 +1527,7 @@ server <- function(input, output, session) {
                s.months_count,
                s.growth_pct_per_month
         FROM analysis.ticker_cluster_segments s
-        JOIN metrics.ticker_cluster_volatility_summary v
+        JOIN clustering.ticker_cluster_volatility_summary v
           ON v.cluster_id = s.cluster_id
         WHERE s.months_count > 0 AND s.growth_pct_per_month IS NOT NULL")
       app_dataK(df)
@@ -1608,7 +1608,7 @@ server <- function(input, output, session) {
       con <- get_con(input, "P")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
-        "SELECT DISTINCT id FROM inference.return_cluster_ticker_summary_current ORDER BY 1")
+        "SELECT DISTINCT id FROM serving.return_cluster_ticker_summary_current ORDER BY 1")
       updateSelectInput(session, "id_valP", choices = id_vals[[1]], selected = id_vals[[1]][1])
       status_msgP("Filters loaded!")
     }, error = function(e) { status_msgP(paste("Error:", e$message)) })
@@ -1623,7 +1623,7 @@ server <- function(input, output, session) {
     query <- sprintf("
       WITH top_picks AS (
           SELECT ticker, agg_rank, coverage_cell_count, agg_directional_score
-          FROM inference.return_cluster_ticker_summary_current
+          FROM serving.return_cluster_ticker_summary_current
           WHERE id = %s AND agg_rank <= %d
       )
       SELECT
@@ -1658,11 +1658,11 @@ server <- function(input, output, session) {
           ) AS n_directional_cells_total,
           COUNT(*) AS n_total_cells
       FROM top_picks tp
-      JOIN inference.return_cluster_ticker_pair_current p
+      JOIN serving.return_cluster_ticker_pair_current p
         ON p.ticker = tp.ticker AND p.id = %s
       LEFT JOIN analysis.ticker_cluster_segments s
         ON s.ticker = p.ticker
-      LEFT JOIN inference.cell_credibility c
+      LEFT JOIN validation.cell_credibility c
         ON c.vol_bucket_num = s.monthly_growth_vol_z_bucket_num
        AND c.id            = p.id
        AND c.past_lag      = p.past_lag
@@ -1695,7 +1695,7 @@ server <- function(input, output, session) {
           n_cohorts,
           n_positive,
           ROUND(mean_decile_spread::numeric, 4) AS mean_decile_spread
-        FROM inference.walk_forward_id_ic
+        FROM validation.walk_forward_id_ic
         WHERE id = %s AND fut_lag = 12;",
         input$id_valP)
       ic_df <- tryCatch(dbGetQuery(con, ic_query), error = function(e) NULL)
@@ -1818,13 +1818,13 @@ server <- function(input, output, session) {
       con <- get_con(input, "RS")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
-        "SELECT DISTINCT id FROM inference.walk_forward_pctile_summary ORDER BY id")
+        "SELECT DISTINCT id FROM validation.walk_forward_pctile_summary ORDER BY id")
       cl_choices <- c("All ids" = "ALL",
                       setNames(as.character(id_vals$id), as.character(id_vals$id)))
       updateSelectInput(session, "id_valRS", choices = cl_choices, selected = "ALL")
       cutoff_bounds <- dbGetQuery(con,
         "SELECT MIN(train_cutoff_date) AS min_d, MAX(train_cutoff_date) AS max_d
-         FROM inference.walk_forward_ticker_rank")
+         FROM validation.walk_forward_ticker_rank")
       if (!is.na(cutoff_bounds$min_d[1]) && !is.na(cutoff_bounds$max_d[1])) {
         updateDateRangeInput(session, "cutoff_rangeRS",
                              start = cutoff_bounds$min_d[1],
@@ -1847,8 +1847,8 @@ server <- function(input, output, session) {
     on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
     med <- tryCatch(dbGetQuery(con, sprintf(
       "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY r.cluster_size) AS med
-       FROM inference.walk_forward_ticker_rank r
-       JOIN inference.walk_forward_cluster_id_map m
+       FROM validation.walk_forward_ticker_rank r
+       JOIN validation.walk_forward_cluster_id_map m
          ON m.train_cutoff_date = r.train_cutoff_date AND m.cluster_id = r.cluster_id
        WHERE m.id = %s AND r.fut_lag = 12;", id_sel))$med[1],
       error = function(e) NA_real_)
@@ -1874,8 +1874,8 @@ server <- function(input, output, session) {
         COUNT(*) AS n_obs,
         AVG(r.forward_return) AS mean_fwd,
         STDDEV(r.forward_return) AS sd_fwd
-      FROM inference.walk_forward_ticker_rank r
-      JOIN inference.walk_forward_cluster_id_map m
+      FROM validation.walk_forward_ticker_rank r
+      JOIN validation.walk_forward_cluster_id_map m
         ON m.train_cutoff_date = r.train_cutoff_date
        AND m.cluster_id = r.cluster_id
       WHERE r.train_cutoff_date BETWEEN '%s' AND '%s' %s
@@ -1903,7 +1903,7 @@ server <- function(input, output, session) {
             * n_obs
           ) / NULLIF(SUM(n_obs), 0) AS aligned_median,
           SUM(n_obs) AS n_tickers
-        FROM inference.walk_forward_pctile_summary
+        FROM validation.walk_forward_pctile_summary
         WHERE pctile_bin <= %d
           AND fut_lag <= 33
           %s
@@ -1923,7 +1923,7 @@ server <- function(input, output, session) {
             * n_obs
           ) / NULLIF(SUM(n_obs), 0) AS aligned_median,
           SUM(n_obs) AS n_tickers
-        FROM inference.walk_forward_pctile_summary
+        FROM validation.walk_forward_pctile_summary
         WHERE pctile_bin <= %d
           AND fut_lag <= 33
           %s
@@ -1942,7 +1942,7 @@ server <- function(input, output, session) {
           fut_lag,
           %s AS realized_return,
           SUM(n_obs) AS n_tickers
-        FROM inference.walk_forward_pctile_summary
+        FROM validation.walk_forward_pctile_summary
         WHERE pctile_bin <= %d
           AND fut_lag <= 33
           %s
@@ -1987,8 +1987,8 @@ server <- function(input, output, session) {
         sprintf("AND m.id = %s", input$id_valRS)
       n_cut <- dbGetQuery(con, sprintf("
         SELECT COUNT(DISTINCT r.train_cutoff_date) AS n
-        FROM inference.walk_forward_ticker_rank r
-        JOIN inference.walk_forward_cluster_id_map m
+        FROM validation.walk_forward_ticker_rank r
+        JOIN validation.walk_forward_cluster_id_map m
           ON m.train_cutoff_date = r.train_cutoff_date
          AND m.cluster_id = r.cluster_id
         WHERE r.train_cutoff_date BETWEEN '%s' AND '%s' %s;",
@@ -2163,7 +2163,7 @@ server <- function(input, output, session) {
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
         SELECT id, pctile_bin, fut_lag, mean_return, median_return, hit_rate, sharpe_like, n_obs
-        FROM inference.walk_forward_pctile_summary
+        FROM validation.walk_forward_pctile_summary
         WHERE fut_lag <= 33
         ORDER BY id, pctile_bin, fut_lag;")
       df$id <- as.integer(df$id)
@@ -2184,8 +2184,8 @@ server <- function(input, output, session) {
                CASE WHEN percentile_cont(0.5) WITHIN GROUP (ORDER BY r.cluster_size) >= 20 THEN 20
                     WHEN percentile_cont(0.5) WITHIN GROUP (ORDER BY r.cluster_size) >= 10 THEN 10
                     ELSE 5 END AS tier
-        FROM inference.walk_forward_ticker_rank r
-        JOIN inference.walk_forward_cluster_id_map m
+        FROM validation.walk_forward_ticker_rank r
+        JOIN validation.walk_forward_cluster_id_map m
           ON m.train_cutoff_date = r.train_cutoff_date AND m.cluster_id = r.cluster_id
         WHERE r.fut_lag = 12
         GROUP BY m.id;")
