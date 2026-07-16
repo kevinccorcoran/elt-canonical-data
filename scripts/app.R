@@ -674,7 +674,12 @@ ui <- navbarPage(
         dateInput("asof_valBL", "As-of date", value = NULL, format = "yyyy-mm-dd"),
         actionButton("todayBtnBL", "Set current date",
                      class = "btn-primary", style = "margin-bottom: 0.75rem;"),
-        tags$p("Latest date = live BUY list with payoff evidence. An earlier date replays the ledger snapshot and grades it to today.",
+        tags$p(paste("Latest date = live BUY list with payoff evidence.",
+                     "Dates since 2026-06-16 replay the ledger snapshot graded to today.",
+                     "Earlier dates (back to 2007) replay the walk-forward BACKTEST:",
+                     "top 5 ranked tickers per long cluster at the nearest quarterly",
+                     "cutoff, graded by realized 12mo excess return vs SPY.",
+                     "No live BUY gates existed then - backtest ranking only."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
         selectInput("fut_cap_valBL", "Max fut_lag for payoff evidence",
                     choices = c("12 (matched short horizons)" = "12",
@@ -2802,8 +2807,9 @@ server <- function(input, output, session) {
 
   # ── BUY LIST: Reactive values ──
   app_dataBL <- reactiveVal(NULL)
-  app_modeBL <- reactiveVal("current")   # "current" or "ledger" (as-of replay)
+  app_modeBL <- reactiveVal("current")   # "current", "ledger" (as-of replay), or "wf" (backtest replay)
   ledger_boundsBL <- reactiveVal(NULL)   # c(min_date, max_date) of prediction_ledger
+  wf_minBL <- reactiveVal(NULL)          # earliest walk-forward train cutoff
   status_msgBL <- reactiveVal("Ready")
   output$statusMessageBL <- renderText({ status_msgBL() })
   setup_env_switcher(input, session, "BL")
@@ -2821,14 +2827,22 @@ server <- function(input, output, session) {
       bounds <- dbGetQuery(con, "
         SELECT MIN(prediction_date) AS min_d, MAX(prediction_date) AS max_d
         FROM monitoring.prediction_ledger")
+      wf_min <- dbGetQuery(con, "
+        SELECT MIN(r.train_cutoff_date) AS d
+        FROM validation.walk_forward_ticker_rank r
+        WHERE r.fut_lag = 12
+          AND EXISTS (SELECT 1 FROM validation.walk_forward_cluster_id_map m
+                      WHERE m.train_cutoff_date = r.train_cutoff_date)")$d[1]
       if (!is.na(bounds$min_d[1])) {
         ledger_boundsBL(c(bounds$min_d[1], bounds$max_d[1]))
+        wf_minBL(wf_min)
         updateDateInput(session, "asof_valBL",
                         value = bounds$max_d[1],
-                        min = bounds$min_d[1], max = bounds$max_d[1])
+                        min = if (!is.na(wf_min)) wf_min else bounds$min_d[1],
+                        max = bounds$max_d[1])
       }
-      status_msgBL(sprintf("Connected. %d tickers currently BUY. Ledger history %s to %s.",
-                           as.numeric(n), bounds$min_d[1], bounds$max_d[1]))
+      status_msgBL(sprintf("Connected. %d tickers currently BUY. Ledger %s to %s; walk-forward back to %s.",
+                           as.numeric(n), bounds$min_d[1], bounds$max_d[1], wf_min))
     }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
   })
 
@@ -2844,8 +2858,58 @@ server <- function(input, output, session) {
     status_msgBL("Running query...")
     b <- ledger_boundsBL()
     asof <- input$asof_valBL
-    is_ledger <- !is.null(b) && !is.null(asof) && length(asof) == 1 &&
-                 !is.na(asof) && asof < b[2]
+    has_date <- !is.null(b) && !is.null(asof) && length(asof) == 1 && !is.na(asof)
+    is_wf     <- has_date && asof < b[1]
+    is_ledger <- has_date && !is_wf && asof < b[2]
+
+    if (is_wf) {
+      # ── Backtest replay: walk-forward top ranks at the nearest cutoff ──
+      query <- sprintf("
+        WITH sel AS (
+            -- nearest USABLE cutoff: must have 12mo grades and id-map coverage
+            -- (early 2004-2006 cutoffs and a few gap quarters have neither)
+            SELECT MAX(r.train_cutoff_date) AS d
+            FROM validation.walk_forward_ticker_rank r
+            WHERE r.train_cutoff_date <= '%s'
+              AND r.fut_lag = 12
+              AND EXISTS (SELECT 1 FROM validation.walk_forward_cluster_id_map m
+                          WHERE m.train_cutoff_date = r.train_cutoff_date)
+        )
+        SELECT r.train_cutoff_date, m.id, r.ticker, r.rank_within_cluster,
+               r.cluster_size,
+               ROUND(r.ticker_score::numeric, 4)   AS ticker_score,
+               ROUND(r.forward_return::numeric, 1) AS fwd_excess_pct
+        FROM validation.walk_forward_ticker_rank r
+        JOIN sel ON r.train_cutoff_date = sel.d
+        JOIN validation.walk_forward_cluster_id_map m
+          ON m.train_cutoff_date = r.train_cutoff_date
+         AND m.cluster_id = r.cluster_id
+        WHERE r.fut_lag = 12
+          AND m.id <= 12                 -- long clusters = buy side
+          AND r.rank_within_cluster <= 5
+        ORDER BY r.forward_return DESC NULLS LAST;",
+        format(asof, "%Y-%m-%d"))
+      tryCatch({
+        con <- get_con(input, "BL")
+        on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+        df <- dbGetQuery(con, query)
+        if (nrow(df) == 0) {
+          app_modeBL("wf"); app_dataBL(df)
+          status_msgBL(sprintf("No walk-forward cutoff on or before %s.", asof))
+          return()
+        }
+        for (col in c("id", "rank_within_cluster", "cluster_size"))
+          df[[col]] <- as.integer(df[[col]])
+        for (col in c("ticker_score", "fwd_excess_pct"))
+          df[[col]] <- as.numeric(df[[col]])
+        app_modeBL("wf")
+        app_dataBL(df)
+        status_msgBL(sprintf(
+          "Backtest replay: cutoff %s, top 5 per long cluster (fut_lag 12), %d picks.",
+          df$train_cutoff_date[1], nrow(df)))
+      }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
+      return()
+    }
 
     if (is_ledger) {
       # ── As-of replay: ledger snapshot graded to the latest price ──
@@ -2987,6 +3051,38 @@ server <- function(input, output, session) {
     if (nrow(df) == 0) return(plot_ly() %>% layout(
       title = list(text = "No BUY tickers pass the filters", font = list(color = "#f8fafc")),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (app_modeBL() == "wf") {
+      # Backtest replay: rank slot vs realized 12mo excess return
+      df$hover <- sprintf(
+        "%s (id %d)<br>cutoff %s | rank %d of %d<br>score %.4f | 12mo excess vs SPY %+.1f%%",
+        df$ticker, df$id, df$train_cutoff_date,
+        df$rank_within_cluster, df$cluster_size,
+        ifelse(is.na(df$ticker_score), 0, df$ticker_score),
+        ifelse(is.na(df$fwd_excess_pct), 0, df$fwd_excess_pct))
+      return(
+        plot_ly(df, x = ~jitter(rank_within_cluster, amount = 0.15),
+                y = ~fwd_excess_pct,
+                color = ~factor(id),
+                colors = colorRampPalette(c('#38bdf8', '#a855f7', '#f59e0b',
+                                            '#10b981', '#dc2626'))(length(unique(df$id))),
+                type = "scatter", mode = "markers",
+                marker = list(size = 9, opacity = 0.85),
+                customdata = ~hover,
+                hovertemplate = "%{customdata}<extra></extra>") %>%
+          layout(
+            paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+            legend = list(title = list(text = "id"), font = list(color = "#94a3b8")),
+            shapes = list(
+              list(type = "line", y0 = 0, y1 = 0, xref = "paper", x0 = 0, x1 = 1,
+                   line = list(dash = "dash", color = "rgba(255,255,255,0.25)"))),
+            xaxis = list(title = "Rank within cluster (1 = top pick)",
+                         tickvals = 1:5,
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+            yaxis = list(title = "Realized 12mo excess return vs SPY (%)",
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+            margin = list(l = 70, r = 30, b = 50, t = 30))
+      )
+    }
     if (app_modeBL() == "ledger") {
       # As-of replay: realized return since the snapshot's entry
       df$hover <- sprintf(
@@ -3054,6 +3150,31 @@ server <- function(input, output, session) {
         data.frame(Note = "Connect and Generate Chart to load the BUY list."),
         selection = "none", rownames = FALSE, class = "compact",
         options = list(dom = "t", ordering = FALSE)))
+    }
+    if (app_modeBL() == "wf") {
+      display <- data.frame(
+        Ticker            = df$ticker,
+        Id                = df$id,
+        Cutoff            = as.character(df$train_cutoff_date),
+        Rank              = df$rank_within_cluster,
+        `Cluster size`    = df$cluster_size,
+        Score             = df$ticker_score,
+        `12mo excess vs SPY %` = df$fwd_excess_pct,
+        check.names = FALSE,
+        stringsAsFactors = FALSE
+      )
+      return(DT::datatable(
+        display,
+        selection = "none",
+        rownames  = FALSE,
+        class     = "compact",
+        options   = list(
+          pageLength = 25, lengthMenu = c(10, 25, 50, 100),
+          dom = "ftip",
+          order = list(list(6, "desc")),
+          columnDefs = list(list(className = "dt-right", targets = 3:6))
+        )
+      ))
     }
     if (app_modeBL() == "ledger") {
       display <- data.frame(
