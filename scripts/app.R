@@ -3152,6 +3152,12 @@ server <- function(input, output, session) {
             margin = list(l = 70, r = 30, b = 50, t = 10))
       )
     }
+    # Current mode: same bar style as the replay views. One bar per BUY
+    # ticker, x = holdout expectancy (the expected edge - nothing realized
+    # yet). Top 60 by expectancy; the full list is in the table below.
+    df <- df[order(df$wtd_expectancy, decreasing = TRUE, na.last = TRUE), ]
+    n_total <- nrow(df)
+    df <- head(df, 60)
     df$hover <- sprintf(
       "%s (id %d, %s)<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f",
       df$ticker, df$id, df$archetype,
@@ -3159,26 +3165,28 @@ server <- function(input, output, session) {
       as.integer(df$n_buy_cells), as.integer(df$total_holdout),
       ifelse(is.na(df$avg_cred_weight), 0, df$avg_cred_weight),
       df$buy_weight, ifelse(is.na(df$cluster_ic_12), 0, df$cluster_ic_12))
-    plot_ly(df, x = ~wtd_win_pct, y = ~wtd_expectancy,
-            color = ~factor(id),
-            size = ~buy_weight, sizes = c(8, 22),
-            type = "scatter", mode = "markers",
-            marker = list(sizemode = "area", opacity = 0.8),
+    df <- df[order(df$wtd_expectancy, decreasing = FALSE, na.last = FALSE), ]
+    plot_ly(df, x = ~wtd_expectancy, y = ~ticker, type = "bar", orientation = "h",
+            marker = list(color = ifelse(is.na(df$wtd_expectancy), '#64748b',
+                                  ifelse(df$wtd_expectancy >= 0, '#10b981', '#dc2626'))),
             customdata = ~hover,
             hovertemplate = "%{customdata}<extra></extra>") %>%
       layout(
         paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
-        legend = list(title = list(text = "id"), font = list(color = "#94a3b8")),
+        title = list(
+          text = sprintf("Top %d of %d BUYs by holdout expectancy (full list in table)",
+                         nrow(df), n_total),
+          font = list(color = "#94a3b8", size = 12)),
         shapes = list(
-          list(type = "line", x0 = 50, x1 = 50, yref = "paper", y0 = 0, y1 = 1,
-               line = list(dash = "dash", color = "rgba(255,255,255,0.25)")),
-          list(type = "line", y0 = 0, y1 = 0, xref = "paper", x0 = 0, x1 = 1,
-               line = list(dash = "dash", color = "rgba(255,255,255,0.25)"))),
-        xaxis = list(title = "Payoff-weighted win % (coin flip = 50)",
+          list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
+               line = list(color = "rgba(255,255,255,0.4)"))),
+        xaxis = list(title = "Payoff-weighted expectancy (mean holdout trade return, %)",
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-        yaxis = list(title = "Payoff-weighted expectancy (mean holdout trade return)",
-                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-        margin = list(l = 70, r = 30, b = 50, t = 30))
+        yaxis = list(title = "", type = "category",
+                     categoryorder = "array", categoryarray = df$ticker,
+                     tickfont = list(size = 9),
+                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
+        margin = list(l = 70, r = 30, b = 50, t = 40))
   })
 
   output$buyTableBL <- DT::renderDT({
