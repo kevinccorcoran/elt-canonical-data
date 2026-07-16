@@ -672,6 +672,9 @@ ui <- navbarPage(
     sidebarLayout(
       make_sidebar("BL", "Database Connection (Buy List)", tagList(
         tags$label("As-of date", style = "color: #94a3b8; font-weight: 600;"),
+        # splitLayout cells default to overflow:hidden, which clips the
+        # selectize option list (year dropdown showed one cut-off row)
+        tags$style(HTML(".shiny-split-layout > div { overflow: visible; }")),
         splitLayout(
           cellWidths = c("30%", "38%", "32%"),
           selectInput("asof_dayBL", NULL, choices = 1:31, selected = 1),
