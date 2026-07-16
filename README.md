@@ -2,7 +2,7 @@
 
 ![Architecture Diagram](tools/alphastream_system_architecture.png?v=4)
 
-AlphaStream is an end-to-end data and analytics platform. It ingests time-series data, cleans and standardizes it, and produces statistical forecasts with an interactive dashboard on top.
+AlphaStream is an end-to-end data and machine-learning platform. It ingests time-series data, cleans and standardizes it, then applies unsupervised clustering and statistical forecasting to produce signals, with an interactive dashboard on top.
 
 Walk-forward backtesting shows 61.2% sign agreement across 643,466 cells (June 2026).
 
@@ -20,9 +20,9 @@ AlphaStream is split into two repositories:
 
 ## Pipeline
 
-![Pipeline](tools/pipeline_grouped.png)
+![Pipeline](tools/pipeline_grouped.png?v=2)
 
-The end-to-end flow grouped by stage: data is pulled in, screened for quality, standardized into a canonical layer, then turned into metrics, clusters, and forecasts that walk-forward backtesting validates before the dashboard serves them.
+The end-to-end flow grouped by stage, each box labeled with the database schema it lands in. Data is pulled in, screened for quality, and standardized into a canonical layer, then split into return features and clusters (unsupervised machine learning) that feed a scoring model, which walk-forward backtesting validates before the dashboard serves it. The machine-learning stages are flagged in the diagram.
 
 ## Data Lineage
 
