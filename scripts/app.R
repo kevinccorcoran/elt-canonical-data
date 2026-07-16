@@ -665,6 +665,40 @@ ui <- navbarPage(
         plotlyOutput("forestPlotMV", height = "460px")
       ))
     )
+  ),
+
+  # ── Tab 9: Buy List ──
+  tabPanel("Buy List",
+    sidebarLayout(
+      make_sidebar("BL", "Database Connection (Buy List)", tagList(
+        selectInput("fut_cap_valBL", "Max fut_lag for payoff evidence",
+                    choices = c("12 (matched short horizons)" = "12",
+                                "33 (all capped horizons)"    = "33"),
+                    selected = "12"),
+        numericInput("min_holdout_valBL", "Min holdout trades behind the payoff",
+                     value = 100, min = 0, step = 50),
+        numericInput("min_trusted_valBL", "Min high/medium credibility cells",
+                     value = 0, min = 0, step = 1)
+      )),
+      mainPanel(div(class = "main-card",
+        h4("Current BUY list - serving.return_cluster_ticker_global_action_current x validated payoff",
+           style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+        tags$div(
+          style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #f59e0b; border-radius: 4px;
+                   color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
+                   margin-bottom: 0.75rem;",
+          tags$b(style = "color: #fbbf24;", "Read: "),
+          "tickers the model currently marks BUY, scored by the realized walk-forward ",
+          "payoff (expectancy = mean holdout trade return, win %) of the exact ",
+          "(id, past_lag, fut_lag) cells the signal fires on. Expectancy is holdout ",
+          "evidence, not a forward promise."
+        ),
+        plotlyOutput("buyScatterBL", height = "460px"),
+        tags$br(),
+        DT::DTOutput("buyTableBL")
+      ))
+    )
   )
 )
 
@@ -2760,6 +2794,177 @@ server <- function(input, output, session) {
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
         margin = list(l = 110, r = 30, b = 50, t = 30))
   })
+
+  # ── BUY LIST: Reactive values ──
+  app_dataBL <- reactiveVal(NULL)
+  status_msgBL <- reactiveVal("Ready")
+  output$statusMessageBL <- renderText({ status_msgBL() })
+  setup_env_switcher(input, session, "BL")
+
+  observeEvent(input$connect_btnBL, {
+    if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
+    status_msgBL("Connecting...")
+    tryCatch({
+      con <- get_con(input, "BL")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      n <- dbGetQuery(con, "
+        SELECT COUNT(*) AS n
+        FROM serving.return_cluster_ticker_global_action_current
+        WHERE global_action = 'BUY'")$n[1]
+      status_msgBL(sprintf("Connected. %d tickers currently BUY.", as.numeric(n)))
+    }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
+  })
+
+  observeEvent(input$execute_BL, {
+    if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
+    status_msgBL("Running query...")
+    fut_cap <- as.integer(input$fut_cap_valBL)
+    query <- sprintf("
+      WITH buys AS (
+          SELECT ticker, id, archetype, buy_weight, buy_votes, agg_rank
+          FROM serving.return_cluster_ticker_global_action_current
+          WHERE global_action = 'BUY'
+      ),
+      cells AS (
+          SELECT p.ticker, p.id, p.past_lag, p.fut_lag, p.bucket
+          FROM serving.return_cluster_ticker_pair_current p
+          JOIN buys b ON b.ticker = p.ticker AND b.id = p.id
+          WHERE p.recommendation IN ('STRONG_PICK','BUY','OUTLIER_BUY')
+            AND p.fut_lag <= %d
+      ),
+      payoff AS (
+          SELECT c.ticker, c.id,
+                 COUNT(*) AS n_buy_cells,
+                 SUM(pb.expectancy * pb.n_holdout)
+                   / NULLIF(SUM(pb.n_holdout), 0) AS wtd_expectancy,
+                 SUM(pb.win_pct * pb.n_holdout)
+                   / NULLIF(SUM(pb.n_holdout), 0) AS wtd_win_pct,
+                 SUM(pb.n_holdout) AS total_holdout
+          FROM cells c
+          JOIN validation.return_cluster_payoff_backtest pb
+            ON pb.id = c.id AND pb.past_lag = c.past_lag AND pb.fut_lag = c.fut_lag
+          GROUP BY c.ticker, c.id
+      ),
+      cred AS (
+          SELECT c.ticker, c.id,
+                 AVG(cc.credibility_weight) AS avg_cred_weight,
+                 COUNT(*) FILTER (WHERE cc.tier IN ('high','medium')) AS n_trusted_cells
+          FROM cells c
+          JOIN analysis.ticker_cluster_segments s ON s.ticker = c.ticker
+          LEFT JOIN validation.cell_credibility cc
+            ON cc.vol_bucket_num = s.monthly_growth_vol_z_bucket_num
+           AND cc.id = c.id AND cc.past_lag = c.past_lag
+           AND cc.fut_lag = c.fut_lag AND cc.bucket = c.bucket
+          GROUP BY c.ticker, c.id
+      )
+      SELECT b.ticker, b.id, b.archetype, b.buy_weight, b.buy_votes, b.agg_rank,
+             p.n_buy_cells,
+             ROUND(p.wtd_expectancy::numeric, 3) AS wtd_expectancy,
+             ROUND(p.wtd_win_pct::numeric, 1)    AS wtd_win_pct,
+             p.total_holdout,
+             ROUND(cr.avg_cred_weight::numeric, 3) AS avg_cred_weight,
+             cr.n_trusted_cells,
+             ROUND(ic.weighted_ic::numeric, 3) AS cluster_ic_12
+      FROM buys b
+      LEFT JOIN payoff p USING (ticker, id)
+      LEFT JOIN cred cr USING (ticker, id)
+      LEFT JOIN validation.walk_forward_id_ic ic
+        ON ic.id = b.id AND ic.fut_lag = 12
+      ORDER BY p.wtd_expectancy DESC NULLS LAST, b.buy_weight DESC;", fut_cap)
+    tryCatch({
+      con <- get_con(input, "BL")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      df <- dbGetQuery(con, query)
+      df$id       <- as.integer(df$id)
+      df$agg_rank <- as.integer(df$agg_rank)
+      # COUNT/SUM columns arrive as integer64 (see the RS n_obs note above)
+      for (col in c("buy_votes", "n_buy_cells", "total_holdout", "n_trusted_cells"))
+        df[[col]] <- as.numeric(df[[col]])
+      for (col in c("buy_weight", "wtd_expectancy", "wtd_win_pct",
+                    "avg_cred_weight", "cluster_ic_12"))
+        df[[col]] <- as.numeric(df[[col]])
+      n_before <- nrow(df)
+      keep <- (!is.na(df$total_holdout) & df$total_holdout >= input$min_holdout_valBL) &
+              (is.na(df$n_trusted_cells) | df$n_trusted_cells >= input$min_trusted_valBL)
+      df <- df[keep, ]
+      app_dataBL(df)
+      status_msgBL(sprintf("Loaded %d BUY tickers (%d dropped by filters).",
+                           nrow(df), n_before - nrow(df)))
+    }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
+  })
+
+  output$buyScatterBL <- renderPlotly({
+    req(app_dataBL())
+    df <- app_dataBL()
+    if (nrow(df) == 0) return(plot_ly() %>% layout(
+      title = list(text = "No BUY tickers pass the filters", font = list(color = "#f8fafc")),
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    df$hover <- sprintf(
+      "%s (id %d, %s)<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f",
+      df$ticker, df$id, df$archetype,
+      df$wtd_expectancy, df$wtd_win_pct,
+      as.integer(df$n_buy_cells), as.integer(df$total_holdout),
+      ifelse(is.na(df$avg_cred_weight), 0, df$avg_cred_weight),
+      df$buy_weight, ifelse(is.na(df$cluster_ic_12), 0, df$cluster_ic_12))
+    plot_ly(df, x = ~wtd_win_pct, y = ~wtd_expectancy,
+            color = ~factor(id),
+            size = ~buy_weight, sizes = c(8, 22),
+            type = "scatter", mode = "markers",
+            marker = list(sizemode = "area", opacity = 0.8),
+            customdata = ~hover,
+            hovertemplate = "%{customdata}<extra></extra>") %>%
+      layout(
+        paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+        legend = list(title = list(text = "id"), font = list(color = "#94a3b8")),
+        shapes = list(
+          list(type = "line", x0 = 50, x1 = 50, yref = "paper", y0 = 0, y1 = 1,
+               line = list(dash = "dash", color = "rgba(255,255,255,0.25)")),
+          list(type = "line", y0 = 0, y1 = 0, xref = "paper", x0 = 0, x1 = 1,
+               line = list(dash = "dash", color = "rgba(255,255,255,0.25)"))),
+        xaxis = list(title = "Payoff-weighted win % (coin flip = 50)",
+                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+        yaxis = list(title = "Payoff-weighted expectancy (mean holdout trade return)",
+                     color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+        margin = list(l = 70, r = 30, b = 50, t = 30))
+  })
+
+  output$buyTableBL <- DT::renderDT({
+    df <- app_dataBL()
+    if (is.null(df) || nrow(df) == 0) {
+      return(DT::datatable(
+        data.frame(Note = "Connect and Generate Chart to load the BUY list."),
+        selection = "none", rownames = FALSE, class = "compact",
+        options = list(dom = "t", ordering = FALSE)))
+    }
+    display <- data.frame(
+      Ticker        = df$ticker,
+      Id            = df$id,
+      Archetype     = df$archetype,
+      `Expectancy`  = df$wtd_expectancy,
+      `Win %`       = df$wtd_win_pct,
+      `Buy cells`   = as.integer(df$n_buy_cells),
+      `Holdout n`   = as.integer(df$total_holdout),
+      `Cred weight` = df$avg_cred_weight,
+      `Trusted cells` = as.integer(df$n_trusted_cells),
+      `Buy weight`  = df$buy_weight,
+      `Agg rank`    = df$agg_rank,
+      `Cluster IC(12)` = df$cluster_ic_12,
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    DT::datatable(
+      display,
+      selection = "none",
+      rownames  = FALSE,
+      class     = "compact",
+      options   = list(
+        pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
+        dom = "ftip",
+        order = list(list(3, "desc")),
+        columnDefs = list(list(className = "dt-right", targets = 3:11))
+      )
+    )
+  }, server = FALSE)
 }
 
 # Run the application
