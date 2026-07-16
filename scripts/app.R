@@ -671,7 +671,15 @@ ui <- navbarPage(
   tabPanel("Buy List",
     sidebarLayout(
       make_sidebar("BL", "Database Connection (Buy List)", tagList(
-        dateInput("asof_valBL", "As-of date", value = NULL, format = "yyyy-mm-dd"),
+        tags$label("As-of date", style = "color: #94a3b8; font-weight: 600;"),
+        splitLayout(
+          cellWidths = c("30%", "38%", "32%"),
+          selectInput("asof_dayBL", NULL, choices = 1:31, selected = 1),
+          selectInput("asof_monthBL", NULL,
+                      choices = setNames(1:12, month.abb), selected = 1),
+          selectInput("asof_yearBL", NULL,
+                      choices = c("Connect first..." = ""), selected = "")
+        ),
         actionButton("todayBtnBL", "Set current date",
                      class = "btn-primary", style = "margin-bottom: 0.75rem;"),
         tags$p(paste("Latest date = live BUY list with payoff evidence.",
@@ -691,20 +699,8 @@ ui <- navbarPage(
                      value = 0, min = 0, step = 1)
       )),
       mainPanel(div(class = "main-card",
-        h4("Current BUY list - serving.return_cluster_ticker_global_action_current x validated payoff",
-           style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-        tags$div(
-          style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
-                   border-left: 2px solid #f59e0b; border-radius: 4px;
-                   color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
-                   margin-bottom: 0.75rem;",
-          tags$b(style = "color: #fbbf24;", "Read: "),
-          "tickers the model currently marks BUY, scored by the realized walk-forward ",
-          "payoff (expectancy = mean holdout trade return, win %) of the exact ",
-          "(id, past_lag, fut_lag) cells the signal fires on. Expectancy is holdout ",
-          "evidence, not a forward promise."
-        ),
-        plotlyOutput("buyScatterBL", height = "460px"),
+        uiOutput("modeNoteBL"),
+        plotlyOutput("buyScatterBL", height = "620px"),
         tags$br(),
         DT::DTOutput("buyTableBL")
       ))
@@ -2814,6 +2810,66 @@ server <- function(input, output, session) {
   output$statusMessageBL <- renderText({ status_msgBL() })
   setup_env_switcher(input, session, "BL")
 
+  # Build the as-of date from the three dropdowns; clamp day so e.g.
+  # Feb 31 resolves to Feb 28 instead of NA.
+  asof_dateBL <- function() {
+    y <- suppressWarnings(as.integer(input$asof_yearBL))
+    m <- suppressWarnings(as.integer(input$asof_monthBL))
+    d <- suppressWarnings(as.integer(input$asof_dayBL))
+    if (is.na(y) || is.na(m) || is.na(d)) return(NULL)
+    # as.Date ERRORS (not NA) on impossible dates like Feb 31, so wrap it
+    safe_date <- function(s) tryCatch(as.Date(s), error = function(e) as.Date(NA))
+    dt <- safe_date(sprintf("%04d-%02d-%02d", y, m, d))
+    while (is.na(dt) && d > 28) {
+      d <- d - 1
+      dt <- safe_date(sprintf("%04d-%02d-%02d", y, m, d))
+    }
+    dt
+  }
+
+  set_asof_dropdowns <- function(session, date) {
+    updateSelectInput(session, "asof_yearBL",  selected = format(date, "%Y"))
+    updateSelectInput(session, "asof_monthBL", selected = as.integer(format(date, "%m")))
+    updateSelectInput(session, "asof_dayBL",   selected = as.integer(format(date, "%d")))
+  }
+
+  output$modeNoteBL <- renderUI({
+    mode <- app_modeBL()
+    box_style <- "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
+                  border-left: 2px solid #f59e0b; border-radius: 4px;
+                  color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
+                  margin-bottom: 0.75rem;"
+    h_style <- "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"
+    if (mode == "wf") {
+      tagList(
+        h4("Backtest replay - validation.walk_forward_ticker_rank", style = h_style),
+        tags$div(style = box_style,
+          tags$b(style = "color: #fbbf24;", "Read: "),
+          "the model's top 5 ranked tickers per long cluster at the nearest ",
+          "quarterly walk-forward cutoff. Each bar = one pick's REALIZED 12-month ",
+          "return relative to SPY after that date. Green beat SPY, red lagged it. ",
+          "This is backtest ranking only - the live BUY gates did not exist then."))
+    } else if (mode == "ledger") {
+      tagList(
+        h4("Ledger replay - monitoring.prediction_ledger", style = h_style),
+        tags$div(style = box_style,
+          tags$b(style = "color: #fbbf24;", "Read: "),
+          "the BUY calls the live system actually logged on the selected date, ",
+          "graded to the latest close. Each bar = one ticker's return since entry ",
+          "relative to SPY. Green beat SPY, red lagged it."))
+    } else {
+      tagList(
+        h4("Current BUY list - serving.return_cluster_ticker_global_action_current x validated payoff",
+           style = h_style),
+        tags$div(style = box_style,
+          tags$b(style = "color: #fbbf24;", "Read: "),
+          "tickers the model currently marks BUY, scored by the realized walk-forward ",
+          "payoff (expectancy = mean holdout trade return, win %) of the exact ",
+          "(id, past_lag, fut_lag) cells the signal fires on. Expectancy is holdout ",
+          "evidence, not a forward promise."))
+    }
+  })
+
   observeEvent(input$connect_btnBL, {
     if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
     status_msgBL("Connecting...")
@@ -2836,10 +2892,11 @@ server <- function(input, output, session) {
       if (!is.na(bounds$min_d[1])) {
         ledger_boundsBL(c(bounds$min_d[1], bounds$max_d[1]))
         wf_minBL(wf_min)
-        updateDateInput(session, "asof_valBL",
-                        value = bounds$max_d[1],
-                        min = if (!is.na(wf_min)) wf_min else bounds$min_d[1],
-                        max = bounds$max_d[1])
+        yr_lo <- as.integer(format(if (!is.na(wf_min)) wf_min else bounds$min_d[1], "%Y"))
+        yr_hi <- as.integer(format(bounds$max_d[1], "%Y"))
+        updateSelectInput(session, "asof_yearBL", choices = seq(yr_hi, yr_lo),
+                          selected = yr_hi)
+        set_asof_dropdowns(session, bounds$max_d[1])
       }
       status_msgBL(sprintf("Connected. %d tickers currently BUY. Ledger %s to %s; walk-forward back to %s.",
                            as.numeric(n), bounds$min_d[1], bounds$max_d[1], wf_min))
@@ -2849,7 +2906,7 @@ server <- function(input, output, session) {
   observeEvent(input$todayBtnBL, {
     b <- ledger_boundsBL()
     if (is.null(b)) { status_msgBL("Connect first to load the date range."); return() }
-    updateDateInput(session, "asof_valBL", value = b[2])
+    set_asof_dropdowns(session, b[2])
     status_msgBL(sprintf("As-of date set to latest snapshot (%s).", b[2]))
   })
 
@@ -2857,7 +2914,7 @@ server <- function(input, output, session) {
     if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
     status_msgBL("Running query...")
     b <- ledger_boundsBL()
-    asof <- input$asof_valBL
+    asof <- asof_dateBL()
     has_date <- !is.null(b) && !is.null(asof) && length(asof) == 1 && !is.na(asof)
     is_wf     <- has_date && asof < b[1]
     is_ledger <- has_date && !is_wf && asof < b[2]
@@ -3051,67 +3108,48 @@ server <- function(input, output, session) {
     if (nrow(df) == 0) return(plot_ly() %>% layout(
       title = list(text = "No BUY tickers pass the filters", font = list(color = "#f8fafc")),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
-    if (app_modeBL() == "wf") {
-      # Backtest replay: rank slot vs realized 12mo excess return
-      df$hover <- sprintf(
-        "%s (id %d)<br>cutoff %s | rank %d of %d<br>score %.4f | 12mo excess vs SPY %+.1f%%",
-        df$ticker, df$id, df$train_cutoff_date,
-        df$rank_within_cluster, df$cluster_size,
-        ifelse(is.na(df$ticker_score), 0, df$ticker_score),
-        ifelse(is.na(df$fwd_excess_pct), 0, df$fwd_excess_pct))
+    if (app_modeBL() %in% c("wf", "ledger")) {
+      # Replay modes: one bar per pick, sorted by realized excess vs SPY.
+      # Green = beat SPY, red = lagged it. Reads top-to-bottom: best to worst.
+      if (app_modeBL() == "wf") {
+        df$excess <- df$fwd_excess_pct
+        df$hover <- sprintf(
+          "%s (id %d)<br>cutoff %s | rank %d of %d | score %.4f<br>realized 12mo excess vs SPY %+.1f%%",
+          df$ticker, df$id, df$train_cutoff_date,
+          df$rank_within_cluster, df$cluster_size,
+          ifelse(is.na(df$ticker_score), 0, df$ticker_score),
+          ifelse(is.na(df$fwd_excess_pct), 0, df$fwd_excess_pct))
+        x_title <- "Realized 12mo excess return vs SPY (%)"
+      } else {
+        df$excess <- df$excess_vs_spy_pct
+        df$hover <- sprintf(
+          "%s<br>snapshot %s | entry %s @ %.2f -> latest %.2f<br>ret %.1f%% | vs SPY %+.1f%% | buy weight %.2f",
+          df$ticker, df$prediction_date, df$entry_date, df$entry_adj_close,
+          ifelse(is.na(df$latest_close), 0, df$latest_close),
+          ifelse(is.na(df$ret_since_pct), 0, df$ret_since_pct),
+          ifelse(is.na(df$excess_vs_spy_pct), 0, df$excess_vs_spy_pct),
+          df$buy_weight)
+        x_title <- "Return since entry, relative to SPY (%)"
+      }
+      df <- df[order(df$excess, decreasing = FALSE, na.last = FALSE), ]
       return(
-        plot_ly(df, x = ~jitter(rank_within_cluster, amount = 0.15),
-                y = ~fwd_excess_pct,
-                color = ~factor(id),
-                colors = colorRampPalette(c('#38bdf8', '#a855f7', '#f59e0b',
-                                            '#10b981', '#dc2626'))(length(unique(df$id))),
-                type = "scatter", mode = "markers",
-                marker = list(size = 9, opacity = 0.85),
-                customdata = ~hover,
-                hovertemplate = "%{customdata}<extra></extra>") %>%
-          layout(
-            paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
-            legend = list(title = list(text = "id"), font = list(color = "#94a3b8")),
-            shapes = list(
-              list(type = "line", y0 = 0, y1 = 0, xref = "paper", x0 = 0, x1 = 1,
-                   line = list(dash = "dash", color = "rgba(255,255,255,0.25)"))),
-            xaxis = list(title = "Rank within cluster (1 = top pick)",
-                         tickvals = 1:5,
-                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-            yaxis = list(title = "Realized 12mo excess return vs SPY (%)",
-                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-            margin = list(l = 70, r = 30, b = 50, t = 30))
-      )
-    }
-    if (app_modeBL() == "ledger") {
-      # As-of replay: realized return since the snapshot's entry
-      df$hover <- sprintf(
-        "%s<br>snapshot %s | entry %s @ %.2f<br>latest %.2f | ret %.1f%% | vs SPY %+.1f%%<br>buy weight %.2f | votes %d",
-        df$ticker, df$prediction_date, df$entry_date, df$entry_adj_close,
-        ifelse(is.na(df$latest_close), 0, df$latest_close),
-        ifelse(is.na(df$ret_since_pct), 0, df$ret_since_pct),
-        ifelse(is.na(df$excess_vs_spy_pct), 0, df$excess_vs_spy_pct),
-        df$buy_weight, as.integer(df$buy_votes))
-      return(
-        plot_ly(df, x = ~ret_since_pct, y = ~excess_vs_spy_pct,
-                size = ~buy_weight, sizes = c(8, 22),
-                type = "scatter", mode = "markers",
-                marker = list(sizemode = "area", opacity = 0.8,
-                              color = "#38bdf8"),
+        plot_ly(df, x = ~excess, y = ~ticker, type = "bar", orientation = "h",
+                marker = list(color = ifelse(is.na(df$excess), '#64748b',
+                                      ifelse(df$excess >= 0, '#10b981', '#dc2626'))),
                 customdata = ~hover,
                 hovertemplate = "%{customdata}<extra></extra>") %>%
           layout(
             paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
             shapes = list(
               list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
-                   line = list(dash = "dash", color = "rgba(255,255,255,0.25)")),
-              list(type = "line", y0 = 0, y1 = 0, xref = "paper", x0 = 0, x1 = 1,
-                   line = list(dash = "dash", color = "rgba(255,255,255,0.25)"))),
-            xaxis = list(title = "Return since entry (%)",
+                   line = list(color = "rgba(255,255,255,0.4)"))),
+            xaxis = list(title = x_title,
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-            yaxis = list(title = "Excess vs SPY since entry (%)",
-                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-            margin = list(l = 70, r = 30, b = 50, t = 30))
+            yaxis = list(title = "", type = "category",
+                         categoryorder = "array", categoryarray = df$ticker,
+                         tickfont = list(size = 9),
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
+            margin = list(l = 70, r = 30, b = 50, t = 10))
       )
     }
     df$hover <- sprintf(
