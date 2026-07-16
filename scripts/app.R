@@ -671,6 +671,11 @@ ui <- navbarPage(
   tabPanel("Buy List",
     sidebarLayout(
       make_sidebar("BL", "Database Connection (Buy List)", tagList(
+        dateInput("asof_valBL", "As-of date", value = NULL, format = "yyyy-mm-dd"),
+        actionButton("todayBtnBL", "Set current date",
+                     class = "btn-primary", style = "margin-bottom: 0.75rem;"),
+        tags$p("Latest date = live BUY list with payoff evidence. An earlier date replays the ledger snapshot and grades it to today.",
+               style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
         selectInput("fut_cap_valBL", "Max fut_lag for payoff evidence",
                     choices = c("12 (matched short horizons)" = "12",
                                 "33 (all capped horizons)"    = "33"),
@@ -2797,6 +2802,8 @@ server <- function(input, output, session) {
 
   # ── BUY LIST: Reactive values ──
   app_dataBL <- reactiveVal(NULL)
+  app_modeBL <- reactiveVal("current")   # "current" or "ledger" (as-of replay)
+  ledger_boundsBL <- reactiveVal(NULL)   # c(min_date, max_date) of prediction_ledger
   status_msgBL <- reactiveVal("Ready")
   output$statusMessageBL <- renderText({ status_msgBL() })
   setup_env_switcher(input, session, "BL")
@@ -2811,13 +2818,93 @@ server <- function(input, output, session) {
         SELECT COUNT(*) AS n
         FROM serving.return_cluster_ticker_global_action_current
         WHERE global_action = 'BUY'")$n[1]
-      status_msgBL(sprintf("Connected. %d tickers currently BUY.", as.numeric(n)))
+      bounds <- dbGetQuery(con, "
+        SELECT MIN(prediction_date) AS min_d, MAX(prediction_date) AS max_d
+        FROM monitoring.prediction_ledger")
+      if (!is.na(bounds$min_d[1])) {
+        ledger_boundsBL(c(bounds$min_d[1], bounds$max_d[1]))
+        updateDateInput(session, "asof_valBL",
+                        value = bounds$max_d[1],
+                        min = bounds$min_d[1], max = bounds$max_d[1])
+      }
+      status_msgBL(sprintf("Connected. %d tickers currently BUY. Ledger history %s to %s.",
+                           as.numeric(n), bounds$min_d[1], bounds$max_d[1]))
     }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
+  })
+
+  observeEvent(input$todayBtnBL, {
+    b <- ledger_boundsBL()
+    if (is.null(b)) { status_msgBL("Connect first to load the date range."); return() }
+    updateDateInput(session, "asof_valBL", value = b[2])
+    status_msgBL(sprintf("As-of date set to latest snapshot (%s).", b[2]))
   })
 
   observeEvent(input$execute_BL, {
     if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
     status_msgBL("Running query...")
+    b <- ledger_boundsBL()
+    asof <- input$asof_valBL
+    is_ledger <- !is.null(b) && !is.null(asof) && length(asof) == 1 &&
+                 !is.na(asof) && asof < b[2]
+
+    if (is_ledger) {
+      # ── As-of replay: ledger snapshot graded to the latest price ──
+      query <- sprintf("
+        WITH sel AS (
+            SELECT MAX(prediction_date) AS d
+            FROM monitoring.prediction_ledger
+            WHERE prediction_date <= '%s'
+        ),
+        snap AS (
+            SELECT l.*
+            FROM monitoring.prediction_ledger l
+            JOIN sel ON l.prediction_date = sel.d
+            WHERE l.global_action = 'BUY'
+        ),
+        px AS (
+            SELECT ticker, adj_close FROM (
+                SELECT ticker, adj_close,
+                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) rn
+                FROM cdm.ingest_combined
+                WHERE ticker IN (SELECT ticker FROM snap)
+            ) t WHERE rn = 1
+        ),
+        spy AS (
+            SELECT adj_close FROM cdm.ingest_combined
+            WHERE ticker = 'SPY' ORDER BY date DESC LIMIT 1
+        )
+        SELECT s.prediction_date, s.ticker, s.buy_votes, s.buy_weight,
+               s.best_agg_rank, s.entry_date, s.entry_adj_close,
+               px.adj_close AS latest_close,
+               ROUND((((px.adj_close / NULLIF(s.entry_adj_close, 0)) - 1) * 100)::numeric, 1)
+                 AS ret_since_pct,
+               ROUND((((px.adj_close / NULLIF(s.entry_adj_close, 0))
+                       - (spy.adj_close / NULLIF(s.entry_spy_close, 0))) * 100)::numeric, 1)
+                 AS excess_vs_spy_pct
+        FROM snap s
+        LEFT JOIN px ON px.ticker = s.ticker
+        CROSS JOIN spy
+        ORDER BY excess_vs_spy_pct DESC NULLS LAST;",
+        format(asof, "%Y-%m-%d"))
+      tryCatch({
+        con <- get_con(input, "BL")
+        on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+        df <- dbGetQuery(con, query)
+        for (col in c("buy_votes", "best_agg_rank"))
+          df[[col]] <- as.numeric(df[[col]])              # integer64
+        for (col in c("buy_weight", "entry_adj_close", "latest_close",
+                      "ret_since_pct", "excess_vs_spy_pct"))
+          df[[col]] <- as.numeric(df[[col]])
+        app_modeBL("ledger")
+        app_dataBL(df)
+        snap_d <- if (nrow(df) > 0) df$prediction_date[1] else asof
+        status_msgBL(sprintf("Replayed snapshot %s: %d BUYs, graded to latest close.",
+                             snap_d, nrow(df)))
+      }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
+      return()
+    }
+
+    # ── Current mode: live BUY list with payoff evidence ──
     fut_cap <- as.integer(input$fut_cap_valBL)
     query <- sprintf("
       WITH buys AS (
@@ -2887,6 +2974,7 @@ server <- function(input, output, session) {
       keep <- (!is.na(df$total_holdout) & df$total_holdout >= input$min_holdout_valBL) &
               (is.na(df$n_trusted_cells) | df$n_trusted_cells >= input$min_trusted_valBL)
       df <- df[keep, ]
+      app_modeBL("current")
       app_dataBL(df)
       status_msgBL(sprintf("Loaded %d BUY tickers (%d dropped by filters).",
                            nrow(df), n_before - nrow(df)))
@@ -2899,6 +2987,37 @@ server <- function(input, output, session) {
     if (nrow(df) == 0) return(plot_ly() %>% layout(
       title = list(text = "No BUY tickers pass the filters", font = list(color = "#f8fafc")),
       paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (app_modeBL() == "ledger") {
+      # As-of replay: realized return since the snapshot's entry
+      df$hover <- sprintf(
+        "%s<br>snapshot %s | entry %s @ %.2f<br>latest %.2f | ret %.1f%% | vs SPY %+.1f%%<br>buy weight %.2f | votes %d",
+        df$ticker, df$prediction_date, df$entry_date, df$entry_adj_close,
+        ifelse(is.na(df$latest_close), 0, df$latest_close),
+        ifelse(is.na(df$ret_since_pct), 0, df$ret_since_pct),
+        ifelse(is.na(df$excess_vs_spy_pct), 0, df$excess_vs_spy_pct),
+        df$buy_weight, as.integer(df$buy_votes))
+      return(
+        plot_ly(df, x = ~ret_since_pct, y = ~excess_vs_spy_pct,
+                size = ~buy_weight, sizes = c(8, 22),
+                type = "scatter", mode = "markers",
+                marker = list(sizemode = "area", opacity = 0.8,
+                              color = "#38bdf8"),
+                customdata = ~hover,
+                hovertemplate = "%{customdata}<extra></extra>") %>%
+          layout(
+            paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+            shapes = list(
+              list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
+                   line = list(dash = "dash", color = "rgba(255,255,255,0.25)")),
+              list(type = "line", y0 = 0, y1 = 0, xref = "paper", x0 = 0, x1 = 1,
+                   line = list(dash = "dash", color = "rgba(255,255,255,0.25)"))),
+            xaxis = list(title = "Return since entry (%)",
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+            yaxis = list(title = "Excess vs SPY since entry (%)",
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+            margin = list(l = 70, r = 30, b = 50, t = 30))
+      )
+    }
     df$hover <- sprintf(
       "%s (id %d, %s)<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f",
       df$ticker, df$id, df$archetype,
@@ -2935,6 +3054,34 @@ server <- function(input, output, session) {
         data.frame(Note = "Connect and Generate Chart to load the BUY list."),
         selection = "none", rownames = FALSE, class = "compact",
         options = list(dom = "t", ordering = FALSE)))
+    }
+    if (app_modeBL() == "ledger") {
+      display <- data.frame(
+        Ticker          = df$ticker,
+        Snapshot        = as.character(df$prediction_date),
+        `Entry date`    = as.character(df$entry_date),
+        `Entry close`   = df$entry_adj_close,
+        `Latest close`  = df$latest_close,
+        `Ret %`         = df$ret_since_pct,
+        `vs SPY %`      = df$excess_vs_spy_pct,
+        `Buy weight`    = df$buy_weight,
+        `Buy votes`     = as.integer(df$buy_votes),
+        `Agg rank`      = as.integer(df$best_agg_rank),
+        check.names = FALSE,
+        stringsAsFactors = FALSE
+      )
+      return(DT::datatable(
+        display,
+        selection = "none",
+        rownames  = FALSE,
+        class     = "compact",
+        options   = list(
+          pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
+          dom = "ftip",
+          order = list(list(6, "desc")),
+          columnDefs = list(list(className = "dt-right", targets = 3:9))
+        )
+      ))
     }
     display <- data.frame(
       Ticker        = df$ticker,
