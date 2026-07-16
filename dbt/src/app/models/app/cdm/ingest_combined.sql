@@ -5,25 +5,31 @@
     on_schema_change='sync_all_columns',
     post_hook=[
       """
-      CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_ticker_date
+      DROP INDEX IF EXISTS {{ this.schema }}.idx_{{ this.identifier }}_ticker_date;
+      CREATE INDEX idx_{{ this.identifier }}_ticker_date
       ON {{ this }} (ticker, date);
       """,
       """
-      CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_ticker_date_desc
+      DROP INDEX IF EXISTS {{ this.schema }}.idx_{{ this.identifier }}_ticker_date_desc;
+      CREATE INDEX idx_{{ this.identifier }}_ticker_date_desc
       ON {{ this }} (ticker, date DESC);
       """,
       """
-      CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_ticker_date_id
+      DROP INDEX IF EXISTS {{ this.schema }}.idx_{{ this.identifier }}_ticker_date_id;
+      CREATE INDEX idx_{{ this.identifier }}_ticker_date_id
       ON {{ this }} (ticker_date_id);
       """,
       """
-      CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_source
+      DROP INDEX IF EXISTS {{ this.schema }}.idx_{{ this.identifier }}_source;
+      CREATE INDEX idx_{{ this.identifier }}_source
       ON {{ this }} (source);
       """,
       """
-      CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_processed_at_desc
+      DROP INDEX IF EXISTS {{ this.schema }}.idx_{{ this.identifier }}_processed_at_desc;
+      CREATE INDEX idx_{{ this.identifier }}_processed_at_desc
       ON {{ this }} (processed_at DESC);
-      """
+      """,
+      "ANALYZE {{ this }};"
     ]
   )
 }}
