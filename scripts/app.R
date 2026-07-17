@@ -2860,6 +2860,8 @@ server <- function(input, output, session) {
           "the model's top 5 ranked tickers per long cluster at the nearest ",
           "quarterly walk-forward cutoff. Each bar = one pick's REALIZED 12-month ",
           "return relative to SPY after that date. Green beat SPY, red lagged it. ",
+          "A burnt-orange dot (and orange ticker in the table) = the company no ",
+          "longer trades (no price bar within 10 days of the latest market date). ",
           "This is backtest ranking only - the live BUY gates did not exist then."))
     } else if (mode == "ledger") {
       tagList(
@@ -2868,7 +2870,9 @@ server <- function(input, output, session) {
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the BUY calls the live system actually logged on the selected date, ",
           "graded to the latest close. Each bar = one ticker's return since entry ",
-          "relative to SPY. Green beat SPY, red lagged it."))
+          "relative to SPY. Green beat SPY, red lagged it. A burnt-orange dot ",
+          "(and orange ticker in the table) = delisted since entry; its 'latest ",
+          "close' is the final traded price."))
     } else {
       tagList(
         h4("Current BUY list - serving.return_cluster_ticker_global_action_current x validated payoff",
@@ -2944,15 +2948,25 @@ server <- function(input, output, session) {
               AND EXISTS (SELECT 1 FROM validation.walk_forward_cluster_id_map m
                           WHERE m.train_cutoff_date = r.train_cutoff_date)
         )
+        , mkt AS (
+            -- SPY always has the latest bar; MAX(date) without the ticker
+            -- prefix would full-scan (no bare date index)
+            SELECT MAX(date) AS market_max FROM cdm.ingest_combined
+            WHERE ticker = 'SPY'
+        )
         SELECT r.train_cutoff_date, m.id, r.ticker, r.rank_within_cluster,
                r.cluster_size,
                ROUND(r.ticker_score::numeric, 4)   AS ticker_score,
-               ROUND(r.forward_return::numeric, 1) AS fwd_excess_pct
+               ROUND(r.forward_return::numeric, 1) AS fwd_excess_pct,
+               ((SELECT MAX(i.date) FROM cdm.ingest_combined i
+                 WHERE i.ticker = r.ticker)
+                  >= mkt.market_max - INTERVAL '10 days') AS is_active
         FROM validation.walk_forward_ticker_rank r
         JOIN sel ON r.train_cutoff_date = sel.d
         JOIN validation.walk_forward_cluster_id_map m
           ON m.train_cutoff_date = r.train_cutoff_date
          AND m.cluster_id = r.cluster_id
+        CROSS JOIN mkt
         WHERE r.fut_lag = 12
           AND m.id <= 12                 -- long clusters = buy side
           AND r.rank_within_cluster <= 5
@@ -2970,6 +2984,7 @@ server <- function(input, output, session) {
         for (col in c("id", "rank_within_cluster", "cluster_size"))
           df[[col]] <- as.integer(df[[col]])   # stay integer: used in sprintf("%d")
         df <- coerce_numeric_cols(df, c("ticker_score", "fwd_excess_pct"))
+        df$delisted <- is.na(df$is_active) | !df$is_active
         app_modeBL("wf")
         app_dataBL(df)
         status_msgBL(sprintf(
@@ -2997,15 +3012,15 @@ server <- function(input, output, session) {
             WHERE l.global_action = 'BUY'
         ),
         px AS (
-            SELECT ticker, adj_close FROM (
-                SELECT ticker, adj_close,
+            SELECT ticker, adj_close, date AS last_bar FROM (
+                SELECT ticker, adj_close, date,
                        ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) rn
                 FROM cdm.ingest_combined
                 WHERE ticker IN (SELECT ticker FROM snap)
             ) t WHERE rn = 1
         ),
         spy AS (
-            SELECT adj_close FROM cdm.ingest_combined
+            SELECT adj_close, date AS market_max FROM cdm.ingest_combined
             WHERE ticker = 'SPY' ORDER BY date DESC LIMIT 1
         )
         SELECT s.prediction_date, s.ticker, s.buy_votes, s.buy_weight,
@@ -3015,7 +3030,8 @@ server <- function(input, output, session) {
                  AS ret_since_pct,
                ROUND((((px.adj_close / NULLIF(s.entry_adj_close, 0))
                        - (spy.adj_close / NULLIF(s.entry_spy_close, 0))) * 100)::numeric, 1)
-                 AS excess_vs_spy_pct
+                 AS excess_vs_spy_pct,
+               (px.last_bar >= spy.market_max - INTERVAL '10 days') AS is_active
         FROM snap s
         LEFT JOIN px ON px.ticker = s.ticker
         CROSS JOIN spy
@@ -3028,6 +3044,7 @@ server <- function(input, output, session) {
         df <- coerce_numeric_cols(df, c(
           "buy_votes", "best_agg_rank", "buy_weight", "entry_adj_close",
           "latest_close", "ret_since_pct", "excess_vs_spy_pct"))
+        df$delisted <- is.na(df$is_active) | !df$is_active
         app_modeBL("ledger")
         app_dataBL(df)
         snap_d <- if (nrow(df) > 0) df$prediction_date[1] else asof
@@ -3147,14 +3164,28 @@ server <- function(input, output, session) {
         x_title <- "Return since entry, relative to SPY (%)"
       }
       df <- df[order(df$excess, decreasing = FALSE, na.last = FALSE), ]
+      p <- plot_ly(df, x = ~excess, y = ~ticker, type = "bar", orientation = "h",
+                   marker = list(color = ifelse(is.na(df$excess), '#64748b',
+                                         ifelse(df$excess >= 0, '#10b981', '#dc2626'))),
+                   customdata = ~hover, name = "excess vs SPY",
+                   hovertemplate = "%{customdata}<extra></extra>")
+      # burnt-orange dot at the bar tip = ticker no longer trades (no price
+      # bar within 10 days of the latest market date)
+      del <- df[df$delisted, , drop = FALSE]
+      if (nrow(del) > 0) {
+        p <- p %>% add_markers(
+          data = del, x = ~ifelse(is.na(excess), 0, excess), y = ~ticker,
+          marker = list(color = "#c2410c", size = 8,
+                        line = list(color = "#f8fafc", width = 1)),
+          name = "delisted",
+          hovertemplate = "%{y}: delisted<extra></extra>")
+      }
       return(
-        plot_ly(df, x = ~excess, y = ~ticker, type = "bar", orientation = "h",
-                marker = list(color = ifelse(is.na(df$excess), '#64748b',
-                                      ifelse(df$excess >= 0, '#10b981', '#dc2626'))),
-                customdata = ~hover,
-                hovertemplate = "%{customdata}<extra></extra>") %>%
+        p %>%
           layout(
             paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+            legend = list(font = list(color = "#94a3b8")),
+            showlegend = nrow(del) > 0,
             shapes = list(
               list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                    line = list(color = "rgba(255,255,255,0.4)"))),
@@ -3215,6 +3246,7 @@ server <- function(input, output, session) {
     if (app_modeBL() == "wf") {
       display <- data.frame(
         Ticker            = df$ticker,
+        Status            = ifelse(df$delisted, "delisted", ""),
         Id                = df$id,
         Cutoff            = as.character(df$train_cutoff_date),
         Rank              = df$rank_within_cluster,
@@ -3234,14 +3266,16 @@ server <- function(input, output, session) {
           pageLength = 25, lengthMenu = c(10, 25, 50, 100),
           dom = "Bftip",
           buttons = c("copy", "csv"),
-          order = list(list(6, "desc")),
-          columnDefs = list(list(className = "dt-right", targets = 3:6))
+          order = list(list(7, "desc")),
+          columnDefs = list(list(className = "dt-right", targets = 4:7))
         )
-      ))
+      ) %>% DT::formatStyle(c("Ticker", "Status"), valueColumns = "Status",
+                            color = DT::styleEqual("delisted", "#c2410c")))
     }
     if (app_modeBL() == "ledger") {
       display <- data.frame(
         Ticker          = df$ticker,
+        Status          = ifelse(df$delisted, "delisted", ""),
         Snapshot        = as.character(df$prediction_date),
         `Entry date`    = as.character(df$entry_date),
         `Entry close`   = df$entry_adj_close,
@@ -3264,10 +3298,11 @@ server <- function(input, output, session) {
           pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
           dom = "Bftip",
           buttons = c("copy", "csv"),
-          order = list(list(6, "desc")),
-          columnDefs = list(list(className = "dt-right", targets = 3:9))
+          order = list(list(7, "desc")),
+          columnDefs = list(list(className = "dt-right", targets = 4:10))
         )
-      ))
+      ) %>% DT::formatStyle(c("Ticker", "Status"), valueColumns = "Status",
+                            color = DT::styleEqual("delisted", "#c2410c")))
     }
     display <- data.frame(
       Ticker        = df$ticker,
