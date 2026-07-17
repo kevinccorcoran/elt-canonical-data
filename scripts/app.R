@@ -3202,12 +3202,17 @@ server <- function(input, output, session) {
     df
   }
 
-  # Chart container sized to the filtered row count so ALL bars are visible
-  # (the old fixed 620px forced trimming to best/worst 40).
+  # Chart container sized to the number of bars the chart ACTUALLY draws.
+  # The renderer reports the count after mode/view/filters/trim - sizing
+  # from the raw loaded count made a 21-bar shortlist stretch over 2800px
+  # (plotly fills whatever height it gets).
+  chart_rowsBL <- reactiveVal(0)
+  set_chart_rowsBL <- function(n) {
+    if (!identical(chart_rowsBL(), n)) chart_rowsBL(n)
+  }
   output$buyChartContainerBL <- renderUI({
-    df <- app_dataBL()
-    n <- if (is.null(df) || nrow(df) == 0) 0 else nrow(bl_apply_filters(df))
-    h <- max(620, min(2800, 15 * n + 140))
+    n <- chart_rowsBL()
+    h <- max(340, min(2800, 16 * n + 160))
     plotlyOutput("buyScatterBL", height = paste0(h, "px"))
   })
 
@@ -3251,6 +3256,7 @@ server <- function(input, output, session) {
           text = sprintf("Worst 90 and best 90 of %d picks (narrow with the id/rank filters; full list in table)", n_total),
           font = list(color = "#94a3b8", size = 12))
       }
+      set_chart_rowsBL(nrow(df))
       p <- plot_ly(df, x = ~excess, y = ~ticker, type = "bar", orientation = "h",
                    marker = list(color = ifelse(is.na(df$excess), '#64748b',
                                          ifelse(df$excess >= 0, '#10b981', '#dc2626'))),
@@ -3304,6 +3310,7 @@ server <- function(input, output, session) {
         ic12 = g$cluster_ic_12[1],
         stringsAsFactors = FALSE)))
       agg <- agg[order(agg$med_expectancy, na.last = FALSE), ]
+      set_chart_rowsBL(nrow(agg))
       agg$label <- sprintf("id %d (%s)", agg$id, agg$archetype)
       agg$hover <- sprintf(
         "id %d (%s)<br>%d BUY tickers<br>median expectancy %.3f | mean win %.1f%%<br>cluster IC(12) %.3f",
@@ -3352,6 +3359,7 @@ server <- function(input, output, session) {
         chart_text <- sprintf("All %d BUYs by holdout expectancy", n_total)
       }
     }
+    set_chart_rowsBL(nrow(df))
     df$hover <- sprintf(
       "%s (id %d, %s)<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f",
       df$ticker, df$id, df$archetype,
