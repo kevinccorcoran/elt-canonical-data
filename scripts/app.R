@@ -325,6 +325,27 @@ coerce_numeric_cols <- function(df, cols) {
   df
 }
 
+# Row-separator shapes for rank-grouped horizontal bar charts. ids_display is
+# the id per bar in DISPLAY (top-to-bottom) order; the categoryarray is the
+# reverse, so boundaries are computed on the reversed vector. Thin line
+# between every rank row, stronger line where the cluster id changes; the
+# faint per-row lines are dropped beyond 120 bars to keep the DOM sane.
+rank_sep_shapes <- function(ids_display) {
+  rev_id <- rev(ids_display)
+  n <- length(rev_id)
+  if (n < 2) return(list())
+  shapes <- lapply(seq_len(n - 1), function(i) {
+    id_change <- !identical(rev_id[i], rev_id[i + 1])
+    if (!id_change && n > 120) return(NULL)
+    list(type = "line", xref = "paper", x0 = 0, x1 = 1, yref = "y",
+         y0 = i - 0.5, y1 = i - 0.5,
+         line = list(width = if (id_change) 1 else 0.5,
+                     color = if (id_change) "rgba(255,255,255,0.35)"
+                             else "rgba(255,255,255,0.12)"))
+  })
+  Filter(Negate(is.null), shapes)
+}
+
 # ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
@@ -754,6 +775,10 @@ ui <- navbarPage(
                                 "Top 5"             = "5",
                                 "Top 10"            = "10"),
                     selected = "ALL"),
+        selectInput("sort_valBL", "Sort bars",
+                    choices = c("By return / expectancy" = "return",
+                                "By cluster & rank"      = "rank"),
+                    selected = "return"),
         selectInput("wf_topn_valBL", "Backtest replay: top N per cluster",
                     choices = c("5" = "5", "10" = "10", "20" = "20"),
                     selected = "5"),
@@ -3243,21 +3268,40 @@ server <- function(input, output, session) {
           df$buy_weight)
         x_title <- "Return since entry, relative to SPY (%)"
       }
-      df <- df[order(df$excess, decreasing = FALSE, na.last = FALSE), ]
-      # chart height now scales with row count, so show everything up to a
-      # DOM-sanity ceiling; use the id/rank filters to zoom in further
-      chart_title <- list(
-        text = sprintf("All %d picks", nrow(df)),
-        font = list(color = "#94a3b8", size = 12))
-      if (nrow(df) > 180) {
-        n_total <- nrow(df)
-        df <- rbind(head(df, 90), tail(df, 90))
+      # sort: by return (default) or grouped id > rank with separator lines
+      rank_mode <- identical(input$sort_valBL, "rank") &&
+                   app_modeBL() == "wf" && "rank_within_cluster" %in% names(df)
+      if (rank_mode) {
+        df <- df[order(df$id, df$rank_within_cluster), ]   # display top->bottom
+        df$ylab <- sprintf("id%d r%d | %s", df$id, df$rank_within_cluster, df$ticker)
         chart_title <- list(
-          text = sprintf("Worst 90 and best 90 of %d picks (narrow with the id/rank filters; full list in table)", n_total),
+          text = sprintf("All %d picks, grouped by cluster then rank (r1 = top pick)", nrow(df)),
           font = list(color = "#94a3b8", size = 12))
+        if (nrow(df) > 180) {
+          n_total <- nrow(df)
+          df <- head(df, 180)
+          chart_title <- list(
+            text = sprintf("First 180 of %d picks by cluster/rank (narrow with the id filter)", n_total),
+            font = list(color = "#94a3b8", size = 12))
+        }
+        cat_arr <- rev(df$ylab)   # categoryarray runs bottom->top
+      } else {
+        df <- df[order(df$excess, decreasing = FALSE, na.last = FALSE), ]
+        df$ylab <- df$ticker
+        chart_title <- list(
+          text = sprintf("All %d picks", nrow(df)),
+          font = list(color = "#94a3b8", size = 12))
+        if (nrow(df) > 180) {
+          n_total <- nrow(df)
+          df <- rbind(head(df, 90), tail(df, 90))
+          chart_title <- list(
+            text = sprintf("Worst 90 and best 90 of %d picks (narrow with the id/rank filters; full list in table)", n_total),
+            font = list(color = "#94a3b8", size = 12))
+        }
+        cat_arr <- df$ylab
       }
       set_chart_rowsBL(nrow(df))
-      p <- plot_ly(df, x = ~excess, y = ~ticker, type = "bar", orientation = "h",
+      p <- plot_ly(df, x = ~excess, y = ~ylab, type = "bar", orientation = "h",
                    marker = list(color = ifelse(is.na(df$excess), '#64748b',
                                          ifelse(df$excess >= 0, '#10b981', '#dc2626'))),
                    customdata = ~hover, name = "excess vs SPY",
@@ -3267,7 +3311,7 @@ server <- function(input, output, session) {
       del <- df[df$delisted, , drop = FALSE]
       if (nrow(del) > 0) {
         p <- p %>% add_markers(
-          data = del, x = ~ifelse(is.na(excess), 0, excess), y = ~ticker,
+          data = del, x = ~ifelse(is.na(excess), 0, excess), y = ~ylab,
           marker = list(color = "#c2410c", size = 8,
                         line = list(color = "#f8fafc", width = 1)),
           name = "delisted",
@@ -3280,16 +3324,17 @@ server <- function(input, output, session) {
             legend = list(font = list(color = "#94a3b8")),
             showlegend = nrow(del) > 0,
             title = chart_title,
-            shapes = list(
-              list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
-                   line = list(color = "rgba(255,255,255,0.4)"))),
+            shapes = c(
+              list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
+                        line = list(color = "rgba(255,255,255,0.4)"))),
+              if (rank_mode) rank_sep_shapes(df$id) else list()),
             xaxis = list(title = x_title,
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
             yaxis = list(title = "", type = "category",
-                         categoryorder = "array", categoryarray = df$ticker,
+                         categoryorder = "array", categoryarray = cat_arr,
                          tickfont = list(size = 9),
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
-            margin = list(l = 70, r = 30, b = 50,
+            margin = list(l = if (rank_mode) 120 else 70, r = 30, b = 50,
                           t = if (is.null(chart_title)) 10 else 40))
       )
     }
@@ -3367,8 +3412,19 @@ server <- function(input, output, session) {
       as.integer(df$n_buy_cells), as.integer(df$total_holdout),
       ifelse(is.na(df$avg_cred_weight), 0, df$avg_cred_weight),
       df$buy_weight, ifelse(is.na(df$cluster_ic_12), 0, df$cluster_ic_12))
-    df <- df[order(df$wtd_expectancy, decreasing = FALSE, na.last = FALSE), ]
-    plot_ly(df, x = ~wtd_expectancy, y = ~ticker, type = "bar", orientation = "h",
+    # sort: by expectancy (default) or grouped id > agg_rank with separators
+    rank_mode <- identical(input$sort_valBL, "rank") && "agg_rank" %in% names(df)
+    if (rank_mode) {
+      df <- df[order(df$id, df$agg_rank), ]   # display top->bottom
+      df$ylab <- sprintf("id%d r%d | %s", df$id, df$agg_rank, df$ticker)
+      cat_arr <- rev(df$ylab)
+      chart_text <- sprintf("%s - grouped by cluster then agg_rank (r1 = top pick)", chart_text)
+    } else {
+      df <- df[order(df$wtd_expectancy, decreasing = FALSE, na.last = FALSE), ]
+      df$ylab <- df$ticker
+      cat_arr <- df$ylab
+    }
+    plot_ly(df, x = ~wtd_expectancy, y = ~ylab, type = "bar", orientation = "h",
             marker = list(color = ifelse(is.na(df$wtd_expectancy), '#64748b',
                                   ifelse(df$wtd_expectancy >= 0, '#10b981', '#dc2626'))),
             customdata = ~hover,
@@ -3377,16 +3433,17 @@ server <- function(input, output, session) {
         paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
         title = list(text = chart_text,
                      font = list(color = "#94a3b8", size = 12)),
-        shapes = list(
-          list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
-               line = list(color = "rgba(255,255,255,0.4)"))),
+        shapes = c(
+          list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
+                    line = list(color = "rgba(255,255,255,0.4)"))),
+          if (rank_mode) rank_sep_shapes(df$id) else list()),
         xaxis = list(title = "Payoff-weighted expectancy (mean holdout trade return, %)",
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
         yaxis = list(title = "", type = "category",
-                     categoryorder = "array", categoryarray = df$ticker,
+                     categoryorder = "array", categoryarray = cat_arr,
                      tickfont = list(size = 9),
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
-        margin = list(l = 70, r = 30, b = 50, t = 40))
+        margin = list(l = if (rank_mode) 130 else 70, r = 30, b = 50, t = 40))
   })
 
   output$buyTableBL <- DT::renderDT({
