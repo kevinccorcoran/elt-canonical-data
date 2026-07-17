@@ -744,6 +744,16 @@ ui <- navbarPage(
                                 "All BUY tickers"                   = "all",
                                 "By cluster (aggregate)"            = "cluster"),
                     selected = "shortlist"),
+        selectInput("flt_id_valBL", "Cluster id filter",
+                    choices = c("All" = "ALL", setNames(1:19, 1:19)),
+                    selected = "ALL"),
+        selectInput("flt_rank_valBL", "Rank filter (within cluster)",
+                    choices = c("All"               = "ALL",
+                                "1 - top pick only" = "1",
+                                "Top 3"             = "3",
+                                "Top 5"             = "5",
+                                "Top 10"            = "10"),
+                    selected = "ALL"),
         selectInput("wf_topn_valBL", "Backtest replay: top N per cluster",
                     choices = c("5" = "5", "10" = "10", "20" = "20"),
                     selected = "5"),
@@ -758,7 +768,7 @@ ui <- navbarPage(
       )),
       mainPanel(div(class = "main-card",
         uiOutput("modeNoteBL"),
-        plotlyOutput("buyScatterBL", height = "620px"),
+        uiOutput("buyChartContainerBL"),
         tags$br(),
         DT::DTOutput("buyTableBL")
       ))
@@ -3172,9 +3182,38 @@ server <- function(input, output, session) {
     })
   })
 
+  # Shared id/rank filter, applied identically by chart + table (live, no
+  # re-Generate). id filter: wf replay + current mode (ledger rows carry no
+  # id). rank filter: rank_within_cluster (wf) / agg_rank (current) - "1"
+  # = each cluster's top pick, for any date.
+  bl_apply_filters <- function(df) {
+    idv <- input$flt_id_valBL
+    if (!is.null(idv) && !idv %in% c("", "ALL") && "id" %in% names(df))
+      df <- df[!is.na(df$id) & df$id == as.integer(idv), , drop = FALSE]
+    rkv <- input$flt_rank_valBL
+    if (!is.null(rkv) && !rkv %in% c("", "ALL")) {
+      r <- as.integer(rkv)
+      if ("rank_within_cluster" %in% names(df)) {
+        df <- df[!is.na(df$rank_within_cluster) & df$rank_within_cluster <= r, , drop = FALSE]
+      } else if ("agg_rank" %in% names(df)) {
+        df <- df[!is.na(df$agg_rank) & df$agg_rank <= r, , drop = FALSE]
+      }
+    }
+    df
+  }
+
+  # Chart container sized to the filtered row count so ALL bars are visible
+  # (the old fixed 620px forced trimming to best/worst 40).
+  output$buyChartContainerBL <- renderUI({
+    df <- app_dataBL()
+    n <- if (is.null(df) || nrow(df) == 0) 0 else nrow(bl_apply_filters(df))
+    h <- max(620, min(2800, 15 * n + 140))
+    plotlyOutput("buyScatterBL", height = paste0(h, "px"))
+  })
+
   output$buyScatterBL <- renderPlotly({
     req(app_dataBL())
-    df <- app_dataBL()
+    df <- bl_apply_filters(app_dataBL())
     if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
     if (app_modeBL() %in% c("wf", "ledger")) {
       # Replay modes: one bar per pick, sorted by realized excess vs SPY.
@@ -3200,12 +3239,16 @@ server <- function(input, output, session) {
         x_title <- "Return since entry, relative to SPY (%)"
       }
       df <- df[order(df$excess, decreasing = FALSE, na.last = FALSE), ]
-      chart_title <- NULL
-      if (nrow(df) > 80) {
+      # chart height now scales with row count, so show everything up to a
+      # DOM-sanity ceiling; use the id/rank filters to zoom in further
+      chart_title <- list(
+        text = sprintf("All %d picks", nrow(df)),
+        font = list(color = "#94a3b8", size = 12))
+      if (nrow(df) > 180) {
         n_total <- nrow(df)
-        df <- rbind(head(df, 40), tail(df, 40))
+        df <- rbind(head(df, 90), tail(df, 90))
         chart_title <- list(
-          text = sprintf("Worst 40 and best 40 of %d picks (full list in table)", n_total),
+          text = sprintf("Worst 90 and best 90 of %d picks (narrow with the id/rank filters; full list in table)", n_total),
           font = list(color = "#94a3b8", size = 12))
       }
       p <- plot_ly(df, x = ~excess, y = ~ticker, type = "bar", orientation = "h",
@@ -3300,9 +3343,14 @@ server <- function(input, output, session) {
     } else {
       df <- df[order(df$wtd_expectancy, decreasing = TRUE, na.last = TRUE), ]
       n_total <- nrow(df)
-      df <- head(df, 60)
-      chart_text <- sprintf("Top %d of %d BUYs by holdout expectancy (full list in table)",
-                            nrow(df), n_total)
+      if (n_total > 180) {
+        df <- head(df, 180)
+        chart_text <- sprintf(
+          "Top 180 of %d BUYs by expectancy (narrow with the id/rank filters; full list in table)",
+          n_total)
+      } else {
+        chart_text <- sprintf("All %d BUYs by holdout expectancy", n_total)
+      }
     }
     df$hover <- sprintf(
       "%s (id %d, %s)<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f",
@@ -3338,6 +3386,13 @@ server <- function(input, output, session) {
     if (is.null(df) || nrow(df) == 0) {
       return(DT::datatable(
         data.frame(Note = "Connect and Generate Chart to load the BUY list."),
+        selection = "none", rownames = FALSE, class = "compact",
+        options = list(dom = "t", ordering = FALSE)))
+    }
+    df <- bl_apply_filters(df)   # same id/rank filters as the chart
+    if (nrow(df) == 0) {
+      return(DT::datatable(
+        data.frame(Note = "No rows match the id/rank filters."),
         selection = "none", rownames = FALSE, class = "compact",
         options = list(dom = "t", ordering = FALSE)))
     }
