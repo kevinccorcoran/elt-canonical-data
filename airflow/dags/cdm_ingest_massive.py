@@ -253,6 +253,25 @@ with DAG(
     )
 
     # ──────────────────────────────────────────
+    # Data-quality gate: unadjusted split detection
+    # ──────────────────────────────────────────
+
+    # Alerting net behind the ingest-side sentinel auto-heal
+    # (massive_to_raw_etl.heal_basis_breaks). Fails the task (visible in
+    # Airflow) if a recent one-day price ratio looks like an unadjusted
+    # split; does NOT block the metrics trigger.
+    test_cmd, test_env = get_dbt_bash_command(
+        runtime_env, "assert_no_basis_break_ingest_combined"
+    )
+    dbt_test_no_basis_break = BashOperator(
+        task_id="dbt_test_no_basis_break",
+        bash_command=test_cmd.replace("dbt run --select", "dbt test --select"),
+        env=test_env,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    # ──────────────────────────────────────────
     # Trigger metrics DAG
     # ──────────────────────────────────────────
 
@@ -285,5 +304,7 @@ with DAG(
         dbt_run_excluded_yfinance,
     ] >> dbt_run_combined
 
-    # Trigger metrics computation once canonical data is ready
+    # Trigger metrics computation once canonical data is ready;
+    # the basis-break test runs alongside, alerting without blocking
     dbt_run_combined >> trigger_metrics
+    dbt_run_combined >> dbt_test_no_basis_break
