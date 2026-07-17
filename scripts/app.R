@@ -3032,21 +3032,44 @@ server <- function(input, output, session) {
                 WHERE ticker IN (SELECT ticker FROM snap)
             ) t WHERE rn = 1
         ),
+        -- price entries from the CURRENT series at entry_date, not the frozen
+        -- ledger values: frozen prices sit on the adjustment basis of their
+        -- logging day and go stale when a split re-bases history
+        -- (2026-07 incident: CRWD 4:1 graded as -74%)
+        entry_now AS (
+            SELECT ic.ticker, ic.date AS entry_date, ic.adj_close AS entry_px_now
+            FROM cdm.ingest_combined ic
+            JOIN (SELECT DISTINCT ticker, entry_date FROM snap) k
+              ON k.ticker = ic.ticker AND k.entry_date = ic.date
+        ),
+        spy_entry_now AS (
+            SELECT ic.date AS entry_date, ic.adj_close AS spy_px_now
+            FROM cdm.ingest_combined ic
+            JOIN (SELECT DISTINCT entry_date FROM snap) k ON k.entry_date = ic.date
+            WHERE ic.ticker = 'SPY'
+        ),
         spy AS (
             SELECT adj_close, date AS market_max FROM cdm.ingest_combined
             WHERE ticker = 'SPY' ORDER BY date DESC LIMIT 1
         )
         SELECT s.prediction_date, s.ticker, s.buy_votes, s.buy_weight,
-               s.best_agg_rank, s.entry_date, s.entry_adj_close,
+               s.best_agg_rank, s.entry_date,
+               COALESCE(en.entry_px_now, s.entry_adj_close) AS entry_adj_close,
                px.adj_close AS latest_close,
-               ROUND((((px.adj_close / NULLIF(s.entry_adj_close, 0)) - 1) * 100)::numeric, 1)
+               ROUND((((px.adj_close
+                        / NULLIF(COALESCE(en.entry_px_now, s.entry_adj_close), 0)) - 1) * 100)::numeric, 1)
                  AS ret_since_pct,
-               ROUND((((px.adj_close / NULLIF(s.entry_adj_close, 0))
-                       - (spy.adj_close / NULLIF(s.entry_spy_close, 0))) * 100)::numeric, 1)
+               ROUND((((px.adj_close
+                        / NULLIF(COALESCE(en.entry_px_now, s.entry_adj_close), 0))
+                       - (spy.adj_close
+                        / NULLIF(COALESCE(sen.spy_px_now, s.entry_spy_close), 0))) * 100)::numeric, 1)
                  AS excess_vs_spy_pct,
                (px.last_bar >= spy.market_max - INTERVAL '10 days') AS is_active
         FROM snap s
         LEFT JOIN px ON px.ticker = s.ticker
+        LEFT JOIN entry_now en
+               ON en.ticker = s.ticker AND en.entry_date = s.entry_date
+        LEFT JOIN spy_entry_now sen ON sen.entry_date = s.entry_date
         CROSS JOIN spy
         ORDER BY excess_vs_spy_pct DESC NULLS LAST;",
         format(asof, "%Y-%m-%d"))
