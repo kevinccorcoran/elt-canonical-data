@@ -735,10 +735,13 @@ ui <- navbarPage(
         tags$p(paste("Latest date = live BUY list with payoff evidence.",
                      "Dates since 2026-06-16 replay the ledger snapshot graded to today.",
                      "Earlier dates (back to 2007) replay the walk-forward BACKTEST:",
-                     "top 5 ranked tickers per long cluster at the nearest quarterly",
+                     "top-N ranked tickers per long cluster at the nearest quarterly",
                      "cutoff, graded by realized 12mo excess return vs SPY.",
                      "No live BUY gates existed then - backtest ranking only."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
+        selectInput("wf_topn_valBL", "Backtest replay: top N per cluster",
+                    choices = c("5" = "5", "10" = "10", "20" = "20"),
+                    selected = "5"),
         selectInput("fut_cap_valBL", "Max fut_lag for payoff evidence",
                     choices = c("12 (matched short horizons)" = "12",
                                 "33 (all capped horizons)"    = "33"),
@@ -2857,7 +2860,8 @@ server <- function(input, output, session) {
         h4("Backtest replay - validation.walk_forward_ticker_rank", style = h_style),
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
-          "the model's top 5 ranked tickers per long cluster at the nearest ",
+          "the model's top-N ranked tickers per long cluster (N = sidebar ",
+          "setting) at the nearest ",
           "quarterly walk-forward cutoff. Each bar = one pick's REALIZED 12-month ",
           "return relative to SPY after that date. Green beat SPY, red lagged it. ",
           "A burnt-orange dot (and orange ticker in the table) = the company no ",
@@ -2937,6 +2941,8 @@ server <- function(input, output, session) {
 
     if (is_wf) {
       # ── Backtest replay: walk-forward top ranks at the nearest cutoff ──
+      wf_topn <- suppressWarnings(as.integer(input$wf_topn_valBL))
+      if (is.na(wf_topn)) wf_topn <- 5L
       query <- sprintf("
         WITH sel AS (
             -- nearest USABLE cutoff: must have 12mo grades and id-map coverage
@@ -2969,9 +2975,9 @@ server <- function(input, output, session) {
         CROSS JOIN mkt
         WHERE r.fut_lag = 12
           AND m.id <= 12                 -- long clusters = buy side
-          AND r.rank_within_cluster <= 5
+          AND r.rank_within_cluster <= %d
         ORDER BY r.forward_return DESC NULLS LAST;",
-        format(asof, "%Y-%m-%d"))
+        format(asof, "%Y-%m-%d"), wf_topn)
       tryCatch({
         con <- get_con(input, "BL")
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
@@ -2988,8 +2994,8 @@ server <- function(input, output, session) {
         app_modeBL("wf")
         app_dataBL(df)
         status_msgBL(sprintf(
-          "Backtest replay: cutoff %s, top 5 per long cluster (fut_lag 12), %d picks.",
-          df$train_cutoff_date[1], nrow(df)))
+          "Backtest replay: cutoff %s, top %d per long cluster (fut_lag 12), %d picks.",
+          df$train_cutoff_date[1], wf_topn, nrow(df)))
       }, error = function(e) {
         app_dataBL(NULL); app_modeBL("current")
         status_msgBL(paste("Error:", e$message))
@@ -3164,6 +3170,14 @@ server <- function(input, output, session) {
         x_title <- "Return since entry, relative to SPY (%)"
       }
       df <- df[order(df$excess, decreasing = FALSE, na.last = FALSE), ]
+      chart_title <- NULL
+      if (nrow(df) > 80) {
+        n_total <- nrow(df)
+        df <- rbind(head(df, 40), tail(df, 40))
+        chart_title <- list(
+          text = sprintf("Worst 40 and best 40 of %d picks (full list in table)", n_total),
+          font = list(color = "#94a3b8", size = 12))
+      }
       p <- plot_ly(df, x = ~excess, y = ~ticker, type = "bar", orientation = "h",
                    marker = list(color = ifelse(is.na(df$excess), '#64748b',
                                          ifelse(df$excess >= 0, '#10b981', '#dc2626'))),
@@ -3186,6 +3200,7 @@ server <- function(input, output, session) {
             paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
             legend = list(font = list(color = "#94a3b8")),
             showlegend = nrow(del) > 0,
+            title = chart_title,
             shapes = list(
               list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                    line = list(color = "rgba(255,255,255,0.4)"))),
@@ -3195,7 +3210,8 @@ server <- function(input, output, session) {
                          categoryorder = "array", categoryarray = df$ticker,
                          tickfont = list(size = 9),
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
-            margin = list(l = 70, r = 30, b = 50, t = 10))
+            margin = list(l = 70, r = 30, b = 50,
+                          t = if (is.null(chart_title)) 10 else 40))
       )
     }
     # Current mode: same bar style as the replay views. One bar per BUY
