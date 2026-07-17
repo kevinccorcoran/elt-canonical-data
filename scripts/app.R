@@ -754,7 +754,8 @@ setup_env_switcher <- function(input, session, suffix) {
   observeEvent(input[[paste0("db_env", suffix)]], {
     env <- input[[paste0("db_env", suffix)]]
     if (env == "Production") {
-      updateTextInput(session, paste0("db_host", suffix), value = "dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com")
+      updateTextInput(session, paste0("db_host", suffix),
+                      value = Sys.getenv("PROD_DB_HOST", "dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com"))
       updateTextInput(session, paste0("db_port", suffix), value = "25060")
       updateTextInput(session, paste0("db_user", suffix), value = "doadmin")
       updateTextInput(session, paste0("db_pass", suffix), value = Sys.getenv("PROD_DB_PASSWORD", ""))
@@ -889,7 +890,7 @@ server <- function(input, output, session) {
       for(col in names(res)) { if(!(col %in% c("signal","alpha_signal","recommendation"))) res[[col]] <- as.numeric(res[[col]]) }
       app_dataT(res)
       status_msgT(paste("Loaded", nrow(res), "rows."))
-    }, error = function(e) { status_msgT(paste("Error:", e$message)) })
+    }, error = function(e) { app_dataT(NULL); status_msgT(paste("Error:", e$message)) })
   })
 
   # ── TRANSITION: Render ──
@@ -1091,7 +1092,8 @@ server <- function(input, output, session) {
     status_msgH("Running query...")
 
     bucket_clause <- if (input$bucket_valH == "ALL") "" else sprintf(
-      "AND past_excess_return_z_bucket = '%s'", gsub("'", "''", input$bucket_valH))
+      "AND past_excess_return_z_bucket = %s",
+      DBI::dbQuoteString(DBI::ANSI(), input$bucket_valH))
     viable_clause <- if (isTRUE(input$viable_onlyH)) "AND is_viable" else ""
 
     query <- sprintf("
@@ -1125,7 +1127,7 @@ server <- function(input, output, session) {
       for (col in num_cols) res[[col]] <- as.numeric(res[[col]])
       app_dataH(res)
       status_msgH(paste("Loaded", nrow(res), "rows."))
-    }, error = function(e) { status_msgH(paste("Error:", e$message)) })
+    }, error = function(e) { app_dataH(NULL); status_msgH(paste("Error:", e$message)) })
   })
 
   # ── HEATMAP: Render ──
@@ -1287,7 +1289,7 @@ server <- function(input, output, session) {
       con <- get_con(input, "Q")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
 
-      placeholders <- paste(sprintf("'%s'", gsub("'", "''", selected)), collapse = ",")
+      placeholders <- paste(as.character(DBI::dbQuoteString(con, selected)), collapse = ",")
       tables <- dbGetQuery(con, sprintf("
         SELECT table_schema, table_name
         FROM information_schema.columns
@@ -1417,9 +1419,11 @@ server <- function(input, output, session) {
       selection = list(mode = "multiple", target = "row"),
       rownames  = FALSE,
       class     = "compact",
+      extensions = "Buttons",
       options   = list(
         pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
-        dom = "tip", searching = FALSE, ordering = FALSE,
+        dom = "Btip", searching = FALSE, ordering = FALSE,
+        buttons = c("copy", "csv"),
         columnDefs = list(list(className = "dt-right", targets = 4))
       )
     )
@@ -1527,7 +1531,7 @@ server <- function(input, output, session) {
       df$n_obs      <- as.numeric(df$n_obs)
       app_dataV(df)
       status_msgV(sprintf("Loaded %d tickers.", nrow(df)))
-    }, error = function(e) { status_msgV(paste("Error:", e$message)) })
+    }, error = function(e) { app_dataV(NULL); status_msgV(paste("Error:", e$message)) })
   })
 
   # ── COVERAGE: Container with dynamic height ──
@@ -1622,7 +1626,7 @@ server <- function(input, output, session) {
       app_dataK(df)
       status_msgK(sprintf("Loaded %d tickers across %d clusters.",
                           nrow(df), length(unique(df$id))))
-    }, error = function(e) { status_msgK(paste("Error:", e$message)) })
+    }, error = function(e) { app_dataK(NULL); status_msgK(paste("Error:", e$message)) })
   })
 
   output$clusterPlot <- renderPlotly({
@@ -1791,7 +1795,10 @@ server <- function(input, output, session) {
       cluster_ic_metaP(ic_df)
 
       status_msgP(paste("Loaded", nrow(res), "rows."))
-    }, error = function(e) { status_msgP(paste("Error:", e$message)) })
+    }, error = function(e) {
+      app_dataP(NULL); cluster_ic_metaP(NULL)
+      status_msgP(paste("Error:", e$message))
+    })
   })
 
   output$clusterIcDisplayP <- renderText({
@@ -1932,8 +1939,10 @@ server <- function(input, output, session) {
       updateSliderInput(session, "top_n_valRS", value = 20); return()
     }
     con <- tryCatch(get_con(input, "RS"), error = function(e) NULL)
+    # register cleanup BEFORE the early return so a half-open connection
+    # can't leak when con is NULL-but-partially-created
+    on.exit({ if (!is.null(con) && DBI::dbIsValid(con)) try(dbDisconnect(con), silent = TRUE) }, add = TRUE)
     if (is.null(con)) return()
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
     med <- tryCatch(dbGetQuery(con, sprintf(
       "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY r.cluster_size) AS med
        FROM validation.walk_forward_ticker_rank r
@@ -2087,7 +2096,10 @@ server <- function(input, output, session) {
                            metric = input$metric_valRS))
       status_msgRS(sprintf("Loaded: %d slot rows, %d cutoffs.",
                            as.integer(nrow(slot_df)), as.integer(n_cut)))
-    }, error = function(e) { status_msgRS(paste("Error:", e$message)) })
+    }, error = function(e) {
+      app_dataRS_slot(NULL); app_dataRS_heatmap(NULL); app_dataRS_meta(NULL)
+      status_msgRS(paste("Error:", e$message))
+    })
   })
 
   output$cutoffCountRS <- renderText({
@@ -2286,7 +2298,10 @@ server <- function(input, output, session) {
       status_msgRS(sprintf("Loaded all ids: %d rows across %d distinct ids.",
                            as.integer(nrow(df)),
                            as.integer(length(unique(df$id)))))
-    }, error = function(e) { status_msgRS(paste("Error:", e$message)) })
+    }, error = function(e) {
+      app_dataRS_allIds(NULL)
+      status_msgRS(paste("Error:", e$message))
+    })
   })
 
   output$allIdsGridRS <- renderPlotly({
@@ -2575,7 +2590,11 @@ server <- function(input, output, session) {
       status_msgMV(sprintf("Loaded: %d IC rows, %d payoff rows, %d forest rows.",
                            nrow(ic_df), nrow(payoff_df),
                            nrow(app_dataMV_forest())))
-    }, error = function(e) { status_msgMV(paste("Error:", e$message)) })
+    }, error = function(e) {
+      app_dataMV_ic(NULL); app_dataMV_payoff(NULL)
+      app_dataMV_tiers(NULL); app_dataMV_forest(NULL)
+      status_msgMV(paste("Error:", e$message))
+    })
   })
 
   output$icHeatmapMV <- renderPlotly({
@@ -2967,7 +2986,10 @@ server <- function(input, output, session) {
         status_msgBL(sprintf(
           "Backtest replay: cutoff %s, top 5 per long cluster (fut_lag 12), %d picks.",
           df$train_cutoff_date[1], nrow(df)))
-      }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
+      }, error = function(e) {
+        app_dataBL(NULL); app_modeBL("current")
+        status_msgBL(paste("Error:", e$message))
+      })
       return()
     }
 
@@ -3024,7 +3046,10 @@ server <- function(input, output, session) {
         snap_d <- if (nrow(df) > 0) df$prediction_date[1] else asof
         status_msgBL(sprintf("Replayed snapshot %s: %d BUYs, graded to latest close.",
                              snap_d, nrow(df)))
-      }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
+      }, error = function(e) {
+        app_dataBL(NULL); app_modeBL("current")
+        status_msgBL(paste("Error:", e$message))
+      })
       return()
     }
 
@@ -3102,7 +3127,10 @@ server <- function(input, output, session) {
       app_dataBL(df)
       status_msgBL(sprintf("Loaded %d BUY tickers (%d dropped by filters).",
                            nrow(df), n_before - nrow(df)))
-    }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
+    }, error = function(e) {
+      app_dataBL(NULL); app_modeBL("current")
+      status_msgBL(paste("Error:", e$message))
+    })
   })
 
   output$buyScatterBL <- renderPlotly({
@@ -3217,9 +3245,11 @@ server <- function(input, output, session) {
         selection = "none",
         rownames  = FALSE,
         class     = "compact",
+        extensions = "Buttons",
         options   = list(
           pageLength = 25, lengthMenu = c(10, 25, 50, 100),
-          dom = "ftip",
+          dom = "Bftip",
+          buttons = c("copy", "csv"),
           order = list(list(6, "desc")),
           columnDefs = list(list(className = "dt-right", targets = 3:6))
         )
@@ -3245,9 +3275,11 @@ server <- function(input, output, session) {
         selection = "none",
         rownames  = FALSE,
         class     = "compact",
+        extensions = "Buttons",
         options   = list(
           pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
-          dom = "ftip",
+          dom = "Bftip",
+          buttons = c("copy", "csv"),
           order = list(list(6, "desc")),
           columnDefs = list(list(className = "dt-right", targets = 3:9))
         )
@@ -3274,9 +3306,11 @@ server <- function(input, output, session) {
       selection = "none",
       rownames  = FALSE,
       class     = "compact",
+      extensions = "Buttons",
       options   = list(
         pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
-        dom = "ftip",
+        dom = "Bftip",
+        buttons = c("copy", "csv"),
         order = list(list(3, "desc")),
         columnDefs = list(list(className = "dt-right", targets = 3:11))
       )
