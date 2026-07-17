@@ -256,6 +256,21 @@ hr {
 .selectize-dropdown-content .option {
   color: #f8fafc !important;
 }
+
+/* Caveat / read-me boxes above charts. note = neutral doc, info = explanation,
+   warning = interpretation caveat the reader must not skip. */
+.caveat-note, .caveat-info, .caveat-warning {
+  padding: 0.5rem 0.75rem;
+  background: rgba(255,255,255,0.03);
+  border-radius: 4px;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  margin-bottom: 0.75rem;
+}
+.caveat-note    { border-left: 2px solid #64748b; }
+.caveat-info    { border-left: 2px solid #38bdf8; }
+.caveat-warning { border-left: 2px solid #f59e0b; }
 "
 
 # ─── Helper: sidebar panel for a given tab suffix ───
@@ -276,6 +291,38 @@ make_sidebar <- function(suffix, title, filter_widgets) {
     hr(),
     textOutput(paste0("statusMessage", suffix))
   )
+}
+
+# ─── Shared plot/style helpers ───
+
+# Credibility tier colors (cell_credibility.tier), used by every tier plot.
+TIER_COLORS <- c(high = '#10b981', medium = '#f59e0b', noise = '#64748b',
+                 thin = '#334155', anti = '#dc2626')
+
+# Purple -> yellow -> teal diverging scale; midpoint = zero / coin flip.
+DIVERGING_COLORSCALE <- list(
+  c(0.00, '#762a83'), c(0.25, '#c2a5cf'), c(0.50, '#f7f7b6'),
+  c(0.75, '#5ab4ac'), c(1.00, '#01665e'))
+
+# Standard transparent-background placeholder shown before data loads or
+# when a query matches nothing.
+empty_plot <- function(msg) {
+  plot_ly() %>% layout(
+    title = list(text = msg, font = list(color = "#f8fafc")),
+    paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)")
+}
+
+# Transparent dark-theme layout wrapper; pass axis/shape/margin args through.
+dark_layout <- function(p, ...) {
+  layout(p, paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", ...)
+}
+
+# Postgres COUNT()/SUM()/bigint arrive as integer64 (bit64). Left uncast,
+# bit64 arithmetic truncates fractions BEFORE dividing (hit_rate 0.75 -> 0
+# inside weighted.mean), and sprintf("%d") errors. Cast to double up front.
+coerce_numeric_cols <- function(df, cols) {
+  for (col in intersect(cols, names(df))) df[[col]] <- as.numeric(df[[col]])
+  df
 }
 
 # ─── Define UI ───
@@ -595,20 +642,20 @@ ui <- navbarPage(
         div(style = "display: flex; align-items: center; gap: 0.75rem;",
             h5("Slot performance - mean realized forward return per rank slot",
                style = "color: #f8fafc; font-weight: 600; margin: 0; flex: 1;"),
-            checkboxInput("show_slot_perf", "Show", value = TRUE)
+            checkboxInput("show_slot_perfRS", "Show", value = TRUE)
         ),
         conditionalPanel(
-          condition = "input.show_slot_perf",
+          condition = "input.show_slot_perfRS",
           plotlyOutput("slotPerfPlotRS", height = "380px")
         ),
         tags$br(),
         div(style = "display: flex; align-items: center; gap: 0.75rem;",
             h5("Vingtile (5% bin) vs fut_lag heatmap - mean realized return at each (vingtile, horizon) across 84 cohorts. Rank normalized to within-cluster vingtile so different cluster sizes compare fairly.",
                style = "color: #f8fafc; font-weight: 600; margin: 0; flex: 1;"),
-            checkboxInput("show_vingtile_heatmap", "Show", value = TRUE)
+            checkboxInput("show_vingtile_heatmapRS", "Show", value = TRUE)
         ),
         conditionalPanel(
-          condition = "input.show_vingtile_heatmap",
+          condition = "input.show_vingtile_heatmapRS",
           plotlyOutput("stabilityHeatmapRS", height = "800px")
         ),
         tags$br(),
@@ -897,7 +944,7 @@ server <- function(input, output, session) {
   output$transitionPlot <- renderPlotly({
     req(app_dataT())
     df <- app_dataT()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(title = list(text = "No data found", font = list(color="#f8fafc")), paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
 
     tot_count <- sum(df$future_count, na.rm = TRUE)
     df$bucket_share <- if(tot_count > 0) (df$future_count / tot_count) * 100 else 0
@@ -1545,9 +1592,7 @@ server <- function(input, output, session) {
   output$coveragePlot <- renderPlotly({
     req(app_dataV())
     df <- app_dataV()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data", font = list(color="#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
 
     # Sort: earliest start at bottom (longest history), most recent start at top
     df <- df[order(df$first_date), ]
@@ -1632,9 +1677,7 @@ server <- function(input, output, session) {
   output$clusterPlot <- renderPlotly({
     req(app_dataK())
     df <- app_dataK()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
 
     df <- df[is.finite(df$months_count) & is.finite(df$growth_pct_per_month), ]
     # Draw lower-priority ids first so id=1 ends up on top of the stack.
@@ -1822,9 +1865,7 @@ server <- function(input, output, session) {
   output$topPicksPlot <- renderPlotly({
     req(app_dataP())
     df <- app_dataP()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data found", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
 
     df <- df[order(df$agg_rank, df$fut_lag), ]
     row_keys <- unique(df[, c("agg_rank", "ticker", "coverage_cell_count")])
@@ -2112,9 +2153,7 @@ server <- function(input, output, session) {
   output$slotPerfPlotRS <- renderPlotly({
     req(app_dataRS_slot())
     df <- app_dataRS_slot()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
     df$se <- df$sd_fwd / sqrt(pmax(df$n_obs, 1))
     plot_ly(df, x = ~rank_within_cluster, y = ~mean_fwd,
             type = "scatter", mode = "lines+markers",
@@ -2140,9 +2179,7 @@ server <- function(input, output, session) {
   output$stabilityHeatmapRS <- renderPlotly({
     req(app_dataRS_heatmap())
     df <- app_dataRS_heatmap()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No tickers met threshold", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No tickers met threshold."))
     fut_lags <- sort(unique(df$fut_lag))
     ranks    <- sort(unique(df$rank_within_cluster))
     z_mat <- matrix(NA_real_, nrow = length(ranks), ncol = length(fut_lags),
@@ -2160,14 +2197,7 @@ server <- function(input, output, session) {
     metric <- isolate(app_dataRS_meta()$metric)
     if (is.null(metric)) metric <- "mean_return"
     if (metric == "hit_rate") {
-      # purple → yellow → teal centered at coin flip 0.5
-      colorscale <- list(
-        c(0.00, '#762a83'),
-        c(0.25, '#c2a5cf'),
-        c(0.50, '#f7f7b6'),
-        c(0.75, '#5ab4ac'),
-        c(1.00, '#01665e')
-      )
+      colorscale <- DIVERGING_COLORSCALE   # centered at coin flip 0.5
       max_abs <- 0.2
       z_center <- 0.5
     } else if (metric == "sharpe_like") {
@@ -2307,9 +2337,7 @@ server <- function(input, output, session) {
   output$allIdsGridRS <- renderPlotly({
     req(app_dataRS_allIds())
     df_subset <- app_dataRS_allIds()
-    if (nrow(df_subset) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df_subset) == 0) return(empty_plot("No data matched your filters."))
 
     # Adaptive bins: collapse the 20 vingtiles into each cluster's tier (5/10/20)
     # so small clusters render fewer rows. Rebin the raw metrics (weighted by
@@ -2372,13 +2400,9 @@ server <- function(input, output, session) {
       if (is.finite(p90) && p90 > 0) max_abs <- min(max_abs, max(p90, 3))
       z_center <- 0
     }
-    colorscale <- if (metric_col == "hit_rate") list(
-      c(0.00, '#762a83'),
-      c(0.25, '#c2a5cf'),
-      c(0.50, '#f7f7b6'),
-      c(0.75, '#5ab4ac'),
-      c(1.00, '#01665e')
-    ) else if (metric_col %in% c("combo_quadrants", "combo_mean_quadrants")) list(
+    colorscale <- if (metric_col == "hit_rate") {
+      DIVERGING_COLORSCALE
+    } else if (metric_col %in% c("combo_quadrants", "combo_mean_quadrants")) list(
       # Four discrete bands: gray (neither), blue (hit only),
       # gold (median only = Bessembinder), green (both high)
       c(0.00, '#888888'), c(0.25, '#888888'),
@@ -2553,10 +2577,9 @@ server <- function(input, output, session) {
       payoff_df$id        <- as.integer(payoff_df$id)
       payoff_df$past_lag  <- as.integer(payoff_df$past_lag)
       payoff_df$fut_lag   <- as.integer(payoff_df$fut_lag)
-      payoff_df$n_holdout <- as.numeric(payoff_df$n_holdout)   # integer64
-      for (col in c("win_pct", "expectancy", "avg_win", "avg_loss",
-                    "median_ret", "p90_ret", "max_win"))
-        payoff_df[[col]] <- as.numeric(payoff_df[[col]])
+      payoff_df <- coerce_numeric_cols(payoff_df, c(
+        "n_holdout", "win_pct", "expectancy", "avg_win", "avg_loss",
+        "median_ret", "p90_ret", "max_win"))
       app_dataMV_payoff(payoff_df)
 
       tier_df <- dbGetQuery(con, "
@@ -2578,11 +2601,9 @@ server <- function(input, output, session) {
           ORDER BY vol_bucket_num, bucket;",
           as.integer(input$id_valMV), as.integer(input$past_lagMV),
           as.integer(input$fut_lagMV)))
-        for (col in c("n_cutoffs", "wf_n_holdout", "n_scored"))
-          forest_df[[col]] <- as.numeric(forest_df[[col]])     # integer64
-        for (col in c("wf_agreement", "wilson_lower", "wilson_upper",
-                      "credibility_weight"))
-          forest_df[[col]] <- as.numeric(forest_df[[col]])
+        forest_df <- coerce_numeric_cols(forest_df, c(
+          "n_cutoffs", "wf_n_holdout", "n_scored",
+          "wf_agreement", "wilson_lower", "wilson_upper", "credibility_weight"))
         app_dataMV_forest(forest_df)
       } else {
         app_dataMV_forest(data.frame())
@@ -2600,9 +2621,7 @@ server <- function(input, output, session) {
   output$icHeatmapMV <- renderPlotly({
     req(app_dataMV_ic())
     df <- app_dataMV_ic()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
     fut_lags <- sort(unique(df$fut_lag))
     ids      <- sort(unique(df$id))
     z_mat <- matrix(NA_real_, nrow = length(ids), ncol = length(fut_lags),
@@ -2619,14 +2638,8 @@ server <- function(input, output, session) {
                                 df$mean_decile_spread[i])
       }
     }
-    # purple → yellow → teal; symmetric zmin/zmax so IC = 0 sits at the midpoint
-    colorscale <- list(
-      c(0.00, '#762a83'),
-      c(0.25, '#c2a5cf'),
-      c(0.50, '#f7f7b6'),
-      c(0.75, '#5ab4ac'),
-      c(1.00, '#01665e')
-    )
+    # symmetric zmin/zmax so IC = 0 sits at the palette midpoint
+    colorscale <- DIVERGING_COLORSCALE
     max_abs <- max(abs(z_mat), na.rm = TRUE)
     if (!is.finite(max_abs) || max_abs == 0) max_abs <- 0.1
     text_mat <- matrix(rep(as.character(fut_lags), each = nrow(z_mat)),
@@ -2660,9 +2673,7 @@ server <- function(input, output, session) {
   output$payoffScatterMV <- renderPlotly({
     req(app_dataMV_payoff())
     df <- app_dataMV_payoff()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
     df$hover <- sprintf(
       "id %d | past %d -> fut %d<br>n holdout: %d<br>avg win %.3f | avg loss %.3f<br>p90 %.3f",
       df$id, df$past_lag, df$fut_lag, as.integer(df$n_holdout),
@@ -2699,13 +2710,9 @@ server <- function(input, output, session) {
     req(app_dataMV_payoff())
     df <- app_dataMV_payoff()
     sel <- input$id_valMV
-    if (is.null(sel) || sel %in% c("", "ALL")) return(plot_ly() %>% layout(
-      title = list(text = "Select a specific id", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (is.null(sel) || sel %in% c("", "ALL")) return(empty_plot("Select a specific id"))
     df <- df[df$id == as.integer(sel), ]
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
     fut_lags  <- sort(unique(df$fut_lag))
     past_lags <- sort(unique(df$past_lag))
     z_mat <- matrix(NA_real_, nrow = length(past_lags), ncol = length(fut_lags),
@@ -2720,13 +2727,7 @@ server <- function(input, output, session) {
                                 df$win_pct[i], as.integer(df$n_holdout[i]))
       }
     }
-    colorscale <- list(
-      c(0.00, '#762a83'),
-      c(0.25, '#c2a5cf'),
-      c(0.50, '#f7f7b6'),
-      c(0.75, '#5ab4ac'),
-      c(1.00, '#01665e')
-    )
+    colorscale <- DIVERGING_COLORSCALE
     max_abs <- max(abs(z_mat), na.rm = TRUE)
     if (!is.finite(max_abs) || max_abs == 0) max_abs <- 0.1
     text_mat <- matrix(rep(as.character(fut_lags), each = nrow(z_mat)),
@@ -2759,11 +2760,8 @@ server <- function(input, output, session) {
   output$tierBarMV <- renderPlotly({
     req(app_dataMV_tiers())
     df <- app_dataMV_tiers()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
-    tier_colors <- c(high = '#10b981', medium = '#f59e0b', noise = '#64748b',
-                     thin = '#334155', anti = '#dc2626')
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
+    tier_colors <- TIER_COLORS
     df$tier <- factor(df$tier, levels = names(tier_colors))
     plot_ly(df, x = ~factor(id), y = ~n_cells, color = ~tier,
             colors = tier_colors, type = "bar",
@@ -2782,18 +2780,14 @@ server <- function(input, output, session) {
   output$forestPlotMV <- renderPlotly({
     req(app_dataMV_forest())
     df <- app_dataMV_forest()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "Select a specific id (+ past/fut lag), then Generate",
-                   font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("Select a specific id (+ past/fut lag), then Generate"))
     df$cell <- sprintf("vol %d | z %d",
                        as.integer(df$vol_bucket_num), as.integer(df$bucket))
     df$hover <- sprintf(
       "n scored: %d | cutoffs: %d | holdout: %d<br>credibility weight: %.3f",
       as.integer(df$n_scored), as.integer(df$n_cutoffs),
       as.integer(df$wf_n_holdout), df$credibility_weight)
-    tier_colors <- c(high = '#10b981', medium = '#f59e0b', noise = '#64748b',
-                     thin = '#334155', anti = '#dc2626')
+    tier_colors <- TIER_COLORS
     df$tier <- factor(df$tier, levels = names(tier_colors))
     plot_ly(df, x = ~wf_agreement, y = ~cell, color = ~tier,
             colors = tier_colors,
@@ -2857,15 +2851,11 @@ server <- function(input, output, session) {
 
   output$modeNoteBL <- renderUI({
     mode <- app_modeBL()
-    box_style <- "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
-                  border-left: 2px solid #f59e0b; border-radius: 4px;
-                  color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
-                  margin-bottom: 0.75rem;"
     h_style <- "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"
     if (mode == "wf") {
       tagList(
         h4("Backtest replay - validation.walk_forward_ticker_rank", style = h_style),
-        tags$div(style = box_style,
+        tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the model's top 5 ranked tickers per long cluster at the nearest ",
           "quarterly walk-forward cutoff. Each bar = one pick's REALIZED 12-month ",
@@ -2874,7 +2864,7 @@ server <- function(input, output, session) {
     } else if (mode == "ledger") {
       tagList(
         h4("Ledger replay - monitoring.prediction_ledger", style = h_style),
-        tags$div(style = box_style,
+        tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the BUY calls the live system actually logged on the selected date, ",
           "graded to the latest close. Each bar = one ticker's return since entry ",
@@ -2883,7 +2873,7 @@ server <- function(input, output, session) {
       tagList(
         h4("Current BUY list - serving.return_cluster_ticker_global_action_current x validated payoff",
            style = h_style),
-        tags$div(style = box_style,
+        tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
           "tickers the model currently marks BUY, scored by the realized walk-forward ",
           "payoff (expectancy = mean holdout trade return, win %) of the exact ",
@@ -2978,9 +2968,8 @@ server <- function(input, output, session) {
           return()
         }
         for (col in c("id", "rank_within_cluster", "cluster_size"))
-          df[[col]] <- as.integer(df[[col]])
-        for (col in c("ticker_score", "fwd_excess_pct"))
-          df[[col]] <- as.numeric(df[[col]])
+          df[[col]] <- as.integer(df[[col]])   # stay integer: used in sprintf("%d")
+        df <- coerce_numeric_cols(df, c("ticker_score", "fwd_excess_pct"))
         app_modeBL("wf")
         app_dataBL(df)
         status_msgBL(sprintf(
@@ -3036,11 +3025,9 @@ server <- function(input, output, session) {
         con <- get_con(input, "BL")
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
         df <- dbGetQuery(con, query)
-        for (col in c("buy_votes", "best_agg_rank"))
-          df[[col]] <- as.numeric(df[[col]])              # integer64
-        for (col in c("buy_weight", "entry_adj_close", "latest_close",
-                      "ret_since_pct", "excess_vs_spy_pct"))
-          df[[col]] <- as.numeric(df[[col]])
+        df <- coerce_numeric_cols(df, c(
+          "buy_votes", "best_agg_rank", "buy_weight", "entry_adj_close",
+          "latest_close", "ret_since_pct", "excess_vs_spy_pct"))
         app_modeBL("ledger")
         app_dataBL(df)
         snap_d <- if (nrow(df) > 0) df$prediction_date[1] else asof
@@ -3114,11 +3101,10 @@ server <- function(input, output, session) {
       df$id       <- as.integer(df$id)
       df$agg_rank <- as.integer(df$agg_rank)
       # COUNT/SUM columns arrive as integer64 (see the RS n_obs note above)
-      for (col in c("buy_votes", "n_buy_cells", "total_holdout", "n_trusted_cells"))
-        df[[col]] <- as.numeric(df[[col]])
-      for (col in c("buy_weight", "wtd_expectancy", "wtd_win_pct",
-                    "avg_cred_weight", "cluster_ic_12"))
-        df[[col]] <- as.numeric(df[[col]])
+      df <- coerce_numeric_cols(df, c(
+        "buy_votes", "n_buy_cells", "total_holdout", "n_trusted_cells",
+        "buy_weight", "wtd_expectancy", "wtd_win_pct",
+        "avg_cred_weight", "cluster_ic_12"))
       n_before <- nrow(df)
       keep <- (!is.na(df$total_holdout) & df$total_holdout >= input$min_holdout_valBL) &
               (is.na(df$n_trusted_cells) | df$n_trusted_cells >= input$min_trusted_valBL)
@@ -3136,9 +3122,7 @@ server <- function(input, output, session) {
   output$buyScatterBL <- renderPlotly({
     req(app_dataBL())
     df <- app_dataBL()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No BUY tickers pass the filters", font = list(color = "#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
+    if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
     if (app_modeBL() %in% c("wf", "ledger")) {
       # Replay modes: one bar per pick, sorted by realized excess vs SPY.
       # Green = beat SPY, red = lagged it. Reads top-to-bottom: best to worst.
