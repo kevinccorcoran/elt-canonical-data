@@ -228,6 +228,79 @@ def fetch_massive_df(ticker: str, start, end) -> pl.DataFrame:
     return df
 
 
+BASIS_SENTINEL_OFFSET = 40   # trading rows back from the newest fetched bar
+BASIS_TOLERANCE = 0.01       # >1% divergence = adjustment-basis break
+
+
+def heal_basis_breaks(combined: pl.DataFrame, dsn: str) -> None:
+    """Detect and heal split-adjustment basis breaks before writing.
+
+    Full-history runs fetch every ticker's complete adjusted series, but the
+    writers insert with ON CONFLICT DO NOTHING, so a re-adjusted history (stock
+    split / provider restatement) is silently discarded and stored rows stay on
+    the old basis - permanent fake one-day cliffs in cdm.ingest_combined (2026-07
+    incident: 27 tickers incl. a 4:1 CRWD split; see
+    data_quality.split_basis_break_repair_20260717).
+
+    Compare the freshly fetched adj_close at a sentinel date ~40 trading days
+    back against the stored row. On divergence, delete the ticker's rows from
+    raw + cdm copies so this batch's insert rewrites the whole history on the
+    new basis. Single-day runs (raw_ingest_massive_daily) fetch too few rows
+    per ticker and are skipped.
+    """
+    import psycopg2
+
+    checks = []  # (ticker, sentinel ticker_date_id, fetched adj_close)
+    for tdf in combined.partition_by("ticker"):
+        tdf = tdf.sort("date")
+        n = tdf.height
+        if n < 5:
+            continue   # single-day / tiny fetch: nothing to compare against
+        row = tdf.row(max(0, n - BASIS_SENTINEL_OFFSET), named=True)
+        if row["adj_close"] and row["adj_close"] > 0:
+            checks.append((row["ticker"], row["ticker_date_id"], row["adj_close"]))
+    if not checks:
+        return
+
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ticker_date_id, adj_close"
+                " FROM raw.api_data_ingestion_massive"
+                " WHERE ticker_date_id = ANY(%s)",
+                ([c[1] for c in checks],),
+            )
+            stored = dict(cur.fetchall())
+        broken = sorted({
+            t for (t, tid, px) in checks
+            if tid in stored and stored[tid] and float(stored[tid]) > 0
+            and abs(px / float(stored[tid]) - 1.0) > BASIS_TOLERANCE
+        })
+        if not broken:
+            return
+        logging.warning(
+            "BASIS BREAK detected for %s - deleting stored history so this "
+            "run rewrites it on the new adjustment basis", broken,
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM raw.api_data_ingestion_massive WHERE ticker = ANY(%s)",
+                (broken,),
+            )
+            cur.execute(
+                "DELETE FROM cdm.api_data_ingestion_massive WHERE ticker = ANY(%s)",
+                (broken,),
+            )
+        conn.commit()
+        logging.warning("BASIS BREAK healed: %s rewritten from this fetch", broken)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--start_date")
@@ -293,6 +366,7 @@ def main():
             total_rows += combined.height
 
             t_write = time.perf_counter()
+            heal_basis_breaks(combined, PSYCOPG_DSN)
             save_to_database(
                 combined,
                 table_name=TABLE_NAME,
