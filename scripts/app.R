@@ -763,7 +763,8 @@ ui <- navbarPage(
         selectInput("view_valBL", "View (current date)",
                     choices = c("Shortlist - top 10% by expectancy" = "shortlist",
                                 "All BUY tickers"                   = "all",
-                                "By cluster (aggregate)"            = "cluster"),
+                                "By cluster (aggregate)"            = "cluster",
+                                "By cluster & rank - ALL tickers (incl. SKIP/SELL)" = "rankall"),
                     selected = "shortlist"),
         selectInput("flt_id_valBL", "Cluster id filter",
                     choices = c("All" = "ALL", setNames(1:19, 1:19)),
@@ -780,7 +781,8 @@ ui <- navbarPage(
                                 "By cluster & rank"      = "rank"),
                     selected = "return"),
         selectInput("wf_topn_valBL", "Backtest replay: top N per cluster",
-                    choices = c("5" = "5", "10" = "10", "20" = "20"),
+                    choices = c("5" = "5", "10" = "10", "20" = "20",
+                                "All ranked tickers" = "100000"),
                     selected = "5"),
         selectInput("fut_cap_valBL", "Max fut_lag for payoff evidence",
                     choices = c("12 (matched short horizons)" = "12",
@@ -3132,9 +3134,10 @@ server <- function(input, output, session) {
     fut_cap <- as.integer(input$fut_cap_valBL)
     query <- sprintf("
       WITH buys AS (
-          SELECT ticker, id, archetype, buy_weight, buy_votes, agg_rank
+          -- ALL actions loaded (not just BUY): the rankall view shows every
+          -- ranked ticker per id; the BUY-only views subset in the renderer
+          SELECT ticker, id, archetype, global_action, buy_weight, buy_votes, agg_rank
           FROM serving.return_cluster_ticker_global_action_current
-          WHERE global_action = 'BUY'
       ),
       cells AS (
           SELECT p.ticker, p.id, p.past_lag, p.fut_lag, p.bucket
@@ -3168,7 +3171,7 @@ server <- function(input, output, session) {
            AND cc.fut_lag = c.fut_lag AND cc.bucket = c.bucket
           GROUP BY c.ticker, c.id
       )
-      SELECT b.ticker, b.id, b.archetype, b.buy_weight, b.buy_votes, b.agg_rank,
+      SELECT b.ticker, b.id, b.archetype, b.global_action, b.buy_weight, b.buy_votes, b.agg_rank,
              p.n_buy_cells,
              ROUND(p.wtd_expectancy::numeric, 3) AS wtd_expectancy,
              ROUND(p.wtd_win_pct::numeric, 1)    AS wtd_win_pct,
@@ -3193,14 +3196,17 @@ server <- function(input, output, session) {
         "buy_votes", "n_buy_cells", "total_holdout", "n_trusted_cells",
         "buy_weight", "wtd_expectancy", "wtd_win_pct",
         "avg_cred_weight", "cluster_ic_12"))
-      n_before <- nrow(df)
-      keep <- (!is.na(df$total_holdout) & df$total_holdout >= input$min_holdout_valBL) &
-              (is.na(df$n_trusted_cells) | df$n_trusted_cells >= input$min_trusted_valBL)
-      df <- df[keep, ]
+      # evidence filters become a FLAG, not a row drop: BUY views apply it,
+      # the rankall view deliberately shows everything
+      df$pass_filters <-
+        (!is.na(df$total_holdout) & df$total_holdout >= input$min_holdout_valBL) &
+        (is.na(df$n_trusted_cells) | df$n_trusted_cells >= input$min_trusted_valBL)
       app_modeBL("current")
       app_dataBL(df)
-      status_msgBL(sprintf("Loaded %d BUY tickers (%d dropped by filters).",
-                           nrow(df), n_before - nrow(df)))
+      n_buy <- sum(df$global_action == "BUY", na.rm = TRUE)
+      status_msgBL(sprintf(
+        "Loaded %d ranked tickers (%d BUY, of which %d pass the evidence filters).",
+        nrow(df), n_buy, sum(df$global_action == "BUY" & df$pass_filters, na.rm = TRUE)))
     }, error = function(e) {
       app_dataBL(NULL); app_modeBL("current")
       status_msgBL(paste("Error:", e$message))
@@ -3237,7 +3243,7 @@ server <- function(input, output, session) {
   }
   output$buyChartContainerBL <- renderUI({
     n <- chart_rowsBL()
-    h <- max(340, min(2800, 16 * n + 160))
+    h <- max(340, min(7000, 16 * n + 160))
     plotlyOutput("buyScatterBL", height = paste0(h, "px"))
   })
 
@@ -3343,7 +3349,69 @@ server <- function(input, output, session) {
     #   all       - every BUY (chart caps at 60 bars; table has everything)
     #   cluster   - one bar per id: the cohort's median expectancy
     view <- input$view_valBL
-    if (is.null(view) || !view %in% c("shortlist", "all", "cluster")) view <- "all"
+    if (is.null(view) || !view %in% c("shortlist", "all", "cluster", "rankall")) view <- "all"
+
+    if (view == "rankall") {
+      # Every ranked ticker per id - BUY gate and evidence filters ignored.
+      # Grouped id -> agg_rank with separator lines; bar color = action.
+      df <- df[order(df$id, df$agg_rank), ]
+      n_total <- nrow(df)
+      chart_text <- sprintf(
+        "All %d ranked tickers, grouped by cluster then rank (green BUY / grey SKIP / red SELL)",
+        n_total)
+      if (n_total > 400) {
+        df <- head(df, 400)
+        chart_text <- sprintf(
+          "First 400 of %d ranked tickers by cluster/rank - narrow with the cluster id filter",
+          n_total)
+      }
+      df$ylab <- sprintf("id%d r%d | %s%s", df$id, df$agg_rank, df$ticker,
+                         ifelse(df$global_action == "BUY", "",
+                                paste0(" [", df$global_action, "]")))
+      df$xval <- ifelse(is.na(df$wtd_expectancy), 0, df$wtd_expectancy)
+      df$hover <- sprintf(
+        "%s (id %d, %s)<br>action %s | rank %d | buy weight %.2f<br>holdout expectancy %s | win %s",
+        df$ticker, df$id, df$archetype, df$global_action, df$agg_rank,
+        ifelse(is.na(df$buy_weight), 0, df$buy_weight),
+        ifelse(is.na(df$wtd_expectancy), "n/a", sprintf("%.3f", df$wtd_expectancy)),
+        ifelse(is.na(df$wtd_win_pct), "n/a", sprintf("%.1f%%", df$wtd_win_pct)))
+      set_chart_rowsBL(nrow(df))
+      act_col <- ifelse(df$global_action == "BUY", "#10b981",
+                 ifelse(df$global_action == "SELL", "#dc2626", "#64748b"))
+      return(
+        plot_ly(df, x = ~xval, y = ~ylab, type = "bar", orientation = "h",
+                marker = list(color = act_col),
+                customdata = ~hover,
+                hovertemplate = "%{customdata}<extra></extra>") %>%
+          add_markers(x = ~xval, y = ~ylab,
+                      marker = list(color = act_col, size = 5),
+                      customdata = ~hover, showlegend = FALSE,
+                      hovertemplate = "%{customdata}<extra></extra>") %>%
+          layout(
+            paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+            showlegend = FALSE,
+            title = list(text = chart_text, font = list(color = "#94a3b8", size = 12)),
+            shapes = c(
+              list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
+                        line = list(color = "rgba(255,255,255,0.4)"))),
+              rank_sep_shapes(df$id)),
+            xaxis = list(title = "Payoff-weighted expectancy (%, 0 = no BUY-cell evidence)",
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+            yaxis = list(title = "", type = "category",
+                         categoryorder = "array", categoryarray = rev(df$ylab),
+                         tickfont = list(size = 9),
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
+            margin = list(l = 150, r = 30, b = 50, t = 40))
+      )
+    }
+
+    # BUY-gated views: subset to gated rows passing the evidence filters
+    # (pre-change behavior; the load query now returns every action)
+    if ("global_action" %in% names(df))
+      df <- df[df$global_action == "BUY", , drop = FALSE]
+    if ("pass_filters" %in% names(df))
+      df <- df[df$pass_filters, , drop = FALSE]
+    if (nrow(df) == 0) return(empty_plot("No BUYs pass the evidence filters."))
 
     if (view == "cluster") {
       agg <- do.call(rbind, lapply(split(df, df$id), function(g) data.frame(
@@ -3523,7 +3591,48 @@ server <- function(input, output, session) {
                             color = DT::styleEqual("delisted", "#c2410c")))
     }
     view <- input$view_valBL
-    if (is.null(view) || !view %in% c("shortlist", "all", "cluster")) view <- "all"
+    if (is.null(view) || !view %in% c("shortlist", "all", "cluster", "rankall")) view <- "all"
+
+    if (view == "rankall") {
+      df <- df[order(df$id, df$agg_rank), ]
+      display <- data.frame(
+        Ticker       = df$ticker,
+        Id           = df$id,
+        Archetype    = df$archetype,
+        Action       = df$global_action,
+        `Rank`       = df$agg_rank,
+        `Buy weight` = df$buy_weight,
+        `Expectancy` = df$wtd_expectancy,
+        `Win %`      = df$wtd_win_pct,
+        `Holdout n`  = as.integer(df$total_holdout),
+        check.names = FALSE,
+        stringsAsFactors = FALSE
+      )
+      return(DT::datatable(
+        display,
+        selection = "none", rownames = FALSE, class = "compact",
+        extensions = "Buttons",
+        options = list(
+          pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500, 2000),
+          dom = "Bftip", buttons = c("copy", "csv"),
+          columnDefs = list(list(className = "dt-right", targets = 4:8))
+        )
+      ) %>% DT::formatStyle("Action",
+              color = DT::styleEqual(c("BUY", "SELL", "SKIP"),
+                                     c("#10b981", "#dc2626", "#94a3b8"))))
+    }
+
+    # BUY-gated views: same subset as the chart
+    if ("global_action" %in% names(df))
+      df <- df[df$global_action == "BUY", , drop = FALSE]
+    if ("pass_filters" %in% names(df))
+      df <- df[df$pass_filters, , drop = FALSE]
+    if (nrow(df) == 0) {
+      return(DT::datatable(
+        data.frame(Note = "No BUYs pass the evidence filters."),
+        selection = "none", rownames = FALSE, class = "compact",
+        options = list(dom = "t", ordering = FALSE)))
+    }
 
     if (view == "cluster") {
       agg <- do.call(rbind, lapply(split(df, df$id), function(g) data.frame(
