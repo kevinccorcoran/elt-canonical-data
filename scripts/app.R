@@ -739,6 +739,11 @@ ui <- navbarPage(
                      "cutoff, graded by realized 12mo excess return vs SPY.",
                      "No live BUY gates existed then - backtest ranking only."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
+        selectInput("view_valBL", "View (current date)",
+                    choices = c("Shortlist - top 10% by expectancy" = "shortlist",
+                                "All BUY tickers"                   = "all",
+                                "By cluster (aggregate)"            = "cluster"),
+                    selected = "shortlist"),
         selectInput("wf_topn_valBL", "Backtest replay: top N per cluster",
                     choices = c("5" = "5", "10" = "10", "20" = "20"),
                     selected = "5"),
@@ -2886,7 +2891,9 @@ server <- function(input, output, session) {
           "tickers the model currently marks BUY, scored by the realized walk-forward ",
           "payoff (expectancy = mean holdout trade return, win %) of the exact ",
           "(id, past_lag, fut_lag) cells the signal fires on. Expectancy is holdout ",
-          "evidence, not a forward promise."))
+          "evidence, not a forward promise. Use the View selector to switch between ",
+          "the decision shortlist (top 10% by expectancy, win% > 50), every BUY, ",
+          "and the per-cluster aggregate - it switches instantly, no re-Generate."))
     }
   })
 
@@ -3214,12 +3221,66 @@ server <- function(input, output, session) {
                           t = if (is.null(chart_title)) 10 else 40))
       )
     }
-    # Current mode: same bar style as the replay views. One bar per BUY
-    # ticker, x = holdout expectancy (the expected edge - nothing realized
-    # yet). Top 60 by expectancy; the full list is in the table below.
-    df <- df[order(df$wtd_expectancy, decreasing = TRUE, na.last = TRUE), ]
-    n_total <- nrow(df)
-    df <- head(df, 60)
+    # Current mode. Three altitudes, switchable live (no re-Generate):
+    #   shortlist - top 10% by expectancy among names with win% > 50 (decision view)
+    #   all       - every BUY (chart caps at 60 bars; table has everything)
+    #   cluster   - one bar per id: the cohort's median expectancy
+    view <- input$view_valBL
+    if (is.null(view) || !view %in% c("shortlist", "all", "cluster")) view <- "all"
+
+    if (view == "cluster") {
+      agg <- do.call(rbind, lapply(split(df, df$id), function(g) data.frame(
+        id = g$id[1],
+        archetype = g$archetype[1],
+        n_tickers = nrow(g),
+        med_expectancy = stats::median(g$wtd_expectancy, na.rm = TRUE),
+        mean_win = mean(g$wtd_win_pct, na.rm = TRUE),
+        ic12 = g$cluster_ic_12[1],
+        stringsAsFactors = FALSE)))
+      agg <- agg[order(agg$med_expectancy, na.last = FALSE), ]
+      agg$label <- sprintf("id %d (%s)", agg$id, agg$archetype)
+      agg$hover <- sprintf(
+        "id %d (%s)<br>%d BUY tickers<br>median expectancy %.3f | mean win %.1f%%<br>cluster IC(12) %.3f",
+        agg$id, agg$archetype, agg$n_tickers,
+        ifelse(is.na(agg$med_expectancy), 0, agg$med_expectancy),
+        ifelse(is.na(agg$mean_win), 0, agg$mean_win),
+        ifelse(is.na(agg$ic12), 0, agg$ic12))
+      return(
+        plot_ly(agg, x = ~med_expectancy, y = ~label, type = "bar", orientation = "h",
+                marker = list(color = ifelse(is.na(agg$med_expectancy), '#64748b',
+                                      ifelse(agg$med_expectancy >= 0, '#10b981', '#dc2626'))),
+                customdata = ~hover,
+                hovertemplate = "%{customdata}<extra></extra>") %>%
+          layout(
+            paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+            title = list(text = "Cluster cohorts: median holdout expectancy of current BUYs",
+                         font = list(color = "#94a3b8", size = 12)),
+            shapes = list(
+              list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
+                   line = list(color = "rgba(255,255,255,0.4)"))),
+            xaxis = list(title = "Median payoff-weighted expectancy (%)",
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+            yaxis = list(title = "", type = "category",
+                         categoryorder = "array", categoryarray = agg$label,
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
+            margin = list(l = 170, r = 30, b = 50, t = 40))
+      )
+    }
+
+    if (view == "shortlist") {
+      df <- df[!is.na(df$wtd_expectancy) & !is.na(df$wtd_win_pct) & df$wtd_win_pct > 50, ]
+      if (nrow(df) == 0) return(empty_plot("No BUYs with win% > 50 and payoff evidence."))
+      df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
+      k <- min(nrow(df), max(10, ceiling(0.10 * nrow(df))))
+      df <- head(df, k)
+      chart_text <- sprintf("Shortlist: top %d by expectancy (win%% > 50 required)", k)
+    } else {
+      df <- df[order(df$wtd_expectancy, decreasing = TRUE, na.last = TRUE), ]
+      n_total <- nrow(df)
+      df <- head(df, 60)
+      chart_text <- sprintf("Top %d of %d BUYs by holdout expectancy (full list in table)",
+                            nrow(df), n_total)
+    }
     df$hover <- sprintf(
       "%s (id %d, %s)<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f",
       df$ticker, df$id, df$archetype,
@@ -3235,10 +3296,8 @@ server <- function(input, output, session) {
             hovertemplate = "%{customdata}<extra></extra>") %>%
       layout(
         paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
-        title = list(
-          text = sprintf("Top %d of %d BUYs by holdout expectancy (full list in table)",
-                         nrow(df), n_total),
-          font = list(color = "#94a3b8", size = 12)),
+        title = list(text = chart_text,
+                     font = list(color = "#94a3b8", size = 12)),
         shapes = list(
           list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                line = list(color = "rgba(255,255,255,0.4)"))),
@@ -3319,6 +3378,35 @@ server <- function(input, output, session) {
         )
       ) %>% DT::formatStyle(c("Ticker", "Status"), valueColumns = "Status",
                             color = DT::styleEqual("delisted", "#c2410c")))
+    }
+    view <- input$view_valBL
+    if (is.null(view) || !view %in% c("shortlist", "all", "cluster")) view <- "all"
+
+    if (view == "cluster") {
+      agg <- do.call(rbind, lapply(split(df, df$id), function(g) data.frame(
+        Id = g$id[1],
+        Archetype = g$archetype[1],
+        `BUY tickers` = nrow(g),
+        `Median expectancy` = round(stats::median(g$wtd_expectancy, na.rm = TRUE), 3),
+        `Mean win %` = round(mean(g$wtd_win_pct, na.rm = TRUE), 1),
+        `Mean cred weight` = round(mean(g$avg_cred_weight, na.rm = TRUE), 3),
+        `Cluster IC(12)` = g$cluster_ic_12[1],
+        check.names = FALSE, stringsAsFactors = FALSE)))
+      return(DT::datatable(
+        agg[order(-agg$`Median expectancy`, na.last = TRUE), ],
+        selection = "none", rownames = FALSE, class = "compact",
+        extensions = "Buttons",
+        options = list(
+          pageLength = 25, dom = "Btip", buttons = c("copy", "csv"),
+          columnDefs = list(list(className = "dt-right", targets = 2:6)))))
+    }
+
+    if (view == "shortlist") {
+      df <- df[!is.na(df$wtd_expectancy) & !is.na(df$wtd_win_pct) & df$wtd_win_pct > 50, ]
+      if (nrow(df) > 0) {
+        df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
+        df <- head(df, min(nrow(df), max(10, ceiling(0.10 * nrow(df)))))
+      }
     }
     display <- data.frame(
       Ticker        = df$ticker,
