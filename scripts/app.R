@@ -2889,8 +2889,10 @@ server <- function(input, output, session) {
           "the PREDICTION as it stood at the nearest quarterly walk-forward ",
           "cutoff: every ranked ticker per long cluster, in the model's own ",
           "order (r1 at the top of each cluster block = its top pick). ",
-          "Each bar = how that pick REALLY did over the next 12 months vs SPY: ",
-          "green beat SPY, red lagged, grey = ungraded. If the model works, ",
+          "Each bar = how that pick REALLY did over the next 12 months vs SPY, ",
+          "from actual adjusted prices (first close after the cutoff to the ",
+          "last close within 12 months): green beat SPY, red lagged, grey = ",
+          "no tradable price window. If the model works, ",
           "green concentrates near each block's r1. A burnt-orange dot (orange ",
           "ticker in the table) = the company no longer trades. Backtest ranking ",
           "only - the live BUY gates did not exist then."))
@@ -2988,10 +2990,25 @@ server <- function(input, output, session) {
             SELECT MAX(date) AS market_max FROM cdm.ingest_combined
             WHERE ticker = 'SPY'
         )
+        , spy AS (
+            SELECT
+              (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY'
+                 AND date > (SELECT d FROM sel) ORDER BY date LIMIT 1) AS spy_entry,
+              (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY'
+                 AND date > (SELECT d FROM sel)
+                 AND date <= (SELECT d FROM sel) + INTERVAL '12 months'
+                 ORDER BY date DESC LIMIT 1) AS spy_exit
+        )
+        -- fwd_excess_pct = REAL price return (div/split-adjusted): first bar
+        -- after the cutoff -> last bar within 12 months, minus SPY over the
+        -- same window. The model's forward_return column is a holdout LABEL
+        -- statistic (smoothed basis, pre-cutoff anchors) - it graded BRO -30
+        -- in a year it beat SPY by 9pts; never chart it as a trade outcome.
         SELECT r.train_cutoff_date, m.id, r.ticker, r.rank_within_cluster,
                r.cluster_size,
                ROUND(r.ticker_score::numeric, 4)   AS ticker_score,
-               ROUND(r.forward_return::numeric, 1) AS fwd_excess_pct,
+               ROUND((100 * ((x.px / e.px) - (s.spy_exit / s.spy_entry)))::numeric, 1)
+                                                   AS fwd_excess_pct,
                ((SELECT MAX(i.date) FROM cdm.ingest_combined i
                  WHERE i.ticker = r.ticker)
                   >= mkt.market_max - INTERVAL '10 days') AS is_active
@@ -3001,9 +3018,17 @@ server <- function(input, output, session) {
           ON m.train_cutoff_date = r.train_cutoff_date
          AND m.cluster_id = r.cluster_id
         CROSS JOIN mkt
+        CROSS JOIN spy s
+        LEFT JOIN LATERAL (SELECT adj_close AS px FROM cdm.ingest_combined i
+          WHERE i.ticker = r.ticker AND i.date > r.train_cutoff_date
+          ORDER BY i.date LIMIT 1) e ON TRUE
+        LEFT JOIN LATERAL (SELECT adj_close AS px FROM cdm.ingest_combined i
+          WHERE i.ticker = r.ticker AND i.date > r.train_cutoff_date
+            AND i.date <= r.train_cutoff_date + INTERVAL '12 months'
+          ORDER BY i.date DESC LIMIT 1) x ON TRUE
         WHERE r.fut_lag = 12
           AND m.id <= 12                 -- long clusters = buy side
-        ORDER BY r.forward_return DESC NULLS LAST;",
+        ORDER BY m.id, r.rank_within_cluster;",
         format(asof, "%Y-%m-%d"))
       tryCatch({
         con <- get_con(input, "BL")
