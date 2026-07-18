@@ -756,15 +756,15 @@ ui <- navbarPage(
         tags$p(paste("Latest date = live BUY list with payoff evidence.",
                      "Dates since 2026-06-16 replay the ledger snapshot graded to today.",
                      "Earlier dates (back to 2007) replay the walk-forward BACKTEST:",
-                     "top-N ranked tickers per long cluster at the nearest quarterly",
+                     "every ranked ticker per long cluster at the nearest quarterly",
                      "cutoff, graded by realized 12mo excess return vs SPY.",
                      "No live BUY gates existed then - backtest ranking only."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
-        selectInput("view_valBL", "View (current date)",
+        selectInput("view_valBL", "View",
                     choices = c("Shortlist - top 10% by expectancy" = "shortlist",
                                 "All BUY tickers"                   = "all",
                                 "By cluster (aggregate)"            = "cluster",
-                                "By cluster & rank - ALL tickers (incl. SKIP/SELL)" = "rankall"),
+                                "ALL tickers by cluster & rank"     = "rankall"),
                     selected = "shortlist"),
         selectInput("flt_id_valBL", "Cluster id filter",
                     choices = c("All" = "ALL", setNames(1:19, 1:19)),
@@ -775,23 +775,7 @@ ui <- navbarPage(
                                 "Top 3"             = "3",
                                 "Top 5"             = "5",
                                 "Top 10"            = "10"),
-                    selected = "ALL"),
-        selectInput("sort_valBL", "Sort bars",
-                    choices = c("By return / expectancy" = "return",
-                                "By cluster & rank"      = "rank"),
-                    selected = "return"),
-        selectInput("wf_topn_valBL", "Backtest replay: top N per cluster",
-                    choices = c("5" = "5", "10" = "10", "20" = "20",
-                                "All ranked tickers" = "100000"),
-                    selected = "5"),
-        selectInput("fut_cap_valBL", "Max fut_lag for payoff evidence",
-                    choices = c("12 (matched short horizons)" = "12",
-                                "33 (all capped horizons)"    = "33"),
-                    selected = "12"),
-        numericInput("min_holdout_valBL", "Min holdout trades behind the payoff",
-                     value = 100, min = 0, step = 50),
-        numericInput("min_trusted_valBL", "Min high/medium credibility cells",
-                     value = 0, min = 0, step = 1)
+                    selected = "ALL")
       )),
       mainPanel(div(class = "main-card",
         uiOutput("modeNoteBL"),
@@ -2984,9 +2968,8 @@ server <- function(input, output, session) {
     is_ledger <- has_date && !is_wf && asof < b[2]
 
     if (is_wf) {
-      # ── Backtest replay: walk-forward top ranks at the nearest cutoff ──
-      wf_topn <- suppressWarnings(as.integer(input$wf_topn_valBL))
-      if (is.na(wf_topn)) wf_topn <- 5L
+      # ── Backtest replay: every ranked ticker at the nearest cutoff ──
+      # (rank depth is the client-side Rank filter, not a query knob)
       query <- sprintf("
         WITH sel AS (
             -- nearest USABLE cutoff: must have 12mo grades and id-map coverage
@@ -3019,9 +3002,8 @@ server <- function(input, output, session) {
         CROSS JOIN mkt
         WHERE r.fut_lag = 12
           AND m.id <= 12                 -- long clusters = buy side
-          AND r.rank_within_cluster <= %d
         ORDER BY r.forward_return DESC NULLS LAST;",
-        format(asof, "%Y-%m-%d"), wf_topn)
+        format(asof, "%Y-%m-%d"))
       tryCatch({
         con <- get_con(input, "BL")
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
@@ -3038,8 +3020,8 @@ server <- function(input, output, session) {
         app_modeBL("wf")
         app_dataBL(df)
         status_msgBL(sprintf(
-          "Backtest replay: cutoff %s, top %d per long cluster (fut_lag 12), %d picks.",
-          df$train_cutoff_date[1], wf_topn, nrow(df)))
+          "Backtest replay: cutoff %s, all ranked tickers per long cluster (fut_lag 12), %d rows.",
+          df$train_cutoff_date[1], nrow(df)))
       }, error = function(e) {
         app_dataBL(NULL); app_modeBL("current")
         status_msgBL(paste("Error:", e$message))
@@ -3131,7 +3113,8 @@ server <- function(input, output, session) {
     }
 
     # ── Current mode: live BUY list with payoff evidence ──
-    fut_cap <- as.integer(input$fut_cap_valBL)
+    # payoff evidence fixed to fut_lag <= 12 (matched short horizons)
+    fut_cap <- 12L
     query <- sprintf("
       WITH buys AS (
           -- ALL actions loaded (not just BUY): the rankall view shows every
@@ -3196,17 +3179,11 @@ server <- function(input, output, session) {
         "buy_votes", "n_buy_cells", "total_holdout", "n_trusted_cells",
         "buy_weight", "wtd_expectancy", "wtd_win_pct",
         "avg_cred_weight", "cluster_ic_12"))
-      # evidence filters become a FLAG, not a row drop: BUY views apply it,
-      # the rankall view deliberately shows everything
-      df$pass_filters <-
-        (!is.na(df$total_holdout) & df$total_holdout >= input$min_holdout_valBL) &
-        (is.na(df$n_trusted_cells) | df$n_trusted_cells >= input$min_trusted_valBL)
       app_modeBL("current")
       app_dataBL(df)
-      n_buy <- sum(df$global_action == "BUY", na.rm = TRUE)
       status_msgBL(sprintf(
-        "Loaded %d ranked tickers (%d BUY, of which %d pass the evidence filters).",
-        nrow(df), n_buy, sum(df$global_action == "BUY" & df$pass_filters, na.rm = TRUE)))
+        "Loaded %d ranked tickers (%d BUY).",
+        nrow(df), sum(df$global_action == "BUY", na.rm = TRUE)))
     }, error = function(e) {
       app_dataBL(NULL); app_modeBL("current")
       status_msgBL(paste("Error:", e$message))
@@ -3274,8 +3251,9 @@ server <- function(input, output, session) {
           df$buy_weight)
         x_title <- "Return since entry, relative to SPY (%)"
       }
-      # sort: by return (default) or grouped id > rank with separator lines
-      rank_mode <- identical(input$sort_valBL, "rank") &&
+      # ALL-tickers view = grouped id > rank with separator lines;
+      # every other view = flat best-to-worst by realized return
+      rank_mode <- identical(input$view_valBL, "rankall") &&
                    app_modeBL() == "wf" && "rank_within_cluster" %in% names(df)
       if (rank_mode) {
         df <- df[order(df$id, df$rank_within_cluster), ]   # display top->bottom
@@ -3409,9 +3387,7 @@ server <- function(input, output, session) {
     # (pre-change behavior; the load query now returns every action)
     if ("global_action" %in% names(df))
       df <- df[df$global_action == "BUY", , drop = FALSE]
-    if ("pass_filters" %in% names(df))
-      df <- df[df$pass_filters, , drop = FALSE]
-    if (nrow(df) == 0) return(empty_plot("No BUYs pass the evidence filters."))
+    if (nrow(df) == 0) return(empty_plot("No BUY tickers right now."))
 
     if (view == "cluster") {
       agg <- do.call(rbind, lapply(split(df, df$id), function(g) data.frame(
@@ -3454,12 +3430,14 @@ server <- function(input, output, session) {
     }
 
     if (view == "shortlist") {
-      df <- df[!is.na(df$wtd_expectancy) & !is.na(df$wtd_win_pct) & df$wtd_win_pct > 50, ]
-      if (nrow(df) == 0) return(empty_plot("No BUYs with win% > 50 and payoff evidence."))
+      # decision view = strict: win% > 50 AND >= 100 holdout trades of evidence
+      df <- df[!is.na(df$wtd_expectancy) & !is.na(df$wtd_win_pct) & df$wtd_win_pct > 50 &
+               !is.na(df$total_holdout) & df$total_holdout >= 100, ]
+      if (nrow(df) == 0) return(empty_plot("No BUYs with win% > 50 and >= 100 holdout trades."))
       df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
       k <- min(nrow(df), max(10, ceiling(0.10 * nrow(df))))
       df <- head(df, k)
-      chart_text <- sprintf("Shortlist: top %d by expectancy (win%% > 50 required)", k)
+      chart_text <- sprintf("Shortlist: top %d by expectancy (win%% > 50, holdout >= 100)", k)
     } else {
       df <- df[order(df$wtd_expectancy, decreasing = TRUE, na.last = TRUE), ]
       n_total <- nrow(df)
@@ -3480,19 +3458,8 @@ server <- function(input, output, session) {
       as.integer(df$n_buy_cells), as.integer(df$total_holdout),
       ifelse(is.na(df$avg_cred_weight), 0, df$avg_cred_weight),
       df$buy_weight, ifelse(is.na(df$cluster_ic_12), 0, df$cluster_ic_12))
-    # sort: by expectancy (default) or grouped id > agg_rank with separators
-    rank_mode <- identical(input$sort_valBL, "rank") && "agg_rank" %in% names(df)
-    if (rank_mode) {
-      df <- df[order(df$id, df$agg_rank), ]   # display top->bottom
-      df$ylab <- sprintf("id%d r%d | %s", df$id, df$agg_rank, df$ticker)
-      cat_arr <- rev(df$ylab)
-      chart_text <- sprintf("%s - grouped by cluster then agg_rank (r1 = top pick)", chart_text)
-    } else {
-      df <- df[order(df$wtd_expectancy, decreasing = FALSE, na.last = FALSE), ]
-      df$ylab <- df$ticker
-      cat_arr <- df$ylab
-    }
-    plot_ly(df, x = ~wtd_expectancy, y = ~ylab, type = "bar", orientation = "h",
+    df <- df[order(df$wtd_expectancy, decreasing = FALSE, na.last = FALSE), ]
+    plot_ly(df, x = ~wtd_expectancy, y = ~ticker, type = "bar", orientation = "h",
             marker = list(color = ifelse(is.na(df$wtd_expectancy), '#64748b',
                                   ifelse(df$wtd_expectancy >= 0, '#10b981', '#dc2626'))),
             customdata = ~hover,
@@ -3501,17 +3468,16 @@ server <- function(input, output, session) {
         paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
         title = list(text = chart_text,
                      font = list(color = "#94a3b8", size = 12)),
-        shapes = c(
-          list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
-                    line = list(color = "rgba(255,255,255,0.4)"))),
-          if (rank_mode) rank_sep_shapes(df$id) else list()),
+        shapes = list(
+          list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
+               line = list(color = "rgba(255,255,255,0.4)"))),
         xaxis = list(title = "Payoff-weighted expectancy (mean holdout trade return, %)",
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
         yaxis = list(title = "", type = "category",
-                     categoryorder = "array", categoryarray = cat_arr,
+                     categoryorder = "array", categoryarray = df$ticker,
                      tickfont = list(size = 9),
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
-        margin = list(l = if (rank_mode) 130 else 70, r = 30, b = 50, t = 40))
+        margin = list(l = 70, r = 30, b = 50, t = 40))
   })
 
   output$buyTableBL <- DT::renderDT({
@@ -3625,11 +3591,9 @@ server <- function(input, output, session) {
     # BUY-gated views: same subset as the chart
     if ("global_action" %in% names(df))
       df <- df[df$global_action == "BUY", , drop = FALSE]
-    if ("pass_filters" %in% names(df))
-      df <- df[df$pass_filters, , drop = FALSE]
     if (nrow(df) == 0) {
       return(DT::datatable(
-        data.frame(Note = "No BUYs pass the evidence filters."),
+        data.frame(Note = "No BUY tickers right now."),
         selection = "none", rownames = FALSE, class = "compact",
         options = list(dom = "t", ordering = FALSE)))
     }
@@ -3654,7 +3618,9 @@ server <- function(input, output, session) {
     }
 
     if (view == "shortlist") {
-      df <- df[!is.na(df$wtd_expectancy) & !is.na(df$wtd_win_pct) & df$wtd_win_pct > 50, ]
+      # keep in lockstep with the chart's shortlist rule
+      df <- df[!is.na(df$wtd_expectancy) & !is.na(df$wtd_win_pct) & df$wtd_win_pct > 50 &
+               !is.na(df$total_holdout) & df$total_holdout >= 100, ]
       if (nrow(df) > 0) {
         df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
         df <- head(df, min(nrow(df), max(10, ceiling(0.10 * nrow(df)))))
