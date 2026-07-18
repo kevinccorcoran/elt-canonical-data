@@ -2886,13 +2886,14 @@ server <- function(input, output, session) {
         h4("Backtest replay - validation.walk_forward_ticker_rank", style = h_style),
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
-          "the model's top-N ranked tickers per long cluster (N = sidebar ",
-          "setting) at the nearest ",
-          "quarterly walk-forward cutoff. Each bar = one pick's REALIZED 12-month ",
-          "return relative to SPY after that date. Green beat SPY, red lagged it. ",
-          "A burnt-orange dot (and orange ticker in the table) = the company no ",
-          "longer trades (no price bar within 10 days of the latest market date). ",
-          "This is backtest ranking only - the live BUY gates did not exist then."))
+          "the PREDICTION as it stood at the nearest quarterly walk-forward ",
+          "cutoff: every ranked ticker per long cluster, in the model's own ",
+          "order (r1 at the top of each cluster block = its top pick). ",
+          "Each bar = how that pick REALLY did over the next 12 months vs SPY: ",
+          "green beat SPY, red lagged, grey = ungraded. If the model works, ",
+          "green concentrates near each block's r1. A burnt-orange dot (orange ",
+          "ticker in the table) = the company no longer trades. Backtest ranking ",
+          "only - the live BUY gates did not exist then."))
     } else if (mode == "ledger") {
       tagList(
         h4("Ledger replay - monitoring.prediction_ledger", style = h_style),
@@ -3251,21 +3252,22 @@ server <- function(input, output, session) {
           df$buy_weight)
         x_title <- "Return since entry, relative to SPY (%)"
       }
-      # ALL-tickers view = grouped id > rank with separator lines;
-      # every other view = flat best-to-worst by realized return
-      rank_mode <- identical(input$view_valBL, "rankall") &&
-                   app_modeBL() == "wf" && "rank_within_cluster" %in% names(df)
+      # Replay shows the PREDICTION as it stood: always grouped by cluster
+      # then model rank (r1 = top pick), bar = realized outcome. Sorting by
+      # outcome read as a results chart (the model ranked LXP 508/548 yet it
+      # topped the chart); best/worst hunting lives in the sortable table.
+      rank_mode <- app_modeBL() == "wf" && "rank_within_cluster" %in% names(df)
       if (rank_mode) {
         df <- df[order(df$id, df$rank_within_cluster), ]   # display top->bottom
         df$ylab <- sprintf("id%d r%d | %s", df$id, df$rank_within_cluster, df$ticker)
         chart_title <- list(
-          text = sprintf("All %d picks, grouped by cluster then rank (r1 = top pick)", nrow(df)),
+          text = sprintf("Prediction order: %d ranked picks (r1 = model's top pick; bar = realized 12mo vs SPY)", nrow(df)),
           font = list(color = "#94a3b8", size = 12))
         if (nrow(df) > 180) {
           n_total <- nrow(df)
           df <- head(df, 180)
           chart_title <- list(
-            text = sprintf("First 180 of %d picks by cluster/rank (narrow with the id filter)", n_total),
+            text = sprintf("Prediction order: first 180 of %d ranked picks (narrow with the id filter)", n_total),
             font = list(color = "#94a3b8", size = 12))
         }
         cat_arr <- rev(df$ylab)   # categoryarray runs bottom->top
