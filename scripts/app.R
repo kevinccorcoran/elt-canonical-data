@@ -3270,22 +3270,31 @@ server <- function(input, output, session) {
         }
         cat_arr <- rev(df$ylab)   # categoryarray runs bottom->top
       } else {
-        df <- df[order(df$excess, decreasing = FALSE, na.last = FALSE), ]
+        # plotly DROPS NA-x bars but not their marker colors, misaligning
+        # every color after the first NA - ungraded rows stay table-only
+        n_all <- nrow(df)
+        df <- df[!is.na(df$excess), , drop = FALSE]
+        if (nrow(df) == 0)
+          return(empty_plot("No graded picks to chart - see the table."))
+        df <- df[order(df$excess, decreasing = FALSE), ]
         df$ylab <- df$ticker
         chart_title <- list(
-          text = sprintf("All %d picks", nrow(df)),
+          text = sprintf("All %d graded picks (of %d rows; rest in table)", nrow(df), n_all),
           font = list(color = "#94a3b8", size = 12))
         if (nrow(df) > 180) {
-          n_total <- nrow(df)
+          n_gr <- nrow(df)
           df <- rbind(head(df, 90), tail(df, 90))
           chart_title <- list(
-            text = sprintf("Worst 90 and best 90 of %d picks (narrow with the id/rank filters; full list in table)", n_total),
+            text = sprintf("Worst 90 and best 90 of %d graded picks (narrow with the id/rank filters; full list in table)", n_gr),
             font = list(color = "#94a3b8", size = 12))
         }
         cat_arr <- df$ylab
       }
+      # rank mode keeps ungraded rows so the ranking stays complete: draw
+      # them at 0, grey, instead of letting plotly drop them (color shift)
+      df$xplot <- ifelse(is.na(df$excess), 0, df$excess)
       set_chart_rowsBL(nrow(df))
-      p <- plot_ly(df, x = ~excess, y = ~ylab, type = "bar", orientation = "h",
+      p <- plot_ly(df, x = ~xplot, y = ~ylab, type = "bar", orientation = "h",
                    marker = list(color = ifelse(is.na(df$excess), '#64748b',
                                          ifelse(df$excess >= 0, '#10b981', '#dc2626'))),
                    customdata = ~hover, name = "excess vs SPY",
@@ -3407,8 +3416,9 @@ server <- function(input, output, session) {
         ifelse(is.na(agg$med_expectancy), 0, agg$med_expectancy),
         ifelse(is.na(agg$mean_win), 0, agg$mean_win),
         ifelse(is.na(agg$ic12), 0, agg$ic12))
+      agg$xplot <- ifelse(is.na(agg$med_expectancy), 0, agg$med_expectancy)
       return(
-        plot_ly(agg, x = ~med_expectancy, y = ~label, type = "bar", orientation = "h",
+        plot_ly(agg, x = ~xplot, y = ~label, type = "bar", orientation = "h",
                 marker = list(color = ifelse(is.na(agg$med_expectancy), '#64748b',
                                       ifelse(agg$med_expectancy >= 0, '#10b981', '#dc2626'))),
                 customdata = ~hover,
@@ -3439,15 +3449,22 @@ server <- function(input, output, session) {
       df <- head(df, k)
       chart_text <- sprintf("Shortlist: top %d by expectancy (win%% > 50, holdout >= 100)", k)
     } else {
-      df <- df[order(df$wtd_expectancy, decreasing = TRUE, na.last = TRUE), ]
+      # chart only BUYs with payoff evidence (NA-x bars would silently drop
+      # and shift every marker color); the table keeps all BUYs
       n_total <- nrow(df)
-      if (n_total > 180) {
+      df <- df[!is.na(df$wtd_expectancy), , drop = FALSE]
+      if (nrow(df) == 0)
+        return(empty_plot("No BUYs with payoff evidence to chart - see the table for all BUYs."))
+      df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
+      n_ev <- nrow(df)
+      if (n_ev > 180) {
         df <- head(df, 180)
         chart_text <- sprintf(
-          "Top 180 of %d BUYs by expectancy (narrow with the id/rank filters; full list in table)",
-          n_total)
+          "Top 180 of %d BUYs with payoff evidence (%d BUYs total; narrow with the id/rank filters)",
+          n_ev, n_total)
       } else {
-        chart_text <- sprintf("All %d BUYs by holdout expectancy", n_total)
+        chart_text <- sprintf(
+          "%d of %d BUYs have payoff evidence (rest in table only)", n_ev, n_total)
       }
     }
     set_chart_rowsBL(nrow(df))
