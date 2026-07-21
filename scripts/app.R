@@ -3568,7 +3568,9 @@ server <- function(input, output, session) {
       ifelse(is.na(df$avg_cred_weight), 0, df$avg_cred_weight),
       df$buy_weight, ifelse(is.na(df$cluster_ic_12), 0, df$cluster_ic_12))
     df <- df[order(df$wtd_expectancy, decreasing = FALSE, na.last = FALSE), ]
-    plot_ly(df, x = ~wtd_expectancy, y = ~ticker, type = "bar", orientation = "h",
+    # same id/rank label format as the rankall view; order stays by expectancy
+    df$ylab <- sprintf("id%d r%d | %s", df$id, df$agg_rank, df$ticker)
+    plot_ly(df, x = ~wtd_expectancy, y = ~ylab, type = "bar", orientation = "h",
             marker = list(color = ifelse(is.na(df$wtd_expectancy), '#64748b',
                                   ifelse(df$wtd_expectancy >= 0, '#10b981', '#dc2626'))),
             customdata = ~hover,
@@ -3583,10 +3585,10 @@ server <- function(input, output, session) {
         xaxis = list(title = "Payoff-weighted expectancy (mean holdout trade return, %)",
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
         yaxis = list(title = "", type = "category",
-                     categoryorder = "array", categoryarray = df$ticker,
+                     categoryorder = "array", categoryarray = df$ylab,
                      tickfont = list(size = 9),
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
-        margin = list(l = 70, r = 30, b = 50, t = 40))
+        margin = list(l = 130, r = 30, b = 50, t = 40))
   })
 
   output$buyTableBL <- DT::renderDT({
