@@ -3484,10 +3484,10 @@ server <- function(input, output, session) {
         return(empty_plot("No BUYs with payoff evidence to chart - see the table for all BUYs."))
       df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
       n_ev <- nrow(df)
-      if (n_ev > 180) {
-        df <- head(df, 180)
+      if (n_ev > 400) {
+        df <- head(df, 400)
         chart_text <- sprintf(
-          "Top 180 of %d BUYs with payoff evidence (%d BUYs total; narrow with the id/rank filters)",
+          "Top 400 of %d BUYs with payoff evidence (%d BUYs total; narrow with the id/rank filters)",
           n_ev, n_total)
       } else {
         chart_text <- sprintf(
