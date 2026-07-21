@@ -3504,27 +3504,25 @@ server <- function(input, output, session) {
       df <- df[order(df$id, df$agg_rank), ]
       n_total <- nrow(df)
       set_sel_statsBL(df$wtd_expectancy, "avg holdout expectancy (pp/trade)")
+      if (length(unique(df$id)) > 1) {
+        # A chart of every cluster at once is a wall of flat cell-stat bars
+        # (mostly SKIP) - noise. The ladder reads one cluster at a time; the
+        # table below still carries every loaded row.
+        set_chart_rowsBL(10)
+        return(empty_plot(sprintf(
+          paste0("%d ranked tickers across %d clusters loaded. Pick a ",
+                 "Cluster id to draw its rank ladder (r1 -> last); the ",
+                 "table below lists every row."),
+          n_total, length(unique(df$id)))))
+      }
       chart_text <- sprintf(
-        "All %d ranked tickers, grouped by cluster then rank (green BUY / grey SKIP / red SELL)",
-        n_total)
-      # 600 covers the biggest single cluster (id 8 = 527 ranks) end to end,
-      # so one selected id always shows r1 -> last rank uncut
+        "Cluster id %d: all %d ranks, r1 -> last (green BUY / grey SKIP / red SELL)",
+        df$id[1], n_total)
+      # 600 covers the biggest single cluster end to end
       if (n_total > 600) {
-        if (length(unique(df$id)) > 1) {
-          # All-ids: a global head-trim shows only the low-id SKIP wall (ids
-          # 2-5 carry no BUYs) and buries the BUY-rich clusters past the cut.
-          # Show each cluster's head instead so every id stays visible.
-          df <- do.call(rbind, lapply(split(df, df$id), function(g) head(g, 30)))
-          df <- df[order(df$id, df$agg_rank), ]
-          chart_text <- sprintf(
-            "Top 30 ranks of each cluster (%d of %d rows) - pick a cluster id for full depth",
-            nrow(df), n_total)
-        } else {
-          df <- head(df, 600)
-          chart_text <- sprintf(
-            "First 600 of %d ranked tickers by cluster/rank - narrow with the cluster id filter",
-            n_total)
-        }
+        df <- head(df, 600)
+        chart_text <- sprintf(
+          "First 600 of %d ranks - tighten the rank slider", n_total)
       }
       df$ylab <- sprintf("id%d r%d | %s%s", df$id, df$agg_rank, df$ticker,
                          ifelse(df$global_action == "BUY", "",
