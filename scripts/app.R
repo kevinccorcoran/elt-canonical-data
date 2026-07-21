@@ -3524,9 +3524,13 @@ server <- function(input, output, session) {
         chart_text <- sprintf(
           "First 600 of %d ranks - tighten the rank slider", n_total)
       }
+      # very_thin archetypes = quarantine (<30mo cluster history): their SKIP
+      # means "cannot be evidenced yet", not "evidence rejected" - mark apart
+      df$outlier <- !is.na(df$archetype) & grepl("very_thin", df$archetype)
       df$ylab <- sprintf("id%d r%d | %s%s", df$id, df$agg_rank, df$ticker,
+                         ifelse(df$outlier & df$global_action != "BUY", " [OUTLIER]",
                          ifelse(df$global_action == "BUY", "",
-                                paste0(" [", df$global_action, "]")))
+                                paste0(" [", df$global_action, "]"))))
       df$xval <- ifelse(is.na(df$wtd_expectancy), 0, df$wtd_expectancy)
       df$hover <- sprintf(
         "%s (id %d, %s)<br>action %s | rank %d | buy weight %.2f<br>holdout expectancy %s | win %s",
@@ -3535,8 +3539,11 @@ server <- function(input, output, session) {
         ifelse(is.na(df$wtd_expectancy), "n/a", sprintf("%.3f", df$wtd_expectancy)),
         ifelse(is.na(df$wtd_win_pct), "n/a", sprintf("%.1f%%", df$wtd_win_pct)))
       set_chart_rowsBL(nrow(df))
-      act_col <- ifelse(df$global_action == "BUY", "#10b981",
-                 ifelse(df$global_action == "SELL", "#dc2626", "#64748b"))
+      act_col <- ifelse(df$outlier & df$global_action != "BUY", "#f59e0b",
+                 ifelse(df$global_action == "BUY", "#10b981",
+                 ifelse(df$global_action == "SELL", "#dc2626", "#64748b")))
+      if (any(df$outlier)) chart_text <- paste0(
+        chart_text, " / amber = outlier cluster, quarantined (<30mo history)")
       return(
         plot_ly(df, x = ~xval, y = ~ylab, type = "bar", orientation = "h",
                 marker = list(color = act_col),
