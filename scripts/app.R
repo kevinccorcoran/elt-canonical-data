@@ -331,14 +331,19 @@ coerce_numeric_cols <- function(df, cols) {
 # between every rank row, stronger line where the cluster id changes; the
 # faint per-row lines are dropped beyond 120 bars to keep the DOM sane.
 rank_sep_shapes <- function(ids_display) {
-  rev_id <- rev(ids_display)
-  n <- length(rev_id)
+  # ids_display = cluster id per row, TOP to BOTTOM display order.
+  # Lines use paper coords: category slots fill the plot area evenly, so the
+  # boundary after k top rows sits at 1 - k/n. Numeric y0 on a category axis
+  # is interpreted inconsistently by plotly.js (can stretch the axis with
+  # phantom slots), so shapes never reference the category axis directly.
+  n <- length(ids_display)
   if (n < 2) return(list())
-  shapes <- lapply(seq_len(n - 1), function(i) {
-    id_change <- !identical(rev_id[i], rev_id[i + 1])
+  shapes <- lapply(seq_len(n - 1), function(k) {
+    id_change <- !identical(ids_display[k], ids_display[k + 1])
     if (!id_change && n > 120) return(NULL)
-    list(type = "line", xref = "paper", x0 = 0, x1 = 1, yref = "y",
-         y0 = i - 0.5, y1 = i - 0.5,
+    yy <- 1 - k / n
+    list(type = "line", xref = "paper", x0 = 0, x1 = 1, yref = "paper",
+         y0 = yy, y1 = yy,
          line = list(width = if (id_change) 1 else 0.5,
                      color = if (id_change) "rgba(255,255,255,0.35)"
                              else "rgba(255,255,255,0.12)"))
@@ -3477,6 +3482,9 @@ server <- function(input, output, session) {
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
             yaxis = list(title = "", type = "category",
                          categoryorder = "array", categoryarray = cat_arr,
+                         # pin the range to the category span: stray phantom
+                         # slots otherwise render as dead space above the top
+                         range = c(-0.5, nrow(df) - 0.5),
                          tickfont = list(size = 9),
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
             margin = list(l = if (rank_mode) 120 else 70, r = 30, b = 50,
@@ -3552,6 +3560,9 @@ server <- function(input, output, session) {
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
             yaxis = list(title = "", type = "category",
                          categoryorder = "array", categoryarray = rev(df$ylab),
+                         # pin the range to the category span: stray phantom
+                         # slots otherwise render as dead space above the top
+                         range = c(-0.5, nrow(df) - 0.5),
                          tickfont = list(size = 9),
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
             margin = list(l = 150, r = 30, b = 50, t = 40))
