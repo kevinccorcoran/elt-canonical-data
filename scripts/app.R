@@ -3502,10 +3502,21 @@ server <- function(input, output, session) {
       # 600 covers the biggest single cluster (id 8 = 527 ranks) end to end,
       # so one selected id always shows r1 -> last rank uncut
       if (n_total > 600) {
-        df <- head(df, 600)
-        chart_text <- sprintf(
-          "First 600 of %d ranked tickers by cluster/rank - narrow with the cluster id filter",
-          n_total)
+        if (length(unique(df$id)) > 1) {
+          # All-ids: a global head-trim shows only the low-id SKIP wall (ids
+          # 2-5 carry no BUYs) and buries the BUY-rich clusters past the cut.
+          # Show each cluster's head instead so every id stays visible.
+          df <- do.call(rbind, lapply(split(df, df$id), function(g) head(g, 30)))
+          df <- df[order(df$id, df$agg_rank), ]
+          chart_text <- sprintf(
+            "Top 30 ranks of each cluster (%d of %d rows) - pick a cluster id for full depth",
+            nrow(df), n_total)
+        } else {
+          df <- head(df, 600)
+          chart_text <- sprintf(
+            "First 600 of %d ranked tickers by cluster/rank - narrow with the cluster id filter",
+            n_total)
+        }
       }
       df$ylab <- sprintf("id%d r%d | %s%s", df$id, df$agg_rank, df$ticker,
                          ifelse(df$global_action == "BUY", "",
