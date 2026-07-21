@@ -346,6 +346,23 @@ rank_sep_shapes <- function(ids_display) {
   Filter(Negate(is.null), shapes)
 }
 
+# Buy List: selection-summary box pinned top-right under the legend. Averages
+# the CURRENT selection (all graded rows after mode/view/id/rank filters, not
+# just the bars that fit on screen) so wins and losses net out at a glance.
+sel_summary_annotation <- function(vals, label) {
+  v <- vals[!is.na(vals)]
+  if (length(v) == 0) return(list())
+  list(list(
+    xref = "paper", yref = "paper", x = 0.99, y = 0.86,
+    xanchor = "right", yanchor = "top", align = "right", showarrow = FALSE,
+    font = list(color = "#e2e8f0", size = 12),
+    bgcolor = "rgba(15,23,42,0.85)",
+    bordercolor = "rgba(255,255,255,0.25)", borderwidth = 1,
+    text = sprintf("%s: %+.1f (median %+.1f)<br>%d graded | %.0f%% positive",
+                   label, mean(v), stats::median(v),
+                   length(v), 100 * mean(v > 0))))
+}
+
 # ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
@@ -3276,6 +3293,12 @@ server <- function(input, output, session) {
           df$buy_weight)
         x_title <- "Return since entry, relative to SPY (%)"
       }
+      # selection average BEFORE any head-trim: nets wins/losses over every
+      # graded row in the current mode/id/rank selection
+      summ_ann <- sel_summary_annotation(
+        df$excess,
+        if (app_modeBL() == "wf") "avg realized 12mo excess vs SPY (pp)"
+        else "avg excess vs SPY since entry (pp)")
       # Replay shows the PREDICTION as it stood: always grouped by cluster
       # then model rank (r1 = top pick), bar = realized outcome. Sorting by
       # outcome read as a results chart (the model ranked LXP 508/548 yet it
@@ -3343,6 +3366,7 @@ server <- function(input, output, session) {
             legend = list(font = list(color = "#94a3b8")),
             showlegend = nrow(del) > 0,
             title = chart_title,
+            annotations = summ_ann,
             shapes = c(
               list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                         line = list(color = "rgba(255,255,255,0.4)"))),
@@ -3369,6 +3393,8 @@ server <- function(input, output, session) {
       # Grouped id -> agg_rank with separator lines; bar color = action.
       df <- df[order(df$id, df$agg_rank), ]
       n_total <- nrow(df)
+      summ_ann <- sel_summary_annotation(df$wtd_expectancy,
+                                         "avg holdout expectancy (pp/trade)")
       chart_text <- sprintf(
         "All %d ranked tickers, grouped by cluster then rank (green BUY / grey SKIP / red SELL)",
         n_total)
@@ -3406,6 +3432,7 @@ server <- function(input, output, session) {
             paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
             showlegend = FALSE,
             title = list(text = chart_text, font = list(color = "#94a3b8", size = 12)),
+            annotations = summ_ann,
             shapes = c(
               list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                         line = list(color = "rgba(255,255,255,0.4)"))),
@@ -3434,6 +3461,8 @@ server <- function(input, output, session) {
       df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
       k <- min(nrow(df), max(10, ceiling(0.10 * nrow(df))))
       df <- head(df, k)
+      summ_ann <- sel_summary_annotation(df$wtd_expectancy,
+                                         "avg holdout expectancy (pp/trade)")
       chart_text <- sprintf("Shortlist: top %d by expectancy (win%% > 50, holdout >= 100)", k)
     } else {
       # chart only BUYs with payoff evidence (NA-x bars would silently drop
@@ -3444,6 +3473,8 @@ server <- function(input, output, session) {
         return(empty_plot("No BUYs with payoff evidence to chart - see the table for all BUYs."))
       df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
       n_ev <- nrow(df)
+      summ_ann <- sel_summary_annotation(df$wtd_expectancy,
+                                         "avg holdout expectancy (pp/trade)")
       if (n_ev > 400) {
         df <- head(df, 400)
         chart_text <- sprintf(
@@ -3472,6 +3503,7 @@ server <- function(input, output, session) {
         paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
         title = list(text = chart_text,
                      font = list(color = "#94a3b8", size = 12)),
+        annotations = summ_ann,
         shapes = list(
           list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                line = list(color = "rgba(255,255,255,0.4)"))),
