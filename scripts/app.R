@@ -756,8 +756,9 @@ ui <- navbarPage(
         tags$p(paste("Latest date = live BUY list with payoff evidence.",
                      "Dates since 2026-06-16 replay the ledger snapshot graded to today.",
                      "Earlier dates (back to 2007) replay the walk-forward BACKTEST:",
-                     "every ranked ticker per long cluster at the nearest quarterly",
+                     "every ranked ticker per cluster at the nearest quarterly",
                      "cutoff, graded by realized excess vs SPY over the replay horizon.",
+                     "Ids 13+ are short-side clusters (model expects laggards).",
                      "No live BUY gates existed then - backtest ranking only."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
         # mode-aware controls: View only exists for the current date (replay
@@ -2910,7 +2911,8 @@ server <- function(input, output, session) {
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the PREDICTION as it stood at the nearest quarterly walk-forward ",
-          "cutoff: every ranked ticker per long cluster, in the model's own ",
+          "cutoff: every ranked ticker per cluster (ids 13+ = short side), ",
+          "in the model's own ",
           "order (r1 at the top of each cluster block = its top pick). ",
           "Each bar = how that pick REALLY did vs SPY over the replay horizon ",
           "(sidebar, default 12 months), from actual adjusted prices (first ",
@@ -3055,7 +3057,6 @@ server <- function(input, output, session) {
             AND i.date <= r.train_cutoff_date + INTERVAL '%d months'
           ORDER BY i.date DESC LIMIT 1) x ON TRUE
         WHERE r.fut_lag = %d
-          AND m.id <= 12                 -- long clusters = buy side
         ORDER BY m.id, r.rank_within_cluster;",
         format(asof, "%Y-%m-%d"), hz, hz, hz, hz)
       tryCatch({
@@ -3075,7 +3076,7 @@ server <- function(input, output, session) {
         app_modeBL("wf")
         app_dataBL(df)
         status_msgBL(sprintf(
-          "Backtest replay: cutoff %s, all ranked tickers per long cluster, %d-month horizon, %d rows.",
+          "Backtest replay: cutoff %s, all ranked tickers per cluster, %d-month horizon, %d rows.",
           df$train_cutoff_date[1], hz, nrow(df)))
       }, error = function(e) {
         app_dataBL(NULL); app_modeBL("current")
@@ -3396,6 +3397,11 @@ server <- function(input, output, session) {
             text = sprintf("Prediction order: first 180 of %d ranked picks (narrow with the id filter)", n_total),
             font = list(color = "#94a3b8", size = 12))
         }
+        # ids 13+ are SHORT-side clusters: a red bar there is the model being
+        # right, so flag it or green reads as a win
+        if (all(df$id > 12L))
+          chart_title$text <- paste0(chart_title$text,
+            " | SHORT-side cluster: model expected these to LAG SPY")
         cat_arr <- rev(df$ylab)   # categoryarray runs bottom->top
       } else {
         # plotly DROPS NA-x bars but not their marker colors, misaligning
