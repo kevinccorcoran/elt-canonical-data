@@ -3246,7 +3246,7 @@ server <- function(input, output, session) {
   }
   output$buyChartContainerBL <- renderUI({
     n <- chart_rowsBL()
-    h <- max(340, min(7000, 16 * n + 160))
+    h <- max(340, min(10000, 16 * n + 160))
     plotlyOutput("buyScatterBL", height = paste0(h, "px"))
   })
 
@@ -3373,10 +3373,12 @@ server <- function(input, output, session) {
       chart_text <- sprintf(
         "All %d ranked tickers, grouped by cluster then rank (green BUY / grey SKIP / red SELL)",
         n_total)
-      if (n_total > 400) {
-        df <- head(df, 400)
+      # 600 covers the biggest single cluster (id 8 = 527 ranks) end to end,
+      # so one selected id always shows r1 -> last rank uncut
+      if (n_total > 600) {
+        df <- head(df, 600)
         chart_text <- sprintf(
-          "First 400 of %d ranked tickers by cluster/rank - narrow with the cluster id filter",
+          "First 600 of %d ranked tickers by cluster/rank - narrow with the cluster id filter",
           n_total)
       }
       df$ylab <- sprintf("id%d r%d | %s%s", df$id, df$agg_rank, df$ticker,
