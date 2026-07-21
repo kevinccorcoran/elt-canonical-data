@@ -760,18 +760,25 @@ ui <- navbarPage(
                      "cutoff, graded by realized excess vs SPY over the replay horizon.",
                      "No live BUY gates existed then - backtest ranking only."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
-        selectInput("view_valBL", "View",
-                    choices = c("Shortlist - top 10% by expectancy" = "shortlist",
-                                "All BUY tickers"                   = "all",
-                                "ALL tickers by cluster & rank"     = "rankall"),
-                    selected = "shortlist"),
+        # mode-aware controls: View only exists for the current date (replay
+        # always draws prediction order); horizon only for backtest dates.
+        # Showing an inert control read as "Generate is broken".
+        conditionalPanel(
+          condition = "output.blCtlMode == 'current'",
+          selectInput("view_valBL", "View",
+                      choices = c("Shortlist - top 10% by expectancy" = "shortlist",
+                                  "All BUY tickers"                   = "all",
+                                  "ALL tickers by cluster & rank"     = "rankall"),
+                      selected = "shortlist")),
         selectInput("flt_id_valBL", "Cluster id filter",
                     choices = c("All" = "ALL", setNames(1:19, 1:19)),
                     selected = "ALL"),
         sliderInput("flt_rank_rangeBL", "Rank range (within cluster)",
                     min = 1, max = 600, value = c(1, 600), step = 1),
-        selectInput("wf_horizon_valBL", "Replay horizon (months)",
-                    choices = c("4", "7", "12", "20", "33"), selected = "12")
+        conditionalPanel(
+          condition = "output.blCtlMode == 'wf'",
+          selectInput("wf_horizon_valBL", "Replay horizon (months)",
+                      choices = c("4", "7", "12", "20", "33"), selected = "12"))
       )),
       mainPanel(div(class = "main-card",
         uiOutput("modeNoteBL"),
@@ -2874,6 +2881,17 @@ server <- function(input, output, session) {
     updateSelectInput(session, "asof_monthBL", selected = as.integer(format(date, "%m")))
     updateSelectInput(session, "asof_dayBL",   selected = as.integer(format(date, "%d")))
   }
+
+  # Which mode the SELECTED date will resolve to (live, pre-Generate), driving
+  # the conditionalPanels: 'current' shows View, 'wf' shows the horizon.
+  # Before Connect (no ledger bounds) default to 'current'.
+  output$blCtlMode <- renderText({
+    b <- ledger_boundsBL(); asof <- asof_dateBL()
+    if (is.null(b) || is.null(asof) || length(asof) != 1 || is.na(asof))
+      return("current")
+    if (asof < b[1]) "wf" else if (asof < b[2]) "ledger" else "current"
+  })
+  outputOptions(output, "blCtlMode", suspendWhenHidden = FALSE)
 
   output$modeNoteBL <- renderUI({
     mode <- app_modeBL()
