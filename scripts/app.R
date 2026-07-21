@@ -757,7 +757,7 @@ ui <- navbarPage(
                      "Dates since 2026-06-16 replay the ledger snapshot graded to today.",
                      "Earlier dates (back to 2007) replay the walk-forward BACKTEST:",
                      "every ranked ticker per long cluster at the nearest quarterly",
-                     "cutoff, graded by realized 12mo excess return vs SPY.",
+                     "cutoff, graded by realized excess vs SPY over the replay horizon.",
                      "No live BUY gates existed then - backtest ranking only."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
         selectInput("view_valBL", "View",
@@ -769,7 +769,9 @@ ui <- navbarPage(
                     choices = c("All" = "ALL", setNames(1:19, 1:19)),
                     selected = "ALL"),
         sliderInput("flt_rank_rangeBL", "Rank range (within cluster)",
-                    min = 1, max = 600, value = c(1, 600), step = 1)
+                    min = 1, max = 600, value = c(1, 600), step = 1),
+        selectInput("wf_horizon_valBL", "Replay horizon (months)",
+                    choices = c("4", "7", "12", "20", "33"), selected = "12")
       )),
       mainPanel(div(class = "main-card",
         uiOutput("modeNoteBL"),
@@ -2884,10 +2886,11 @@ server <- function(input, output, session) {
           "the PREDICTION as it stood at the nearest quarterly walk-forward ",
           "cutoff: every ranked ticker per long cluster, in the model's own ",
           "order (r1 at the top of each cluster block = its top pick). ",
-          "Each bar = how that pick REALLY did over the next 12 months vs SPY, ",
-          "from actual adjusted prices (first close after the cutoff to the ",
-          "last close within 12 months): green beat SPY, red lagged, grey = ",
-          "no tradable price window. If the model works, ",
+          "Each bar = how that pick REALLY did vs SPY over the replay horizon ",
+          "(sidebar, default 12 months), from actual adjusted prices (first ",
+          "close after the cutoff to the last close within the horizon): green ",
+          "beat SPY, red lagged, grey = no tradable price window. Ranking and ",
+          "grading window switch together with the horizon. If the model works, ",
           "green concentrates near each block's r1. A burnt-orange dot (orange ",
           "ticker in the table) = the company no longer trades. Backtest ranking ",
           "only - the live BUY gates did not exist then."))
@@ -2968,14 +2971,18 @@ server <- function(input, output, session) {
     if (is_wf) {
       # ── Backtest replay: every ranked ticker at the nearest cutoff ──
       # (rank depth is the client-side Rank filter, not a query knob)
+      # Horizon selector: ranking AND grading window switch together, so the
+      # question stays matched ("best over N months" graded over N months)
+      hz <- suppressWarnings(as.integer(input$wf_horizon_valBL))
+      if (!hz %in% c(4L, 7L, 12L, 20L, 33L)) hz <- 12L
       query <- sprintf("
         WITH sel AS (
-            -- nearest USABLE cutoff: must have 12mo grades and id-map coverage
-            -- (early 2004-2006 cutoffs and a few gap quarters have neither)
+            -- nearest USABLE cutoff: must have ranks at this horizon and
+            -- id-map coverage (early cutoffs and gap quarters have neither)
             SELECT MAX(r.train_cutoff_date) AS d
             FROM validation.walk_forward_ticker_rank r
             WHERE r.train_cutoff_date <= '%s'
-              AND r.fut_lag = 12
+              AND r.fut_lag = %d
               AND EXISTS (SELECT 1 FROM validation.walk_forward_cluster_id_map m
                           WHERE m.train_cutoff_date = r.train_cutoff_date)
         )
@@ -2991,7 +2998,7 @@ server <- function(input, output, session) {
                  AND date > (SELECT d FROM sel) ORDER BY date LIMIT 1) AS spy_entry,
               (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY'
                  AND date > (SELECT d FROM sel)
-                 AND date <= (SELECT d FROM sel) + INTERVAL '12 months'
+                 AND date <= (SELECT d FROM sel) + INTERVAL '%d months'
                  ORDER BY date DESC LIMIT 1) AS spy_exit
         )
         -- fwd_excess_pct = REAL price return (div/split-adjusted): first bar
@@ -3019,12 +3026,12 @@ server <- function(input, output, session) {
           ORDER BY i.date LIMIT 1) e ON TRUE
         LEFT JOIN LATERAL (SELECT adj_close AS px FROM cdm.ingest_combined i
           WHERE i.ticker = r.ticker AND i.date > r.train_cutoff_date
-            AND i.date <= r.train_cutoff_date + INTERVAL '12 months'
+            AND i.date <= r.train_cutoff_date + INTERVAL '%d months'
           ORDER BY i.date DESC LIMIT 1) x ON TRUE
-        WHERE r.fut_lag = 12
+        WHERE r.fut_lag = %d
           AND m.id <= 12                 -- long clusters = buy side
         ORDER BY m.id, r.rank_within_cluster;",
-        format(asof, "%Y-%m-%d"))
+        format(asof, "%Y-%m-%d"), hz, hz, hz, hz)
       tryCatch({
         con <- get_con(input, "BL")
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
@@ -3038,11 +3045,12 @@ server <- function(input, output, session) {
           df[[col]] <- as.integer(df[[col]])   # stay integer: used in sprintf("%d")
         df <- coerce_numeric_cols(df, c("ticker_score", "fwd_excess_pct"))
         df$delisted <- is.na(df$is_active) | !df$is_active
+        df$horizon <- hz   # carried so chart/table labels match the grading window
         app_modeBL("wf")
         app_dataBL(df)
         status_msgBL(sprintf(
-          "Backtest replay: cutoff %s, all ranked tickers per long cluster (fut_lag 12), %d rows.",
-          df$train_cutoff_date[1], nrow(df)))
+          "Backtest replay: cutoff %s, all ranked tickers per long cluster, %d-month horizon, %d rows.",
+          df$train_cutoff_date[1], hz, nrow(df)))
       }, error = function(e) {
         app_dataBL(NULL); app_modeBL("current")
         status_msgBL(paste("Error:", e$message))
@@ -3307,15 +3315,17 @@ server <- function(input, output, session) {
       # Replay modes: one bar per pick, sorted by realized excess vs SPY.
       # Green = beat SPY, red = lagged it. Reads top-to-bottom: best to worst.
       if (app_modeBL() == "wf") {
+        hz <- if ("horizon" %in% names(df)) df$horizon[1] else 12L
         df$excess <- df$fwd_excess_pct
         df$hover <- sprintf(
-          "%s (id %d)<br>cutoff %s | rank %d of %d | score %.4f<br>realized 12mo excess vs SPY %+.1f%%",
+          "%s (id %d)<br>cutoff %s | rank %d of %d | score %.4f<br>realized %dmo excess vs SPY %+.1f%%",
           df$ticker, df$id, df$train_cutoff_date,
           df$rank_within_cluster, df$cluster_size,
           ifelse(is.na(df$ticker_score), 0, df$ticker_score),
-          ifelse(is.na(df$fwd_excess_pct), 0, df$fwd_excess_pct))
-        x_title <- "Realized 12mo excess return vs SPY (%)"
+          hz, ifelse(is.na(df$fwd_excess_pct), 0, df$fwd_excess_pct))
+        x_title <- sprintf("Realized %dmo excess return vs SPY (%%)", hz)
       } else {
+        hz <- NA_integer_
         df$excess <- df$excess_vs_spy_pct
         df$hover <- sprintf(
           "%s<br>snapshot %s | entry %s @ %.2f -> latest %.2f<br>ret %.1f%% | vs SPY %+.1f%% | buy weight %.2f",
@@ -3330,7 +3340,7 @@ server <- function(input, output, session) {
       # graded row in the current mode/id/rank selection
       set_sel_statsBL(
         df$excess,
-        if (app_modeBL() == "wf") "avg 12mo excess vs SPY (pp)"
+        if (app_modeBL() == "wf") sprintf("avg %dmo excess vs SPY (pp)", hz)
         else "avg excess vs SPY since entry (pp)")
       # Replay shows the PREDICTION as it stood: always grouped by cluster
       # then model rank (r1 = top pick), bar = realized outcome. Sorting by
@@ -3341,7 +3351,7 @@ server <- function(input, output, session) {
         df <- df[order(df$id, df$rank_within_cluster), ]   # display top->bottom
         df$ylab <- sprintf("id%d r%d | %s", df$id, df$rank_within_cluster, df$ticker)
         chart_title <- list(
-          text = sprintf("Prediction order: %d ranked picks (r1 = model's top pick; bar = realized 12mo vs SPY)", nrow(df)),
+          text = sprintf("Prediction order: %d ranked picks (r1 = model's top pick; bar = realized %dmo vs SPY)", nrow(df), hz),
           font = list(color = "#94a3b8", size = 12))
         if (nrow(df) > 180) {
           n_total <- nrow(df)
@@ -3559,6 +3569,7 @@ server <- function(input, output, session) {
         options = list(dom = "t", ordering = FALSE)))
     }
     if (app_modeBL() == "wf") {
+      hz <- if ("horizon" %in% names(df)) df$horizon[1] else 12L
       display <- data.frame(
         Ticker            = df$ticker,
         Status            = ifelse(df$delisted, "delisted", ""),
@@ -3567,10 +3578,12 @@ server <- function(input, output, session) {
         Rank              = df$rank_within_cluster,
         `Cluster size`    = df$cluster_size,
         Score             = df$ticker_score,
-        `12mo excess vs SPY %` = df$fwd_excess_pct,
+        excess            = df$fwd_excess_pct,
         check.names = FALSE,
         stringsAsFactors = FALSE
       )
+      names(display)[names(display) == "excess"] <-
+        sprintf("%dmo excess vs SPY %%", hz)
       return(DT::datatable(
         display,
         selection = "none",
