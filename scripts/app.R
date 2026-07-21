@@ -346,23 +346,6 @@ rank_sep_shapes <- function(ids_display) {
   Filter(Negate(is.null), shapes)
 }
 
-# Buy List: selection-summary box pinned top-right under the legend. Averages
-# the CURRENT selection (all graded rows after mode/view/id/rank filters, not
-# just the bars that fit on screen) so wins and losses net out at a glance.
-sel_summary_annotation <- function(vals, label) {
-  v <- vals[!is.na(vals)]
-  if (length(v) == 0) return(list())
-  list(list(
-    xref = "paper", yref = "paper", x = 0.99, y = 0.86,
-    xanchor = "right", yanchor = "top", align = "right", showarrow = FALSE,
-    font = list(color = "#e2e8f0", size = 12),
-    bgcolor = "rgba(15,23,42,0.85)",
-    bordercolor = "rgba(255,255,255,0.25)", borderwidth = 1,
-    text = sprintf("%s: %+.1f (median %+.1f)<br>%d graded | %.0f%% positive",
-                   label, mean(v), stats::median(v),
-                   length(v), 100 * mean(v > 0))))
-}
-
 # ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
@@ -785,16 +768,12 @@ ui <- navbarPage(
         selectInput("flt_id_valBL", "Cluster id filter",
                     choices = c("All" = "ALL", setNames(1:19, 1:19)),
                     selected = "ALL"),
-        selectInput("flt_rank_valBL", "Rank filter (within cluster)",
-                    choices = c("All"               = "ALL",
-                                "1 - top pick only" = "1",
-                                "Top 3"             = "3",
-                                "Top 5"             = "5",
-                                "Top 10"            = "10"),
-                    selected = "ALL")
+        sliderInput("flt_rank_rangeBL", "Rank range (within cluster)",
+                    min = 1, max = 600, value = c(1, 600), step = 1)
       )),
       mainPanel(div(class = "main-card",
         uiOutput("modeNoteBL"),
+        uiOutput("selStatsBL"),
         uiOutput("buyChartContainerBL"),
         tags$br(),
         DT::DTOutput("buyTableBL")
@@ -3234,20 +3213,19 @@ server <- function(input, output, session) {
 
   # Shared id/rank filter, applied identically by chart + table (live, no
   # re-Generate). id filter: wf replay + current mode (ledger rows carry no
-  # id). rank filter: rank_within_cluster (wf) / agg_rank (current) - "1"
-  # = each cluster's top pick, for any date.
+  # id). rank range: keep ranks in [lo, hi] on rank_within_cluster (wf) /
+  # agg_rank (current) - e.g. 5-20 = skip the head, take the mid-block.
   bl_apply_filters <- function(df) {
     idv <- input$flt_id_valBL
     if (!is.null(idv) && !idv %in% c("", "ALL") && "id" %in% names(df))
       df <- df[!is.na(df$id) & df$id == as.integer(idv), , drop = FALSE]
-    rkv <- input$flt_rank_valBL
-    if (!is.null(rkv) && !rkv %in% c("", "ALL")) {
-      r <- as.integer(rkv)
-      if ("rank_within_cluster" %in% names(df)) {
-        df <- df[!is.na(df$rank_within_cluster) & df$rank_within_cluster <= r, , drop = FALSE]
-      } else if ("agg_rank" %in% names(df)) {
-        df <- df[!is.na(df$agg_rank) & df$agg_rank <= r, , drop = FALSE]
-      }
+    rr <- input$flt_rank_rangeBL
+    if (!is.null(rr) && length(rr) == 2 && (rr[1] > 1 || rr[2] < 600)) {
+      col <- if ("rank_within_cluster" %in% names(df)) "rank_within_cluster"
+             else if ("agg_rank" %in% names(df)) "agg_rank" else NULL
+      if (!is.null(col))
+        df <- df[!is.na(df[[col]]) & df[[col]] >= rr[1] & df[[col]] <= rr[2],
+                 , drop = FALSE]
     }
     df
   }
@@ -3266,8 +3244,38 @@ server <- function(input, output, session) {
     plotlyOutput("buyScatterBL", height = paste0(h, "px"))
   })
 
+  # Selection stats: mean/median of the metric over ALL graded rows in the
+  # current mode/view/id/rank selection (not just drawn bars), as stat chips
+  # above the chart. The chart renderer stashes values here (same pattern as
+  # chart_rowsBL); NULL = nothing graded, render no chips.
+  sel_statsBL <- reactiveVal(NULL)
+  set_sel_statsBL <- function(vals, label) {
+    v <- vals[!is.na(vals)]
+    if (length(v) == 0) { sel_statsBL(NULL); return(invisible(NULL)) }
+    sel_statsBL(list(label = label, mean = mean(v), med = stats::median(v),
+                     n = length(v), pos = 100 * mean(v > 0)))
+  }
+  output$selStatsBL <- renderUI({
+    s <- sel_statsBL()
+    if (is.null(s)) return(NULL)
+    chip <- function(lab, val, col = "#f8fafc") {
+      div(style = paste0("background:#1e293b;border:1px solid rgba(255,255,255,0.12);",
+                         "border-radius:8px;padding:6px 16px;"),
+          div(lab, style = paste0("color:#94a3b8;font-size:0.65rem;",
+                                  "letter-spacing:0.05em;text-transform:uppercase;")),
+          div(val, style = sprintf("color:%s;font-size:1.05rem;font-weight:600;", col)))
+    }
+    sign_col <- function(x) if (x >= 0) "#10b981" else "#dc2626"
+    div(style = "display:flex;gap:10px;flex-wrap:wrap;margin-bottom:0.75rem;",
+        chip(s$label, sprintf("%+.1f", s$mean), sign_col(s$mean)),
+        chip("median", sprintf("%+.1f", s$med), sign_col(s$med)),
+        chip("graded picks", sprintf("%d", s$n)),
+        chip("% positive", sprintf("%.0f%%", s$pos)))
+  })
+
   output$buyScatterBL <- renderPlotly({
     req(app_dataBL())
+    sel_statsBL(NULL)   # cleared until a branch computes this selection
     df <- bl_apply_filters(app_dataBL())
     if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
     if (app_modeBL() %in% c("wf", "ledger")) {
@@ -3295,9 +3303,9 @@ server <- function(input, output, session) {
       }
       # selection average BEFORE any head-trim: nets wins/losses over every
       # graded row in the current mode/id/rank selection
-      summ_ann <- sel_summary_annotation(
+      set_sel_statsBL(
         df$excess,
-        if (app_modeBL() == "wf") "avg realized 12mo excess vs SPY (pp)"
+        if (app_modeBL() == "wf") "avg 12mo excess vs SPY (pp)"
         else "avg excess vs SPY since entry (pp)")
       # Replay shows the PREDICTION as it stood: always grouped by cluster
       # then model rank (r1 = top pick), bar = realized outcome. Sorting by
@@ -3366,7 +3374,6 @@ server <- function(input, output, session) {
             legend = list(font = list(color = "#94a3b8")),
             showlegend = nrow(del) > 0,
             title = chart_title,
-            annotations = summ_ann,
             shapes = c(
               list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                         line = list(color = "rgba(255,255,255,0.4)"))),
@@ -3393,8 +3400,7 @@ server <- function(input, output, session) {
       # Grouped id -> agg_rank with separator lines; bar color = action.
       df <- df[order(df$id, df$agg_rank), ]
       n_total <- nrow(df)
-      summ_ann <- sel_summary_annotation(df$wtd_expectancy,
-                                         "avg holdout expectancy (pp/trade)")
+      set_sel_statsBL(df$wtd_expectancy, "avg holdout expectancy (pp/trade)")
       chart_text <- sprintf(
         "All %d ranked tickers, grouped by cluster then rank (green BUY / grey SKIP / red SELL)",
         n_total)
@@ -3432,7 +3438,6 @@ server <- function(input, output, session) {
             paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
             showlegend = FALSE,
             title = list(text = chart_text, font = list(color = "#94a3b8", size = 12)),
-            annotations = summ_ann,
             shapes = c(
               list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                         line = list(color = "rgba(255,255,255,0.4)"))),
@@ -3461,8 +3466,7 @@ server <- function(input, output, session) {
       df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
       k <- min(nrow(df), max(10, ceiling(0.10 * nrow(df))))
       df <- head(df, k)
-      summ_ann <- sel_summary_annotation(df$wtd_expectancy,
-                                         "avg holdout expectancy (pp/trade)")
+      set_sel_statsBL(df$wtd_expectancy, "avg holdout expectancy (pp/trade)")
       chart_text <- sprintf("Shortlist: top %d by expectancy (win%% > 50, holdout >= 100)", k)
     } else {
       # chart only BUYs with payoff evidence (NA-x bars would silently drop
@@ -3473,8 +3477,7 @@ server <- function(input, output, session) {
         return(empty_plot("No BUYs with payoff evidence to chart - see the table for all BUYs."))
       df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
       n_ev <- nrow(df)
-      summ_ann <- sel_summary_annotation(df$wtd_expectancy,
-                                         "avg holdout expectancy (pp/trade)")
+      set_sel_statsBL(df$wtd_expectancy, "avg holdout expectancy (pp/trade)")
       if (n_ev > 400) {
         df <- head(df, 400)
         chart_text <- sprintf(
@@ -3503,7 +3506,6 @@ server <- function(input, output, session) {
         paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
         title = list(text = chart_text,
                      font = list(color = "#94a3b8", size = 12)),
-        annotations = summ_ann,
         shapes = list(
           list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                line = list(color = "rgba(255,255,255,0.4)"))),
