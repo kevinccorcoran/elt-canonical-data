@@ -778,7 +778,15 @@ ui <- navbarPage(
         conditionalPanel(
           condition = "output.blCtlMode == 'wf'",
           selectInput("wf_horizon_valBL", "Replay horizon (months)",
-                      choices = c("4", "7", "12", "20", "33"), selected = "12"))
+                      choices = c("4", "7", "12", "20", "33"), selected = "12"),
+          # replay's shortlist: the slider can't express "top X% of EACH
+          # cluster" when clusters of different sizes are loaded together
+          selectInput("wf_depth_valBL", "Per-cluster depth",
+                      choices = c("All ranks"               = "all",
+                                  "Top 5% of each cluster"  = "p5",
+                                  "Top 10% of each cluster" = "p10",
+                                  "Top 20% of each cluster" = "p20"),
+                      selected = "all"))
       )),
       mainPanel(div(class = "main-card",
         uiOutput("modeNoteBL"),
@@ -3252,6 +3260,16 @@ server <- function(input, output, session) {
       if (!is.null(col))
         df <- df[!is.na(df[[col]]) & df[[col]] >= rr[1] & df[[col]] <= rr[2],
                  , drop = FALSE]
+    }
+    # replay depth preset: top X% of EACH cluster (per-row cluster_size), the
+    # backtest analogue of the current-date Shortlist; ANDs with the slider
+    dp <- input$wf_depth_valBL
+    if (!is.null(dp) && dp %in% c("p5", "p10", "p20") &&
+        all(c("rank_within_cluster", "cluster_size") %in% names(df))) {
+      frac <- c(p5 = 0.05, p10 = 0.10, p20 = 0.20)[[dp]]
+      df <- df[!is.na(df$rank_within_cluster) &
+               df$rank_within_cluster <= pmax(1, ceiling(frac * df$cluster_size)),
+               , drop = FALSE]
     }
     df
   }
