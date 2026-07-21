@@ -3041,7 +3041,8 @@ server <- function(input, output, session) {
                                                    AS fwd_excess_pct,
                ((SELECT MAX(i.date) FROM cdm.ingest_combined i
                  WHERE i.ticker = r.ticker)
-                  >= mkt.market_max - INTERVAL '10 days') AS is_active
+                  >= mkt.market_max - INTERVAL '10 days') AS is_active,
+               mkt.market_max
         FROM validation.walk_forward_ticker_rank r
         JOIN sel ON r.train_cutoff_date = sel.d
         JOIN validation.walk_forward_cluster_id_map m
@@ -3351,16 +3352,29 @@ server <- function(input, output, session) {
     if (app_modeBL() %in% c("wf", "ledger")) {
       # Replay modes: one bar per pick, sorted by realized excess vs SPY.
       # Green = beat SPY, red = lagged it. Reads top-to-bottom: best to worst.
+      trunc_note <- NULL   # set when the horizon outruns the price data
       if (app_modeBL() == "wf") {
         hz <- if ("horizon" %in% names(df)) df$horizon[1] else 12L
         df$excess <- df$fwd_excess_pct
+        # e.g. 33mo from the 2024-12-31 cutoff ends in 2027: rows are graded
+        # entry -> last available bar, a partial in-progress grade
+        if ("market_max" %in% names(df)) {
+          co <- as.Date(df$train_cutoff_date[1])
+          mm <- as.Date(df$market_max[1])
+          full_end <- seq(co, by = sprintf("%d months", hz), length.out = 2)[2]
+          if (!is.na(full_end) && !is.na(mm) && full_end > mm)
+            trunc_note <- sprintf("~%d of %dmo elapsed",
+              floor(as.numeric(difftime(mm, co, units = "days")) / 30.44), hz)
+        }
         df$hover <- sprintf(
           "%s (id %d)<br>cutoff %s | rank %d of %d | score %.4f<br>realized %dmo excess vs SPY %+.1f%%",
           df$ticker, df$id, df$train_cutoff_date,
           df$rank_within_cluster, df$cluster_size,
           ifelse(is.na(df$ticker_score), 0, df$ticker_score),
           hz, ifelse(is.na(df$fwd_excess_pct), 0, df$fwd_excess_pct))
-        x_title <- sprintf("Realized %dmo excess return vs SPY (%%)", hz)
+        x_title <- if (is.null(trunc_note))
+          sprintf("Realized %dmo excess return vs SPY (%%)", hz)
+        else sprintf("Excess return vs SPY so far (%%; %s)", trunc_note)
       } else {
         hz <- NA_integer_
         df$excess <- df$excess_vs_spy_pct
@@ -3377,8 +3391,9 @@ server <- function(input, output, session) {
       # graded row in the current mode/id/rank selection
       set_sel_statsBL(
         df$excess,
-        if (app_modeBL() == "wf") sprintf("avg %dmo excess vs SPY (pp)", hz)
-        else "avg excess vs SPY since entry (pp)")
+        if (app_modeBL() != "wf") "avg excess vs SPY since entry (pp)"
+        else if (is.null(trunc_note)) sprintf("avg %dmo excess vs SPY (pp)", hz)
+        else sprintf("avg excess vs SPY so far (pp; %s)", trunc_note))
       # Replay shows the PREDICTION as it stood: always grouped by cluster
       # then model rank (r1 = top pick), bar = realized outcome. Sorting by
       # outcome read as a results chart (the model ranked LXP 508/548 yet it
@@ -3402,6 +3417,9 @@ server <- function(input, output, session) {
         if (all(df$id > 12L))
           chart_title$text <- paste0(chart_title$text,
             " | SHORT-side cluster: model expected these to LAG SPY")
+        if (!is.null(trunc_note))
+          chart_title$text <- paste0(chart_title$text,
+            " | horizon outruns data: ", trunc_note)
         cat_arr <- rev(df$ylab)   # categoryarray runs bottom->top
       } else {
         # plotly DROPS NA-x bars but not their marker colors, misaligning
@@ -3626,8 +3644,13 @@ server <- function(input, output, session) {
         check.names = FALSE,
         stringsAsFactors = FALSE
       )
+      hz_end <- seq(as.Date(df$train_cutoff_date[1]),
+                    by = sprintf("%d months", hz), length.out = 2)[2]
+      hz_cut <- "market_max" %in% names(df) &&
+        !is.na(hz_end) && hz_end > as.Date(df$market_max[1])
       names(display)[names(display) == "excess"] <-
-        sprintf("%dmo excess vs SPY %%", hz)
+        if (hz_cut) sprintf("excess vs SPY %% so far (of %dmo)", hz)
+        else sprintf("%dmo excess vs SPY %%", hz)
       return(DT::datatable(
         display,
         selection = "none",
