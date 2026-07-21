@@ -3220,7 +3220,7 @@ server <- function(input, output, session) {
     if (!is.null(idv) && !idv %in% c("", "ALL") && "id" %in% names(df))
       df <- df[!is.na(df$id) & df$id == as.integer(idv), , drop = FALSE]
     rr <- input$flt_rank_rangeBL
-    if (!is.null(rr) && length(rr) == 2 && (rr[1] > 1 || rr[2] < 600)) {
+    if (!is.null(rr) && length(rr) == 2) {
       col <- if ("rank_within_cluster" %in% names(df)) "rank_within_cluster"
              else if ("agg_rank" %in% names(df)) "agg_rank" else NULL
       if (!is.null(col))
@@ -3242,6 +3242,31 @@ server <- function(input, output, session) {
     n <- chart_rowsBL()
     h <- max(340, min(10000, 16 * n + 160))
     plotlyOutput("buyScatterBL", height = paste0(h, "px"))
+  })
+
+  # Rank slider re-scales to the ACTUAL max rank of the loaded data under the
+  # current id filter (id 9 in 2020 = 27 ranks, in 2022 = 415). If the top
+  # handle sat at the old max ("everything"), it follows the new max; an
+  # intentional window like 5-20 is preserved. Ledger rows carry no rank
+  # column, so the slider is left alone there (the filter no-ops anyway).
+  prev_rank_maxBL <- reactiveVal(600)
+  observe({
+    df <- app_dataBL()
+    if (is.null(df) || nrow(df) == 0) return()
+    col <- if ("rank_within_cluster" %in% names(df)) "rank_within_cluster"
+           else if ("agg_rank" %in% names(df)) "agg_rank" else return()
+    idv <- input$flt_id_valBL
+    if (!is.null(idv) && !idv %in% c("", "ALL") && "id" %in% names(df))
+      df <- df[!is.na(df$id) & df$id == as.integer(idv), , drop = FALSE]
+    if (nrow(df) == 0) return()
+    mx <- suppressWarnings(max(df[[col]], na.rm = TRUE))
+    if (!is.finite(mx) || mx < 1) return()
+    cur <- input$flt_rank_rangeBL
+    if (is.null(cur) || length(cur) != 2) cur <- c(1, mx)
+    hi <- if (cur[2] >= prev_rank_maxBL() || cur[2] > mx) mx else cur[2]
+    lo <- min(cur[1], mx)
+    prev_rank_maxBL(mx)
+    updateSliderInput(session, "flt_rank_rangeBL", max = mx, value = c(lo, hi))
   })
 
   # Selection stats: mean/median of the metric over ALL graded rows in the
