@@ -15,12 +15,16 @@
   if (window.__schemaColorInit) return;
   window.__schemaColorInit = true;
 
-  // one color per schema (matches the Graphviz render); covers both projects
+  // one color per schema (unchanged hues); covers both projects. Key ORDER =
+  // legend order, set to lineage flow (upstream -> downstream) so the legend
+  // reads top-to-bottom like the graph reads left-to-right: raw -> cdm ->
+  // quality checks -> features -> clustering -> scoring -> validation ->
+  // serving -> monitoring. Only schemas present in a given graph are shown.
   var COLORS = {
-    scoring: "#B07AA1", features: "#E15759", validation: "#9C755F",
-    serving: "#76B7B2", clustering: "#59A14F", monitoring: "#F28E2B",
-    cdm: "#4E79A7", raw: "#EDC948", data_quality: "#FF9DA7",
-    quality: "#86BCB6", analysis: "#D37295"
+    raw: "#EDC948", cdm: "#4E79A7", data_quality: "#FF9DA7",
+    quality: "#86BCB6", analysis: "#D37295",
+    features: "#E15759", clustering: "#59A14F", scoring: "#B07AA1",
+    validation: "#9C755F", serving: "#76B7B2", monitoring: "#F28E2B"
   };
 
   var schemaOf = {};          // unique_id and name -> schema
