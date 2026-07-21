@@ -3177,11 +3177,24 @@ server <- function(input, output, session) {
     # ── Current mode: live BUY list with payoff evidence ──
     # payoff evidence fixed to fut_lag <= 12 (matched short horizons)
     fut_cap <- 12L
-    query <- sprintf("
+    tryCatch({
+      con <- get_con(input, "BL")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      # evidence_status ships with the Phase A dbt deploy; the query adapts so
+      # the dashboard works BEFORE and AFTER the column lands on prod
+      has_ev <- tryCatch(nrow(dbGetQuery(con,
+        "SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'serving'
+            AND table_name = 'return_cluster_ticker_global_action_current'
+            AND column_name = 'evidence_status'")) > 0,
+        error = function(e) FALSE)
+      ev_buys <- if (has_ev) ", evidence_status" else ""
+      ev_sel  <- if (has_ev) "b.evidence_status," else "'mature'::text AS evidence_status,"
+      query <- sprintf("
       WITH buys AS (
           -- ALL actions loaded (not just BUY): the rankall view shows every
           -- ranked ticker per id; the BUY-only views subset in the renderer
-          SELECT ticker, id, archetype, global_action, buy_weight, buy_votes, agg_rank
+          SELECT ticker, id, archetype, global_action, buy_weight, buy_votes, agg_rank%s
           FROM serving.return_cluster_ticker_global_action_current
       ),
       cells AS (
@@ -3217,6 +3230,7 @@ server <- function(input, output, session) {
           GROUP BY c.ticker, c.id
       )
       SELECT b.ticker, b.id, b.archetype, b.global_action, b.buy_weight, b.buy_votes, b.agg_rank,
+             %s
              p.n_buy_cells,
              ROUND(p.wtd_expectancy::numeric, 3) AS wtd_expectancy,
              ROUND(p.wtd_win_pct::numeric, 1)    AS wtd_win_pct,
@@ -3229,10 +3243,8 @@ server <- function(input, output, session) {
       LEFT JOIN cred cr USING (ticker, id)
       LEFT JOIN validation.walk_forward_id_ic ic
         ON ic.id = b.id AND ic.fut_lag = 12
-      ORDER BY p.wtd_expectancy DESC NULLS LAST, b.buy_weight DESC;", fut_cap)
-    tryCatch({
-      con <- get_con(input, "BL")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      ORDER BY p.wtd_expectancy DESC NULLS LAST, b.buy_weight DESC;",
+        ev_buys, fut_cap, ev_sel)
       df <- dbGetQuery(con, query)
       df$id       <- as.integer(df$id)
       df$agg_rank <- as.integer(df$agg_rank)
@@ -3524,33 +3536,41 @@ server <- function(input, output, session) {
         chart_text <- sprintf(
           "First 600 of %d ranks - tighten the rank slider", n_total)
       }
-      # very_thin archetypes = quarantine (<30mo cluster history): their SKIP
-      # means "cannot be evidenced yet", not "evidence rejected" - mark apart
-      df$outlier <- !is.na(df$archetype) & grepl("very_thin", df$archetype)
+      # Sparse marking is DB-driven (evidence_status, Phase A): a sparse SKIP
+      # means "cannot be evidenced yet", not "evidence rejected". Bar fill
+      # stays action-colored; sparse rows get an amber OUTLINE + label tag,
+      # so a sparse BUY reads green-but-flagged, not quarantined.
+      df$sparse <- !is.na(df$evidence_status) & df$evidence_status != "mature"
+      base_tag <- ifelse(df$global_action == "BUY", "", df$global_action)
+      tag <- ifelse(df$sparse & base_tag == "", "SPARSE",
+             ifelse(df$sparse, paste0(base_tag, "+SPARSE"), base_tag))
       df$ylab <- sprintf("id%d r%d | %s%s", df$id, df$agg_rank, df$ticker,
-                         ifelse(df$outlier & df$global_action != "BUY", " [OUTLIER]",
-                         ifelse(df$global_action == "BUY", "",
-                                paste0(" [", df$global_action, "]"))))
+                         ifelse(tag == "", "", paste0(" [", tag, "]")))
       df$xval <- ifelse(is.na(df$wtd_expectancy), 0, df$wtd_expectancy)
       df$hover <- sprintf(
-        "%s (id %d, %s)<br>action %s | rank %d | buy weight %.2f<br>holdout expectancy %s | win %s",
-        df$ticker, df$id, df$archetype, df$global_action, df$agg_rank,
+        "%s (id %d, %s)<br>action %s | evidence %s | rank %d | buy weight %.2f<br>holdout expectancy %s | win %s",
+        df$ticker, df$id, df$archetype, df$global_action,
+        ifelse(is.na(df$evidence_status), "n/a", df$evidence_status),
+        df$agg_rank,
         ifelse(is.na(df$buy_weight), 0, df$buy_weight),
         ifelse(is.na(df$wtd_expectancy), "n/a", sprintf("%.3f", df$wtd_expectancy)),
         ifelse(is.na(df$wtd_win_pct), "n/a", sprintf("%.1f%%", df$wtd_win_pct)))
       set_chart_rowsBL(nrow(df))
-      act_col <- ifelse(df$outlier & df$global_action != "BUY", "#f59e0b",
-                 ifelse(df$global_action == "BUY", "#10b981",
-                 ifelse(df$global_action == "SELL", "#dc2626", "#64748b")))
-      if (any(df$outlier)) chart_text <- paste0(
-        chart_text, " / amber = outlier cluster, quarantined (<30mo history)")
+      act_col <- ifelse(df$global_action == "BUY", "#10b981",
+                 ifelse(df$global_action == "SELL", "#dc2626", "#64748b"))
+      ln_col <- ifelse(df$sparse, "#f59e0b", "rgba(0,0,0,0)")
+      ln_w   <- ifelse(df$sparse, 1.5, 0)
+      if (any(df$sparse)) chart_text <- paste0(
+        chart_text, " / amber outline = sparse evidence (young cluster or ticker)")
       return(
         plot_ly(df, x = ~xval, y = ~ylab, type = "bar", orientation = "h",
-                marker = list(color = act_col),
+                marker = list(color = act_col,
+                              line = list(color = ln_col, width = ln_w)),
                 customdata = ~hover,
                 hovertemplate = "%{customdata}<extra></extra>") %>%
           add_markers(x = ~xval, y = ~ylab,
-                      marker = list(color = act_col, size = 5),
+                      marker = list(color = act_col, size = 5,
+                                    line = list(color = ln_col, width = ln_w)),
                       customdata = ~hover, showlegend = FALSE,
                       hovertemplate = "%{customdata}<extra></extra>") %>%
           layout(
@@ -3611,19 +3631,29 @@ server <- function(input, output, session) {
       }
     }
     set_chart_rowsBL(nrow(df))
+    # sparse rows STAY in the BUY views (marked, not hidden): amber outline +
+    # label tag; evidence_status comes from the DB (Phase A)
+    df$sparse <- !is.na(df$evidence_status) & df$evidence_status != "mature"
+    if (any(df$sparse)) chart_text <- paste0(
+      chart_text, " / amber outline = sparse evidence")
     df$hover <- sprintf(
-      "%s (id %d, %s)<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f",
+      "%s (id %d, %s)<br>evidence %s<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f",
       df$ticker, df$id, df$archetype,
+      ifelse(is.na(df$evidence_status), "n/a", df$evidence_status),
       df$wtd_expectancy, df$wtd_win_pct,
       as.integer(df$n_buy_cells), as.integer(df$total_holdout),
       ifelse(is.na(df$avg_cred_weight), 0, df$avg_cred_weight),
       df$buy_weight, ifelse(is.na(df$cluster_ic_12), 0, df$cluster_ic_12))
     df <- df[order(df$wtd_expectancy, decreasing = FALSE, na.last = FALSE), ]
     # same id/rank label format as the rankall view; order stays by expectancy
-    df$ylab <- sprintf("id%d r%d | %s", df$id, df$agg_rank, df$ticker)
+    df$ylab <- sprintf("id%d r%d | %s%s", df$id, df$agg_rank, df$ticker,
+                       ifelse(df$sparse, " [SPARSE]", ""))
     plot_ly(df, x = ~wtd_expectancy, y = ~ylab, type = "bar", orientation = "h",
             marker = list(color = ifelse(is.na(df$wtd_expectancy), '#64748b',
-                                  ifelse(df$wtd_expectancy >= 0, '#10b981', '#dc2626'))),
+                                  ifelse(df$wtd_expectancy >= 0, '#10b981', '#dc2626')),
+                          line = list(color = ifelse(df$sparse, "#f59e0b",
+                                                     "rgba(0,0,0,0)"),
+                                      width = ifelse(df$sparse, 1.5, 0))),
             customdata = ~hover,
             hovertemplate = "%{customdata}<extra></extra>") %>%
       layout(
@@ -3736,6 +3766,7 @@ server <- function(input, output, session) {
         Id           = df$id,
         Archetype    = df$archetype,
         Action       = df$global_action,
+        Evidence     = df$evidence_status,
         `Rank`       = df$agg_rank,
         `Buy weight` = df$buy_weight,
         `Expectancy` = df$wtd_expectancy,
@@ -3751,11 +3782,15 @@ server <- function(input, output, session) {
         options = list(
           pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500, 2000),
           dom = "Bftip", buttons = c("copy", "csv"),
-          columnDefs = list(list(className = "dt-right", targets = 4:8))
+          columnDefs = list(list(className = "dt-right", targets = 5:9))
         )
       ) %>% DT::formatStyle("Action",
               color = DT::styleEqual(c("BUY", "SELL", "SKIP"),
-                                     c("#10b981", "#dc2626", "#94a3b8"))))
+                                     c("#10b981", "#dc2626", "#94a3b8"))) %>%
+        DT::formatStyle("Evidence",
+              color = DT::styleEqual(
+                c("sparse_cluster", "sparse_ticker", "sparse_both"),
+                c("#f59e0b", "#f59e0b", "#d97706"))))
     }
 
     # BUY-gated views: same subset as the chart
@@ -3781,6 +3816,7 @@ server <- function(input, output, session) {
       Ticker        = df$ticker,
       Id            = df$id,
       Archetype     = df$archetype,
+      Evidence      = df$evidence_status,
       `Expectancy`  = df$wtd_expectancy,
       `Win %`       = df$wtd_win_pct,
       `Buy cells`   = as.integer(df$n_buy_cells),
@@ -3803,10 +3839,13 @@ server <- function(input, output, session) {
         pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
         dom = "Bftip",
         buttons = c("copy", "csv"),
-        order = list(list(3, "desc")),
-        columnDefs = list(list(className = "dt-right", targets = 3:11))
+        order = list(list(4, "desc")),
+        columnDefs = list(list(className = "dt-right", targets = 4:12))
       )
-    )
+    ) %>% DT::formatStyle("Evidence",
+            color = DT::styleEqual(
+              c("sparse_cluster", "sparse_ticker", "sparse_both"),
+              c("#f59e0b", "#f59e0b", "#d97706")))
   }, server = FALSE)
 }
 
