@@ -7,6 +7,10 @@ library(nanoparquet)
 library(DT)
 library(ggplot2)
 
+# TEMP DIAGNOSTIC 2026-07-22: full stack traces for the crash-loop hunt.
+# Remove once the segfault/sprintf source is fixed.
+options(shiny.fullstacktrace = TRUE)
+
 # ─── QA history parquet (persists across runs, one file across DBs) ───
 QA_HISTORY_DIR  <- "/opt/airflow/scripts/data"
 QA_HISTORY_PATH <- file.path(QA_HISTORY_DIR, "ticker_count_history.parquet")
@@ -124,12 +128,35 @@ custom_css <- "
 
 body {
   background-color: #0f172a !important;
-  background-image: 
+  background-image:
     radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.15) 0px, transparent 50%),
     radial-gradient(at 100% 100%, rgba(239, 68, 68, 0.1) 0px, transparent 50%);
   color: #f8fafc !important;
   font-family: 'Inter', sans-serif !important;
   min-height: 100vh;
+}
+
+/* Tab strip: pin dark explicitly - the Bootstrap navbar otherwise follows
+   the browser's light color scheme and renders a white bar. Selectors cover
+   both BS3 (.navbar-default, li.active) and BS5 (.nav-link) variants. */
+.navbar, .navbar-default, .navbar-static-top {
+  background-color: rgba(15, 23, 42, 0.95) !important;
+  border: none !important;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.navbar .navbar-brand, .navbar-default .navbar-brand {
+  color: #f8fafc !important; font-weight: 600;
+}
+.navbar-nav > li > a, .navbar-nav .nav-link {
+  color: #94a3b8 !important; background: transparent !important;
+}
+.navbar-nav > li > a:hover, .navbar-nav .nav-link:hover {
+  color: #f8fafc !important;
+}
+.navbar-nav > .active > a, .navbar-nav > .active > a:hover,
+.navbar-nav > .active > a:focus, .navbar-nav .nav-link.active {
+  color: #f8fafc !important;
+  background-color: rgba(56, 189, 248, 0.12) !important;
 }
 
 h2 {
@@ -426,31 +453,6 @@ ui <- navbarPage(
            style = "color: #f8fafc; margin-bottom: 0.5rem; font-weight: 600;"),
         uiOutput("transitionHeader"),
         div(style = "flex: 1; min-height: 0;", plotlyOutput("transitionPlot", height = "100%"))
-      ))
-    )
-  ),
-
-  # ── Tab 2: Heatmap ──
-  tabPanel("Heatmap",
-    sidebarLayout(
-      make_sidebar("H", "Database Connection (Heatmap)", tagList(
-        selectInput("id_valH", "ID", choices = c("Connect first..." = ""), selected = ""),
-        selectInput("bucket_valH", "Past Z-Bucket", choices = c("All" = "ALL"), selected = "ALL"),
-        selectInput("metric_valH", "Fill Metric",
-          choices = c("Combined Score"  = "combined_score",
-                      "Net Score"       = "net_score",
-                      "Positive Score"  = "positive_score",
-                      "Negative Score"  = "negative_score",
-                      "Return /mo"      = "future_confidence_score",
-                      "Improv /mo"      = "future_improvement_score",
-                      "Risk /mo"        = "future_risk_score",
-                      "Tail Risk /mo"   = "future_tail_risk_score"),
-          selected = "combined_score"),
-        checkboxInput("viable_onlyH", "Viable combinations only", value = TRUE)
-      )),
-      mainPanel(div(class = "main-card",
-        h4("Past × Future Lag Heatmap", style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-        plotlyOutput("heatmapPlot", height = "700px")
       ))
     )
   ),
@@ -772,10 +774,16 @@ ui <- navbarPage(
         conditionalPanel(
           condition = "output.blCtlMode == 'current'",
           selectInput("view_valBL", "View",
-                      choices = c("Shortlist - top 10% by expectancy" = "shortlist",
-                                  "All BUY tickers"                   = "all",
-                                  "ALL tickers by cluster & rank"     = "rankall"),
+                      choices = c("Shortlist - rank bins that win (55%+)" = "shortlist",
+                                  "All BUYs + young clusters"             = "all",
+                                  "ALL tickers by cluster & rank"         = "rankall"),
                       selected = "shortlist")),
+        conditionalPanel(
+          condition = "output.blCtlMode == 'current' && input.view_valBL == 'all'",
+          checkboxGroupInput("show_catBL", NULL,
+                             choices = c("Regular entries (BUYs)"      = "regular",
+                                         "Sparse entries (young ids)"  = "sparse"),
+                             selected = c("regular", "sparse"))),
         selectInput("flt_id_valBL", "Cluster id filter",
                     choices = c("All" = "ALL", setNames(1:19, 1:19)),
                     selected = "ALL"),
@@ -862,6 +870,33 @@ setup_env_switcher <- function(input, session, suffix) {
   })
 }
 
+# ─── Helper: severity ring (Buy List) ───
+# Outline color = how many checks the row fails: green 0, yellow 1, orange 2,
+# red 3+. Counted checks: the cluster gate legs from serving
+# (cluster_failed_checks = micro_population / young_history / no_wf_evidence /
+# wf_below_bar) + sparse ticker tenure + the row's rank bin historically
+# losing (win < 50 on n >= 100). Before the evidence-id rebuild lands the
+# serving columns are NA -> falls back to the old amber-for-sparse ring.
+severity_ring <- function(df) {
+  base <- if ("cluster_failed_checks" %in% names(df))
+    suppressWarnings(as.integer(df$cluster_failed_checks)) else rep(NA_integer_, nrow(df))
+  extra <- ifelse(!is.na(df$evidence_status) &
+                  df$evidence_status %in% c("sparse_ticker", "sparse_both"), 1L, 0L)
+  if ("bin_win_pct" %in% names(df))
+    extra <- extra + ifelse(!is.na(df$bin_win_pct) & !is.na(df$bin_n) &
+                            df$bin_n >= 100 & df$bin_win_pct < 50, 1L, 0L)
+  checks <- base + extra
+  sparse <- !is.na(df$evidence_status) & df$evidence_status != "mature"
+  list(
+    checks = checks,
+    col = ifelse(is.na(checks), ifelse(sparse, "#f59e0b", "rgba(0,0,0,0)"),
+          ifelse(checks == 0L, "#059669",
+          ifelse(checks == 1L, "#eab308",
+          ifelse(checks == 2L, "#f97316", "#ef4444")))),
+    w = ifelse(is.na(checks), ifelse(sparse, 1.5, 0), 1.5)
+  )
+}
+
 # ─── Helper: standard boxplot + pct line ───
 render_single_boxplot <- function(df, title, x_title, box_color = '#a855f7', fill_color = 'rgba(167, 139, 250, 0.4)') {
   df$pct <- (df$count / sum(df$count, na.rm = TRUE)) * 100
@@ -906,11 +941,12 @@ render_single_boxplot <- function(df, title, x_title, box_color = '#a855f7', fil
 # ─── Server ───
 server <- function(input, output, session) {
 
-  # Keep the session alive across browser idle periods. Without this, Shiny
-  # blanks the page to white when its websocket times out and the user has
-  # to manually refresh. allowReconnect("force") makes the client auto-
-  # reconnect to the same session silently.
-  session$allowReconnect("force")
+  # allowReconnect("force") is deliberately OFF (2026-07-23): the forced
+  # reconnect REPLAYS whole sessions into a busy event loop, and that churn
+  # is where the native execCallbacks segfaults keep firing (they survived
+  # the later/httpuv/promises rebuilds). Cost: after a server restart the
+  # page shows a grey overlay and needs one manual reload instead of
+  # auto-resuming. Re-enable only if the segfaults are truly gone.
 
   # ── TRANSITION: Reactive values ──
   app_dataT <- reactiveVal(NULL)
@@ -1150,146 +1186,6 @@ server <- function(input, output, session) {
       make_row("Return /mo", df$conf_score,   df$conf_color,   "%.2f"),
       make_row("Improv /mo", df$improv_score, df$improv_color, "%.2f"),
       make_row("Risk /mo",   df$risk_score,   df$risk_color,   "%.1f")
-    )
-  })
-
-  # ── HEATMAP: Reactive values ──
-  app_dataH <- reactiveVal(NULL)
-  status_msgH <- reactiveVal("Ready")
-  output$statusMessageH <- renderText({ status_msgH() })
-  setup_env_switcher(input, session, "H")
-
-  # ── HEATMAP: Connect ──
-  observeEvent(input$connect_btnH, {
-    if (input$db_passH == "") { status_msgH("Error: Password is not set."); return() }
-    status_msgH("Connecting...")
-    tryCatch({
-      con <- get_con(input, "H")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      id_vals <- dbGetQuery(con,
-        "SELECT DISTINCT id FROM scoring.return_cluster_cell_score_extended ORDER BY 1")
-      bucket_vals <- dbGetQuery(con,
-        "SELECT DISTINCT past_excess_return_z_bucket, past_excess_return_z_bucket_num
-         FROM scoring.return_cluster_cell_score_extended
-         ORDER BY past_excess_return_z_bucket_num")
-      bucket_choices <- c("All" = "ALL", setNames(bucket_vals[[1]], bucket_vals[[1]]))
-      updateSelectInput(session, "id_valH", choices = id_vals[[1]], selected = id_vals[[1]][1])
-      updateSelectInput(session, "bucket_valH", choices = bucket_choices, selected = "ALL")
-      status_msgH("Filters loaded!")
-    }, error = function(e) { status_msgH(paste("Error:", e$message)) })
-  })
-
-  # ── HEATMAP: Execute ──
-  observeEvent(input$execute_H, {
-    if (input$db_passH == "") { status_msgH("Error: Password is not set."); return() }
-    if (input$id_valH == "") { status_msgH("Error: Select an ID first."); return() }
-    status_msgH("Running query...")
-
-    bucket_clause <- if (input$bucket_valH == "ALL") "" else sprintf(
-      "AND past_excess_return_z_bucket = %s",
-      DBI::dbQuoteString(DBI::ANSI(), input$bucket_valH))
-    viable_clause <- if (isTRUE(input$viable_onlyH)) "AND is_viable" else ""
-
-    query <- sprintf("
-      SELECT past_fibonacci_lag_value,
-             future_fibonacci_lag_value,
-             past_excess_return_z_bucket,
-             future_confidence_score,
-             future_improvement_score,
-             future_risk_score,
-             future_tail_risk_score,
-             positive_score,
-             negative_score,
-             net_score,
-             combined_score,
-             recommendation,
-             signal,
-             is_viable
-      FROM scoring.return_cluster_cell_score_extended
-      WHERE id = %s %s %s
-      ORDER BY past_fibonacci_lag_value, future_fibonacci_lag_value;",
-      input$id_valH, bucket_clause, viable_clause)
-
-    tryCatch({
-      con <- get_con(input, "H")
-      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      res <- dbGetQuery(con, query)
-      num_cols <- c("past_fibonacci_lag_value","future_fibonacci_lag_value",
-                    "future_confidence_score","future_improvement_score",
-                    "future_risk_score","future_tail_risk_score",
-                    "positive_score","negative_score","net_score","combined_score")
-      for (col in num_cols) res[[col]] <- as.numeric(res[[col]])
-      app_dataH(res)
-      status_msgH(paste("Loaded", nrow(res), "rows."))
-    }, error = function(e) { app_dataH(NULL); status_msgH(paste("Error:", e$message)) })
-  })
-
-  # ── HEATMAP: Render ──
-  output$heatmapPlot <- renderPlotly({
-    req(app_dataH())
-    df <- app_dataH()
-    if (nrow(df) == 0) return(plot_ly() %>% layout(
-      title = list(text = "No data found", font = list(color="#f8fafc")),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)"))
-
-    metric <- input$metric_valH
-    metric_labels <- c(
-      "future_confidence_score"  = "Return /mo",
-      "future_improvement_score" = "Improv /mo",
-      "future_risk_score"        = "Risk /mo",
-      "future_tail_risk_score"   = "Tail Risk /mo"
-    )
-
-    # Aggregate by (past_lag, future_lag) — mean over buckets when "All" is selected
-    agg <- aggregate(df[[metric]],
-      by = list(past = df$past_fibonacci_lag_value,
-                future = df$future_fibonacci_lag_value),
-      FUN = mean, na.rm = TRUE)
-    names(agg)[3] <- "value"
-
-    x_vals <- sort(unique(agg$past))
-    y_vals <- sort(unique(agg$future))
-    z_mat <- matrix(NA_real_, nrow = length(y_vals), ncol = length(x_vals),
-                    dimnames = list(as.character(y_vals), as.character(x_vals)))
-    for (i in seq_len(nrow(agg))) {
-      z_mat[as.character(agg$future[i]), as.character(agg$past[i])] <- agg$value[i]
-    }
-
-    is_diverging <- metric %in% c("future_confidence_score","future_improvement_score")
-    if (is_diverging) {
-      max_abs <- max(abs(z_mat), na.rm = TRUE)
-      if (!is.finite(max_abs) || max_abs == 0) max_abs <- 1
-      zmin <- -max_abs; zmax <- max_abs
-      colorscale <- list(c(0, '#dc2626'), c(0.5, '#1e293b'), c(1, '#34d399'))
-    } else {
-      zmin <- min(z_mat, na.rm = TRUE); zmax <- max(z_mat, na.rm = TRUE)
-      if (!is.finite(zmin)) zmin <- 0
-      if (!is.finite(zmax) || zmax == zmin) zmax <- zmin + 1
-      colorscale <- list(c(0, '#1e293b'), c(0.5, '#fbbf24'), c(1, '#f87171'))
-    }
-
-    bucket_label <- if (input$bucket_valH == "ALL") "" else sprintf(" · bucket %s", input$bucket_valH)
-
-    plot_ly(
-      x = as.character(x_vals), y = as.character(y_vals), z = z_mat, type = "heatmap",
-      colorscale = colorscale, zmin = zmin, zmax = zmax,
-      hovertemplate = sprintf(
-        "Past lag: %%{x}<br>Future lag: %%{y}<br>%s: %%{z:.4f}<extra></extra>",
-        metric_labels[[metric]]),
-      colorbar = list(title = list(text = metric_labels[[metric]],
-                                   font = list(color = "#f8fafc")),
-                      tickfont = list(color = "#94a3b8"))
-    ) %>% layout(
-      title = list(
-        text = sprintf("ID %s — Past × Future Lag (%s%s)",
-                       input$id_valH, metric_labels[[metric]], bucket_label),
-        font = list(color = "#f8fafc", family = "Inter", size = 18)),
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
-      xaxis = list(title = "Past Lag (months)", type = "category",
-                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-      yaxis = list(title = "Future Lag (months)", type = "category",
-                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-      margin = list(l = 80, r = 60, b = 60, t = 60)
     )
   })
 
@@ -2896,6 +2792,51 @@ server <- function(input, output, session) {
     updateSelectInput(session, "asof_dayBL",   selected = as.integer(format(date, "%d")))
   }
 
+  # ── Delisting metadata display (raw.ticker_metadata) ──
+  # Dot/text color = HOW the company left the market: green = good exit
+  # (acquired / went private), red = bad (bankrupt / distressed / failed),
+  # amber = neutral (SPAC wind-down, ticker rename), burnt-orange = delisted
+  # but no category on file. raw.ticker_metadata holds ONLY delisted names
+  # (all active = false), so alive tickers can never pick up a label.
+  DELIST_CLASSES <- c(
+    "delisted: acquired/private" = "#34d399",
+    "delisted: bankrupt/failed"  = "#ef4444",
+    "delisted: SPAC/renamed"     = "#eab308",
+    "delisted: uncategorized"    = "#c2410c")
+  delist_enrich <- function(df) {
+    cat <- if ("delisting_category" %in% names(df))
+      toupper(trimws(as.character(df$delisting_category)))
+    else rep(NA_character_, nrow(df))
+    lab <- c("M&A_OR_PRIVATE"      = "acquired / went private",
+             "BANKRUPTCY"          = "bankruptcy",
+             "DISTRESSED"          = "distressed exit",
+             "SPAC"                = "SPAC wound down / merged",
+             "TICKER_VARIANT"      = "ticker changed (renamed/relisted)",
+             "SHELL_OR_FAILED_IPO" = "shell / failed IPO")
+    cls <- c("M&A_OR_PRIVATE"      = "delisted: acquired/private",
+             "BANKRUPTCY"          = "delisted: bankrupt/failed",
+             "DISTRESSED"          = "delisted: bankrupt/failed",
+             "SHELL_OR_FAILED_IPO" = "delisted: bankrupt/failed",
+             "SPAC"                = "delisted: SPAC/renamed",
+             "TICKER_VARIANT"      = "delisted: SPAC/renamed")
+    known <- !is.na(cat) & cat %in% names(lab)
+    df$del_label <- ifelse(known, unname(lab[cat]), "no category on file")
+    df$del_class <- ifelse(known, unname(cls[cat]), "delisted: uncategorized")
+    nm <- if ("company_name" %in% names(df)) as.character(df$company_name)
+          else rep(NA_character_, nrow(df))
+    dt <- if ("delisted_date" %in% names(df)) as.character(df$delisted_date)
+          else rep(NA_character_, nrow(df))
+    piece <- function(x) ifelse(is.na(x) | !nzchar(x), "", paste0(" · ", x))
+    df$del_info <- paste0(df$del_label, piece(nm), piece(dt))
+    # alive rows carry no exit story - blank them so table styling and hovers
+    # can key on nzchar() without consulting the delisted flag twice
+    if ("delisted" %in% names(df)) {
+      blank <- !df$delisted
+      df$del_label[blank] <- ""; df$del_class[blank] <- ""; df$del_info[blank] <- ""
+    }
+    df
+  }
+
   # Which mode the SELECTED date will resolve to (live, pre-Generate), driving
   # the conditionalPanels: 'current' shows View, 'wf' shows the horizon.
   # Before Connect (no ledger bounds) default to 'current'.
@@ -2924,8 +2865,11 @@ server <- function(input, output, session) {
           "close after the cutoff to the last close within the horizon): green ",
           "beat SPY, red lagged, grey = no tradable price window. Ranking and ",
           "grading window switch together with the horizon. If the model works, ",
-          "green concentrates near each block's r1. A burnt-orange dot (orange ",
-          "ticker in the table) = the company no longer trades. Backtest ranking ",
+          "green concentrates near each block's r1. A dot at the bar tip = the ",
+          "company no longer trades; its color = HOW it left: green acquired/",
+          "went private, red bankrupt/failed, amber SPAC or ticker rename, ",
+          "burnt-orange no category on file. Hover the dot (or see the table's ",
+          "Delisted column) for reason, company and date. Backtest ranking ",
           "only - the live BUY gates did not exist then."))
     } else if (mode == "ledger") {
       tagList(
@@ -2934,21 +2878,27 @@ server <- function(input, output, session) {
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the BUY calls the live system actually logged on the selected date, ",
           "graded to the latest close. Each bar = one ticker's return since entry ",
-          "relative to SPY. Green beat SPY, red lagged it. A burnt-orange dot ",
-          "(and orange ticker in the table) = delisted since entry; its 'latest ",
-          "close' is the final traded price."))
+          "relative to SPY. Green beat SPY, red lagged it. A dot = delisted since ",
+          "entry; dot color = why (green acquired/private, red bankrupt/failed, ",
+          "amber SPAC/rename, burnt-orange uncategorized - hover it or see the ",
+          "table's Delisted column); its 'latest close' is the final traded ",
+          "price."))
     } else {
       tagList(
         h4("Current BUY list - serving.return_cluster_ticker_global_action_current x validated payoff",
            style = h_style),
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
-          "tickers the model currently marks BUY, scored by the realized walk-forward ",
-          "payoff (expectancy = mean holdout trade return, win %) of the exact ",
-          "(id, past_lag, fut_lag) cells the signal fires on. Expectancy is holdout ",
-          "evidence, not a forward promise. Use the View selector to switch between ",
-          "the decision shortlist (top 10% by expectancy, win% > 50), every BUY, ",
-          "and ALL ranked tickers per cluster - it switches instantly, no re-Generate."))
+          "tickers the model currently marks BUY. Order = win likelihood: each ",
+          "ticker's bin = its slot in the latest WALK-FORWARD ranking (20 bins ",
+          "of 5%; same ranking the bin win rates were measured on), and rows ",
+          "sort by their bin's realized win rate vs SPY (most winners on top; ",
+          "bars still show expectancy = mean holdout trade return). Tickers the ",
+          "walk-forward has no scored evidence for show 'no evidence' and sink ",
+          "below the graded BUYs. Use the View selector to switch between the ",
+          "decision shortlist (rank bins winning >= 55% on >= 100 graded obs), ",
+          "every BUY, and ALL ranked tickers per cluster - it switches ",
+          "instantly, no re-Generate."))
     }
   })
 
@@ -3047,7 +2997,7 @@ server <- function(input, output, session) {
                ((SELECT MAX(i.date) FROM cdm.ingest_combined i
                  WHERE i.ticker = r.ticker)
                   >= mkt.market_max - INTERVAL '10 days') AS is_active,
-               mkt.market_max
+               mkt.market_max__METACOLS__
         FROM validation.walk_forward_ticker_rank r
         JOIN sel ON r.train_cutoff_date = sel.d
         JOIN validation.walk_forward_cluster_id_map m
@@ -3062,12 +3012,27 @@ server <- function(input, output, session) {
           WHERE i.ticker = r.ticker AND i.date > r.train_cutoff_date
             AND i.date <= r.train_cutoff_date + INTERVAL '%d months'
           ORDER BY i.date DESC LIMIT 1) x ON TRUE
+        __METAJOIN__
         WHERE r.fut_lag = %d
         ORDER BY m.id, r.rank_within_cluster;",
         format(asof, "%Y-%m-%d"), hz, hz, hz, hz)
       tryCatch({
         con <- get_con(input, "BL")
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+        # delisting metadata is display-only enrichment; a DB without the
+        # table (env dropdown on dev) degrades to plain 'delisted'. Injected
+        # via gsub tokens, NOT sprintf placeholders (the stray-%% rule).
+        has_meta <- isTRUE(tryCatch(dbGetQuery(con, "
+          SELECT EXISTS (SELECT 1 FROM information_schema.tables
+                         WHERE table_schema = 'raw'
+                           AND table_name = 'ticker_metadata') AS ok")$ok[1],
+          error = function(e) FALSE))
+        query <- gsub("__METACOLS__", if (has_meta)
+          ", tm.name AS company_name, tm.delisting_category, tm.delisted_utc::date AS delisted_date"
+          else "", query, fixed = TRUE)
+        query <- gsub("__METAJOIN__", if (has_meta)
+          "LEFT JOIN raw.ticker_metadata tm ON tm.ticker = r.ticker"
+          else "", query, fixed = TRUE)
         df <- dbGetQuery(con, query)
         if (nrow(df) == 0) {
           app_modeBL("wf"); app_dataBL(df)
@@ -3078,6 +3043,7 @@ server <- function(input, output, session) {
           df[[col]] <- as.integer(df[[col]])   # stay integer: used in sprintf("%d")
         df <- coerce_numeric_cols(df, c("ticker_score", "fwd_excess_pct"))
         df$delisted <- is.na(df$is_active) | !df$is_active
+        df <- delist_enrich(df)
         df$horizon <- hz   # carried so chart/table labels match the grading window
         app_modeBL("wf")
         app_dataBL(df)
@@ -3093,6 +3059,10 @@ server <- function(input, output, session) {
 
     if (is_ledger) {
       # ── As-of replay: ledger snapshot graded to the latest price ──
+      # NOTE: this string is a sprintf FORMAT - any literal % in it (even in
+      # a SQL comment) must be %%, or sprintf dies with "too few arguments".
+      # An unescaped % here ("-74%") was the 2026-07-22 crash-loop bug.
+      tryCatch({
       query <- sprintf("
         WITH sel AS (
             SELECT MAX(prediction_date) AS d
@@ -3106,17 +3076,21 @@ server <- function(input, output, session) {
             WHERE l.global_action = 'BUY'
         ),
         px AS (
-            SELECT ticker, adj_close, date AS last_bar FROM (
-                SELECT ticker, adj_close, date,
-                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) rn
-                FROM cdm.ingest_combined
-                WHERE ticker IN (SELECT ticker FROM snap)
-            ) t WHERE rn = 1
+            -- latest bar per ticker, bounded to bars since the snapshot's
+            -- earliest entry (minus a cushion): the unbounded ROW_NUMBER
+            -- version walked every ticker's FULL history (~2M cold heap
+            -- fetches, 90s+) to keep one row each. Any last bar before
+            -- entry_date means the ticker never traded post-entry anyway.
+            SELECT DISTINCT ON (ticker) ticker, adj_close, date AS last_bar
+            FROM cdm.ingest_combined
+            WHERE ticker IN (SELECT ticker FROM snap)
+              AND date >= (SELECT MIN(entry_date) FROM snap) - INTERVAL '10 days'
+            ORDER BY ticker, date DESC
         ),
         -- price entries from the CURRENT series at entry_date, not the frozen
         -- ledger values: frozen prices sit on the adjustment basis of their
         -- logging day and go stale when a split re-bases history
-        -- (2026-07 incident: CRWD 4:1 graded as -74%)
+        -- (2026-07 incident: CRWD 4:1 graded as -74 pct)
         entry_now AS (
             SELECT ic.ticker, ic.date AS entry_date, ic.adj_close AS entry_px_now
             FROM cdm.ingest_combined ic
@@ -3145,23 +3119,37 @@ server <- function(input, output, session) {
                        - (spy.adj_close
                         / NULLIF(COALESCE(sen.spy_px_now, s.entry_spy_close), 0))) * 100)::numeric, 1)
                  AS excess_vs_spy_pct,
-               (px.last_bar >= spy.market_max - INTERVAL '10 days') AS is_active
+               (px.last_bar >= spy.market_max - INTERVAL '10 days') AS is_active__METACOLS__
         FROM snap s
         LEFT JOIN px ON px.ticker = s.ticker
         LEFT JOIN entry_now en
                ON en.ticker = s.ticker AND en.entry_date = s.entry_date
         LEFT JOIN spy_entry_now sen ON sen.entry_date = s.entry_date
         CROSS JOIN spy
+        __METAJOIN__
         ORDER BY excess_vs_spy_pct DESC NULLS LAST;",
         format(asof, "%Y-%m-%d"))
-      tryCatch({
         con <- get_con(input, "BL")
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+        # same display-only delisting enrichment as the wf branch (gsub
+        # tokens, not sprintf - see the %% note above)
+        has_meta <- isTRUE(tryCatch(dbGetQuery(con, "
+          SELECT EXISTS (SELECT 1 FROM information_schema.tables
+                         WHERE table_schema = 'raw'
+                           AND table_name = 'ticker_metadata') AS ok")$ok[1],
+          error = function(e) FALSE))
+        query <- gsub("__METACOLS__", if (has_meta)
+          ", tm.name AS company_name, tm.delisting_category, tm.delisted_utc::date AS delisted_date"
+          else "", query, fixed = TRUE)
+        query <- gsub("__METAJOIN__", if (has_meta)
+          "LEFT JOIN raw.ticker_metadata tm ON tm.ticker = s.ticker"
+          else "", query, fixed = TRUE)
         df <- dbGetQuery(con, query)
         df <- coerce_numeric_cols(df, c(
           "buy_votes", "best_agg_rank", "buy_weight", "entry_adj_close",
           "latest_close", "ret_since_pct", "excess_vs_spy_pct"))
         df$delisted <- is.na(df$is_active) | !df$is_active
+        df <- delist_enrich(df)
         app_modeBL("ledger")
         app_dataBL(df)
         snap_d <- if (nrow(df) > 0) df$prediction_date[1] else asof
@@ -3188,17 +3176,65 @@ server <- function(input, output, session) {
             AND table_name = 'return_cluster_ticker_global_action_current'
             AND column_name = 'evidence_status'")) > 0,
         error = function(e) FALSE)
-      ev_buys <- if (has_ev) ", evidence_status" else ""
-      ev_sel  <- if (has_ev) "b.evidence_status," else "'mature'::text AS evidence_status,"
+      ev_buys <- if (has_ev) ", evidence_status, ticker_months_count" else ""
+      ev_sel  <- if (has_ev) "b.evidence_status, b.ticker_months_count," else
+                 "'mature'::text AS evidence_status, NULL::integer AS ticker_months_count,"
+      # Label-drift fix 2026-07-23: evidence tables (IC, payoff, credibility,
+      # rank bins) are keyed in EVIDENCE-space ids; serving now exposes the
+      # membership-derived evidence_id. Join evidence through it when present,
+      # fall back to the raw id before the rebuild lands. Injected via gsub
+      # tokens, NOT sprintf placeholders (a stray % in sprintf killed the app
+      # on 2026-07-22 - keep the sprintf surface minimal).
+      has_eid <- tryCatch(nrow(dbGetQuery(con,
+        "SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'serving'
+            AND table_name = 'return_cluster_ticker_global_action_current'
+            AND column_name = 'evidence_id'")) > 0,
+        error = function(e) FALSE)
+      eid_buys <- if (has_eid)
+        ", evidence_id, cluster_untradeable_reason, cluster_failed_checks" else ""
+      eid_sel  <- if (has_eid)
+        "b.evidence_id, b.cluster_untradeable_reason, b.cluster_failed_checks," else
+        paste0("NULL::integer AS evidence_id, NULL::text AS cluster_untradeable_reason, ",
+               "NULL::integer AS cluster_failed_checks,")
+      eid_key  <- if (has_eid) "COALESCE(b.evidence_id, b.id)" else "b.id"
       query <- sprintf("
       WITH buys AS (
           -- ALL actions loaded (not just BUY): the rankall view shows every
-          -- ranked ticker per id; the BUY-only views subset in the renderer
-          SELECT ticker, id, archetype, global_action, buy_weight, buy_votes, agg_rank%s
+          -- ranked ticker per id; the BUY-only views subset in the renderer.
+          SELECT ticker, id, archetype, global_action, buy_weight, buy_votes,
+                 agg_rank__EIDBUYS__%s
           FROM serving.return_cluster_ticker_global_action_current
       ),
+      wfbin AS (
+          -- Rank-audit fix 2026-07-23: the displayed bin is the ticker's slot
+          -- in the WALK-FORWARD ranking at the latest cutoff - the ranking
+          -- the (id, pctile_bin) win-rate evidence was actually built on.
+          -- (Previously the bin came from serving agg_rank, a different
+          -- formula: pricing one ranking with the other's evidence.)
+          -- Joined by TICKER, carrying the walk-forward's own cluster (eid):
+          -- memberships drift between the WF build and today's labels, so
+          -- forcing the current cluster to match would orphan most tickers
+          -- (measured: only 57 of 361 BUYs matched). Bin AND win-rate both
+          -- cite the cluster the ticker actually occupied in the WF build.
+          -- ticker_score = 0 rows carry no rank evidence: excluded, so those
+          -- tickers get NULL bin -> 'no evidence' downstream. NTILE tiebreak
+          -- mirrors the rebuilt walk_forward_pctile_summary exactly.
+          SELECT m.id AS eid, r.ticker,
+                 NTILE(20) OVER (PARTITION BY m.id
+                   ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                 )::int AS wf_bin
+          FROM validation.walk_forward_ticker_rank r
+          JOIN validation.walk_forward_cluster_id_map m
+            ON m.train_cutoff_date = r.train_cutoff_date
+           AND m.cluster_id       = r.cluster_id
+          WHERE r.fut_lag = 12
+            AND r.ticker_score IS NOT NULL AND r.ticker_score <> 0
+            AND r.train_cutoff_date = (SELECT MAX(train_cutoff_date)
+                  FROM validation.walk_forward_ticker_rank WHERE fut_lag = 12)
+      ),
       cells AS (
-          SELECT p.ticker, p.id, p.past_lag, p.fut_lag, p.bucket
+          SELECT p.ticker, p.id, __EIDKEY__ AS eid, p.past_lag, p.fut_lag, p.bucket
           FROM serving.return_cluster_ticker_pair_current p
           JOIN buys b ON b.ticker = p.ticker AND b.id = p.id
           WHERE p.recommendation IN ('STRONG_PICK','BUY','OUTLIER_BUY')
@@ -3214,7 +3250,7 @@ server <- function(input, output, session) {
                  SUM(pb.n_holdout) AS total_holdout
           FROM cells c
           JOIN validation.return_cluster_payoff_backtest pb
-            ON pb.id = c.id AND pb.past_lag = c.past_lag AND pb.fut_lag = c.fut_lag
+            ON pb.id = c.eid AND pb.past_lag = c.past_lag AND pb.fut_lag = c.fut_lag
           GROUP BY c.ticker, c.id
       ),
       cred AS (
@@ -3225,26 +3261,38 @@ server <- function(input, output, session) {
           JOIN analysis.ticker_cluster_segments s ON s.ticker = c.ticker
           LEFT JOIN validation.cell_credibility cc
             ON cc.vol_bucket_num = s.monthly_growth_vol_z_bucket_num
-           AND cc.id = c.id AND cc.past_lag = c.past_lag
+           AND cc.id = c.eid AND cc.past_lag = c.past_lag
            AND cc.fut_lag = c.fut_lag AND cc.bucket = c.bucket
           GROUP BY c.ticker, c.id
       )
       SELECT b.ticker, b.id, b.archetype, b.global_action, b.buy_weight, b.buy_votes, b.agg_rank,
+             wb.wf_bin AS rank_bin,
              %s
+             __EIDSEL__
              p.n_buy_cells,
              ROUND(p.wtd_expectancy::numeric, 3) AS wtd_expectancy,
              ROUND(p.wtd_win_pct::numeric, 1)    AS wtd_win_pct,
              p.total_holdout,
              ROUND(cr.avg_cred_weight::numeric, 3) AS avg_cred_weight,
              cr.n_trusted_cells,
-             ROUND(ic.weighted_ic::numeric, 3) AS cluster_ic_12
+             ROUND(ic.weighted_ic::numeric, 3) AS cluster_ic_12,
+             ROUND(ps.hit_rate::numeric * 100, 1) AS bin_win_pct,
+             ROUND(ps.mean_return::numeric, 1)    AS bin_mean_ret,
+             ps.n_obs AS bin_n
       FROM buys b
       LEFT JOIN payoff p USING (ticker, id)
       LEFT JOIN cred cr USING (ticker, id)
+      LEFT JOIN wfbin wb
+        ON wb.ticker = b.ticker
       LEFT JOIN validation.walk_forward_id_ic ic
-        ON ic.id = b.id AND ic.fut_lag = 12
+        ON ic.id = __EIDKEY__ AND ic.fut_lag = 12
+      LEFT JOIN validation.walk_forward_pctile_summary ps
+        ON ps.id = wb.eid AND ps.fut_lag = 12 AND ps.pctile_bin = wb.wf_bin
       ORDER BY p.wtd_expectancy DESC NULLS LAST, b.buy_weight DESC;",
         ev_buys, fut_cap, ev_sel)
+      query <- gsub("__EIDBUYS__", eid_buys, query, fixed = TRUE)
+      query <- gsub("__EIDSEL__",  eid_sel,  query, fixed = TRUE)
+      query <- gsub("__EIDKEY__",  eid_key,  query, fixed = TRUE)
       df <- dbGetQuery(con, query)
       df$id       <- as.integer(df$id)
       df$agg_rank <- as.integer(df$agg_rank)
@@ -3252,7 +3300,9 @@ server <- function(input, output, session) {
       df <- coerce_numeric_cols(df, c(
         "buy_votes", "n_buy_cells", "total_holdout", "n_trusted_cells",
         "buy_weight", "wtd_expectancy", "wtd_win_pct",
-        "avg_cred_weight", "cluster_ic_12"))
+        "avg_cred_weight", "cluster_ic_12",
+        "rank_bin", "bin_win_pct", "bin_mean_ret", "bin_n",
+        "evidence_id", "cluster_failed_checks"))
       app_modeBL("current")
       app_dataBL(df)
       status_msgBL(sprintf(
@@ -3307,13 +3357,15 @@ server <- function(input, output, session) {
     plotlyOutput("buyScatterBL", height = paste0(h, "px"))
   })
 
-  # Rank slider re-scales to the ACTUAL max rank of the loaded data under the
-  # current id filter (id 9 in 2020 = 27 ranks, in 2022 = 415). If the top
-  # handle sat at the old max ("everything"), it follows the new max; an
-  # intentional window like 5-20 is preserved. Ledger rows carry no rank
-  # column, so the slider is left alone there (the filter no-ops anyway).
-  prev_rank_maxBL <- reactiveVal(600)
-  observe({
+  # Rank slider ALWAYS snaps to the full span of whatever the id filter
+  # selects (id 9 in 2020 = 27 ranks, in 2022 = 415): max and both handles
+  # reset to 1..max on every id switch or data load, so the top handle never
+  # lingers at a stale ceiling. A hand-narrowed window (e.g. 5-20) lives only
+  # until the next id switch / Generate. Deliberately NOT reactive on the
+  # slider itself, or user narrowing would instantly snap back. Ledger rows
+  # carry no rank column, so the slider is left alone there (the filter
+  # no-ops anyway).
+  observeEvent(list(input$flt_id_valBL, app_dataBL()), {
     df <- app_dataBL()
     if (is.null(df) || nrow(df) == 0) return()
     col <- if ("rank_within_cluster" %in% names(df)) "rank_within_cluster"
@@ -3324,12 +3376,25 @@ server <- function(input, output, session) {
     if (nrow(df) == 0) return()
     mx <- suppressWarnings(max(df[[col]], na.rm = TRUE))
     if (!is.finite(mx) || mx < 1) return()
-    cur <- input$flt_rank_rangeBL
-    if (is.null(cur) || length(cur) != 2) cur <- c(1, mx)
-    hi <- if (cur[2] >= prev_rank_maxBL() || cur[2] > mx) mx else cur[2]
-    lo <- min(cur[1], mx)
-    prev_rank_maxBL(mx)
-    updateSliderInput(session, "flt_rank_rangeBL", max = mx, value = c(lo, hi))
+    updateSliderInput(session, "flt_rank_rangeBL", max = mx, value = c(1, mx))
+  })
+
+  # Cluster dropdown mirrors the LOADED data: only ids that actually have
+  # rows, each labeled with its row count, so an all-delisted cluster (id 1
+  # today) can't be selected into a confusing empty chart. A selection that
+  # vanishes falls back to All. Ledger rows carry no id - leave it alone.
+  observeEvent(app_dataBL(), {
+    df <- app_dataBL()
+    if (is.null(df) || nrow(df) == 0 || !"id" %in% names(df)) return()
+    tab <- table(df$id)
+    ids <- sort(as.integer(names(tab)))
+    if (length(ids) == 0) return()
+    labs <- sprintf("%d  (%d rows)", ids, as.integer(tab[as.character(ids)]))
+    sel <- isolate(input$flt_id_valBL)
+    if (is.null(sel) || !(sel %in% c("ALL", as.character(ids)))) sel <- "ALL"
+    updateSelectInput(session, "flt_id_valBL",
+                      choices = c("All" = "ALL", setNames(as.character(ids), labs)),
+                      selected = sel)
   })
 
   # Selection stats: mean/median of the metric over ALL graded rows in the
@@ -3404,6 +3469,12 @@ server <- function(input, output, session) {
           df$buy_weight)
         x_title <- "Return since entry, relative to SPY (%)"
       }
+      # delisted rows carry the exit story on the bar hover too (the dot has
+      # it as well, but bars are the bigger hover target)
+      if (all(c("delisted", "del_info") %in% names(df)))
+        df$hover <- paste0(df$hover,
+          ifelse(df$delisted & !is.na(df$del_info) & nzchar(df$del_info),
+                 paste0("<br>delisted · ", df$del_info), ""))
       # selection average BEFORE any head-trim: nets wins/losses over every
       # graded row in the current mode/id/rank selection
       set_sel_statsBL(
@@ -3468,16 +3539,26 @@ server <- function(input, output, session) {
                                          ifelse(df$excess >= 0, '#10b981', '#dc2626'))),
                    customdata = ~hover, name = "excess vs SPY",
                    hovertemplate = "%{customdata}<extra></extra>")
-      # burnt-orange dot at the bar tip = ticker no longer trades (no price
-      # bar within 10 days of the latest market date)
+      # dot at the bar tip = ticker no longer trades (no price bar within 10
+      # days of the latest market date); dot color = HOW it left the market
+      # (DELIST_CLASSES), hover = reason · company · date
       del <- df[df$delisted, , drop = FALSE]
       if (nrow(del) > 0) {
-        p <- p %>% add_markers(
-          data = del, x = ~ifelse(is.na(excess), 0, excess), y = ~ylab,
-          marker = list(color = "#c2410c", size = 8,
-                        line = list(color = "#f8fafc", width = 1)),
-          name = "delisted",
-          hovertemplate = "%{y}: delisted<extra></extra>")
+        if (!"del_class" %in% names(del)) del$del_class <- ""
+        if (!"del_info"  %in% names(del)) del$del_info  <- ""
+        del$del_class[is.na(del$del_class) | !nzchar(del$del_class)] <-
+          "delisted: uncategorized"
+        del$del_info[is.na(del$del_info) | !nzchar(del$del_info)] <-
+          "no category on file"
+        for (cl in intersect(names(DELIST_CLASSES), unique(del$del_class))) {
+          d1 <- del[del$del_class == cl, , drop = FALSE]
+          p <- p %>% add_markers(
+            data = d1, x = ~xplot, y = ~ylab,
+            marker = list(color = DELIST_CLASSES[[cl]], size = 8,
+                          line = list(color = "#f8fafc", width = 1)),
+            name = cl, customdata = ~del_info,
+            hovertemplate = "%{y}: delisted<br>%{customdata}<extra></extra>")
+        }
       }
       return(
         p %>%
@@ -3516,25 +3597,23 @@ server <- function(input, output, session) {
       df <- df[order(df$id, df$agg_rank), ]
       n_total <- nrow(df)
       set_sel_statsBL(df$wtd_expectancy, "avg holdout expectancy (pp/trade)")
-      if (length(unique(df$id)) > 1) {
-        # A chart of every cluster at once is a wall of flat cell-stat bars
-        # (mostly SKIP) - noise. The ladder reads one cluster at a time; the
-        # table below still carries every loaded row.
-        set_chart_rowsBL(10)
-        return(empty_plot(sprintf(
-          paste0("%d ranked tickers across %d clusters loaded. Pick a ",
-                 "Cluster id to draw its rank ladder (r1 -> last); the ",
-                 "table below lists every row."),
-          n_total, length(unique(df$id)))))
-      }
-      chart_text <- sprintf(
+      n_ids <- length(unique(df$id))
+      # With All selected the ladders draw STACKED (id 2 block, then 3, ...),
+      # separator lines between clusters (Kevin 2026-07-23: an empty chart on
+      # All read as broken). Rank numbers still restart per cluster - use the
+      # rank slider (e.g. 1-20) to see every cluster's head side by side.
+      chart_text <- if (n_ids > 1) sprintf(
+        "%d clusters stacked by id, r1 -> last each (green BUY / grey SKIP / red SELL)",
+        n_ids)
+      else sprintf(
         "Cluster id %d: all %d ranks, r1 -> last (green BUY / grey SKIP / red SELL)",
         df$id[1], n_total)
       # 600 covers the biggest single cluster end to end
       if (n_total > 600) {
         df <- head(df, 600)
         chart_text <- sprintf(
-          "First 600 of %d ranks - tighten the rank slider", n_total)
+          "First 600 of %d rows - tighten the rank slider or pick a cluster",
+          n_total)
       }
       # Sparse marking is DB-driven (evidence_status, Phase A): a sparse SKIP
       # means "cannot be evidenced yet", not "evidence rejected". Bar fill
@@ -3547,21 +3626,30 @@ server <- function(input, output, session) {
       df$ylab <- sprintf("id%d r%d | %s%s", df$id, df$agg_rank, df$ticker,
                          ifelse(tag == "", "", paste0(" [", tag, "]")))
       df$xval <- ifelse(is.na(df$wtd_expectancy), 0, df$wtd_expectancy)
+      sr <- severity_ring(df)
       df$hover <- sprintf(
-        "%s (id %d, %s)<br>action %s | evidence %s | rank %d | buy weight %.2f<br>holdout expectancy %s | win %s",
+        "%s (id %d, %s)<br>action %s | evidence %s | tenure %s | rank %d | buy weight %.2f<br>holdout expectancy %s | win %s<br>checks failed %s%s",
         df$ticker, df$id, df$archetype, df$global_action,
         ifelse(is.na(df$evidence_status), "n/a", df$evidence_status),
+        ifelse(is.na(df$ticker_months_count), "n/a",
+               sprintf("%dmo", as.integer(df$ticker_months_count))),
         df$agg_rank,
         ifelse(is.na(df$buy_weight), 0, df$buy_weight),
         ifelse(is.na(df$wtd_expectancy), "n/a", sprintf("%.3f", df$wtd_expectancy)),
-        ifelse(is.na(df$wtd_win_pct), "n/a", sprintf("%.1f%%", df$wtd_win_pct)))
+        ifelse(is.na(df$wtd_win_pct), "n/a", sprintf("%.1f%%", df$wtd_win_pct)),
+        ifelse(is.na(sr$checks), "n/a", as.character(sr$checks)),
+        ifelse(is.na(df$cluster_untradeable_reason) | df$cluster_untradeable_reason == "",
+               "", paste0(" (", df$cluster_untradeable_reason, ")")))
       set_chart_rowsBL(nrow(df))
       act_col <- ifelse(df$global_action == "BUY", "#10b981",
                  ifelse(df$global_action == "SELL", "#dc2626", "#64748b"))
-      ln_col <- ifelse(df$sparse, "#f59e0b", "rgba(0,0,0,0)")
-      ln_w   <- ifelse(df$sparse, 1.5, 0)
-      if (any(df$sparse)) chart_text <- paste0(
+      ln_col <- sr$col
+      ln_w   <- sr$w
+      chart_text <- if (any(!is.na(sr$checks))) paste0(
+        chart_text, " / ring = failed checks: green 0, yellow 1, orange 2, red 3+")
+      else if (any(df$sparse)) paste0(
         chart_text, " / amber outline = sparse evidence (young cluster or ticker)")
+      else chart_text
       return(
         plot_ly(df, x = ~xval, y = ~ylab, type = "bar", orientation = "h",
                 marker = list(color = act_col,
@@ -3594,76 +3682,151 @@ server <- function(input, output, session) {
       )
     }
 
-    # BUY-gated views: subset to gated rows passing the evidence filters
-    # (pre-change behavior; the load query now returns every action)
-    if ("global_action" %in% names(df))
-      df <- df[df$global_action == "BUY", , drop = FALSE]
-    if (nrow(df) == 0) return(empty_plot("No BUY tickers right now."))
+    # BUY-gated views: subset to gated rows passing the evidence filters.
+    # The "all" view ALSO keeps the active members of young (sparse) clusters
+    # - SKIPs drawn at 0 with the amber ring - so the acquisition-watch pool
+    # stays visible inside the existing view instead of its own dropdown entry.
+    if ("global_action" %in% names(df)) {
+      keep <- df$global_action == "BUY"
+      if (view == "all") {
+        # category toggles: regular = gated BUYs, sparse = young-id watchlist
+        cats <- input$show_catBL
+        if (is.null(cats)) cats <- c("regular", "sparse")
+        young_row <- !is.na(df$evidence_status) &
+                     df$evidence_status %in% c("sparse_cluster", "sparse_both") &
+                     df$id <= 12   # ids 13+ = short-side, not buy-watch material
+        keep <- (("regular" %in% cats) & df$global_action == "BUY") |
+                (("sparse" %in% cats) & young_row)
+      }
+      df <- df[keep, , drop = FALSE]
+    }
+    if (nrow(df) == 0) return(empty_plot(
+      "Nothing to chart - check the Regular/Sparse toggles and filters."))
 
     if (view == "shortlist") {
-      # decision view = strict: win% > 50 AND >= 100 holdout trades of evidence
-      df <- df[!is.na(df$wtd_expectancy) & !is.na(df$wtd_win_pct) & df$wtd_win_pct > 50 &
-               !is.na(df$total_holdout) & df$total_holdout >= 100, ]
-      if (nrow(df) == 0) return(empty_plot("No BUYs with win% > 50 and >= 100 holdout trades."))
-      df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
-      k <- min(nrow(df), max(10, ceiling(0.10 * nrow(df))))
-      df <- head(df, k)
+      # decision view = rank bins that actually win: the cluster's ranks cut
+      # into 20 bins of 5 pct, kept only when the bin's realized walk-forward
+      # win rate is >= 55 pct on >= 100 graded observations (Kevin 2026-07-22:
+      # likelihood of winning outranks payoff size; a 60 bar would delete
+      # whole clusters - id 6's best bin wins 59)
+      df <- df[!is.na(df$bin_win_pct) & df$bin_win_pct >= 55 &
+               !is.na(df$bin_n) & df$bin_n >= 100, ]
+      if (nrow(df) == 0) return(empty_plot("No BUYs sit in rank bins with win >= 55% (n >= 100)."))
+      df <- df[order(-df$bin_win_pct, df$agg_rank), ]
       set_sel_statsBL(df$wtd_expectancy, "avg holdout expectancy (pp/trade)")
-      chart_text <- sprintf("Shortlist: top %d by expectancy (win%% > 50, holdout >= 100)", k)
+      chart_text <- sprintf("Shortlist: %d BUYs in rank bins winning >= 55%% of holdout trades", nrow(df))
     } else {
-      # chart only BUYs with payoff evidence (NA-x bars would silently drop
-      # and shift every marker color); the table keeps all BUYs
-      n_total <- nrow(df)
-      df <- df[!is.na(df$wtd_expectancy), , drop = FALSE]
-      if (nrow(df) == 0)
+      # BUYs need payoff evidence to chart (NA-x bars would silently drop and
+      # shift every marker color); young-cluster non-BUYs stay regardless,
+      # as a watchlist block below the BUY ladder showing their (thin-sample)
+      # cell expectancy at real length - grey fill + amber ring marks them.
+      is_buy <- df$global_action == "BUY"
+      buys  <- df[is_buy & !is.na(df$wtd_expectancy), , drop = FALSE]
+      young <- df[!is_buy, , drop = FALSE]
+      n_total <- sum(is_buy)
+      if (nrow(buys) == 0 && nrow(young) == 0)
         return(empty_plot("No BUYs with payoff evidence to chart - see the table for all BUYs."))
-      df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
-      n_ev <- nrow(df)
-      set_sel_statsBL(df$wtd_expectancy, "avg holdout expectancy (pp/trade)")
-      if (n_ev > 400) {
-        df <- head(df, 400)
-        chart_text <- sprintf(
-          "Top 400 of %d BUYs with payoff evidence (%d BUYs total; narrow with the id/rank filters)",
-          n_ev, n_total)
-      } else {
-        chart_text <- sprintf(
-          "%d of %d BUYs have payoff evidence (rest in table only)", n_ev, n_total)
-      }
+      # top-400 cut keeps the best-WIN-RATE bins, not the biggest payoffs;
+      # unmeasured bins (n < 100) rank below any measured one
+      bw_cut <- ifelse(!is.na(buys$bin_win_pct) & !is.na(buys$bin_n) & buys$bin_n >= 100,
+                       buys$bin_win_pct, -Inf)
+      buys <- buys[order(-bw_cut, buys$agg_rank), ]
+      n_ev <- nrow(buys)
+      set_sel_statsBL(buys$wtd_expectancy, "avg holdout expectancy (pp/trade)")
+      if (n_ev > 400) buys <- head(buys, 400)
+      young <- young[order(young$id, young$agg_rank), ]
+      df <- rbind(buys, young)
+      chart_text <- sprintf(
+        "%d of %d BUYs charted, ordered by rank-bin win rate%s%s",
+        nrow(buys), n_total,
+        if (n_ev > 400) " - top 400, narrow with filters" else "",
+        if (nrow(young) > 0) sprintf(
+          " + %d young-cluster names (amber ring = thin evidence, mostly SKIP)",
+          nrow(young)) else "")
     }
     set_chart_rowsBL(nrow(df))
     # sparse rows STAY in the BUY views (marked, not hidden): amber outline +
-    # label tag; evidence_status comes from the DB (Phase A)
+    # label tag; evidence_status comes from the DB (Phase A). The "all" view's
+    # own title already explains the amber ring - no suffix there.
     df$sparse <- !is.na(df$evidence_status) & df$evidence_status != "mature"
-    if (any(df$sparse)) chart_text <- paste0(
-      chart_text, " / amber outline = sparse evidence")
+    # severity ring stored AS COLUMNS so it survives the re-sort below
+    sr <- severity_ring(df)
+    df$ring_checks <- sr$checks; df$ring_col <- sr$col; df$ring_w <- sr$w
+    if (view != "all" && any(df$sparse) && all(is.na(df$ring_checks)))
+      chart_text <- paste0(chart_text, " / amber outline = sparse evidence")
     df$hover <- sprintf(
-      "%s (id %d, %s)<br>evidence %s<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f",
+      "%s (id %d, %s)<br>evidence %s | tenure %s<br>rank bin %s | bin win %s<br>expectancy %.3f | win %.1f%%<br>cells %d | holdout %d | cred %.3f<br>buy weight %.2f | cluster IC(12) %.3f<br>checks failed %s%s",
       df$ticker, df$id, df$archetype,
       ifelse(is.na(df$evidence_status), "n/a", df$evidence_status),
+      ifelse(is.na(df$ticker_months_count), "n/a",
+             sprintf("%dmo", as.integer(df$ticker_months_count))),
+      ifelse(is.na(df$rank_bin), "no evidence",
+             sprintf("%d/20 (top %d%%)", as.integer(df$rank_bin),
+                     as.integer(df$rank_bin) * 5L)),
+      ifelse(is.na(df$bin_win_pct), "unmeasured",
+             sprintf("%.0f%% of %d obs%s", df$bin_win_pct, as.integer(df$bin_n),
+                     ifelse(!is.na(df$bin_n) & df$bin_n < 100, " (thin)", ""))),
       df$wtd_expectancy, df$wtd_win_pct,
       as.integer(df$n_buy_cells), as.integer(df$total_holdout),
       ifelse(is.na(df$avg_cred_weight), 0, df$avg_cred_weight),
-      df$buy_weight, ifelse(is.na(df$cluster_ic_12), 0, df$cluster_ic_12))
-    df <- df[order(df$wtd_expectancy, decreasing = FALSE, na.last = FALSE), ]
-    # same id/rank label format as the rankall view; order stays by expectancy
+      df$buy_weight, ifelse(is.na(df$cluster_ic_12), 0, df$cluster_ic_12),
+      ifelse(is.na(df$ring_checks), "n/a", as.character(df$ring_checks)),
+      ifelse(is.na(df$cluster_untradeable_reason) | df$cluster_untradeable_reason == "",
+             "", paste0(" (", df$cluster_untradeable_reason, ")")))
+    # ONE global sort, ascending (top of chart = best). Primary key = the
+    # rank bin's realized win rate (Kevin 2026-07-22: likelihood of winning
+    # outranks payoff size; bars still SHOW expectancy, order carries win).
+    # Ties inside a bin break by model rank (r1 above r23). Rows without a
+    # measured bin (n < 100: the young/sparse ids) sink below every graded
+    # BUY as a block, ordered by their thin-sample expectancy as before.
+    bw_ok <- !is.na(df$bin_win_pct) & !is.na(df$bin_n) & df$bin_n >= 100
+    exp_s <- ifelse(is.na(df$wtd_expectancy), -999,
+                    pmin(pmax(df$wtd_expectancy, -99), 99))
+    sort_key <- ifelse(bw_ok,
+                       df$bin_win_pct + (1000 - df$agg_rank) / 1e6,
+                       exp_s / 1000 - 1)
+    df <- df[order(sort_key), ]
+    # same id/rank label format as the rankall view
     df$ylab <- sprintf("id%d r%d | %s%s", df$id, df$agg_rank, df$ticker,
-                       ifelse(df$sparse, " [SPARSE]", ""))
-    plot_ly(df, x = ~wtd_expectancy, y = ~ylab, type = "bar", orientation = "h",
-            marker = list(color = ifelse(is.na(df$wtd_expectancy), '#64748b',
-                                  ifelse(df$wtd_expectancy >= 0, '#10b981', '#dc2626')),
-                          line = list(color = ifelse(df$sparse, "#f59e0b",
-                                                     "rgba(0,0,0,0)"),
-                                      width = ifelse(df$sparse, 1.5, 0))),
+                       ifelse(df$sparse & df$global_action != "BUY", " [SKIP+SPARSE]",
+                       ifelse(df$sparse, " [SPARSE]", "")))
+    # the marker dot keeps a zero-length bar visible as an amber-ringed point
+    df$xplot <- ifelse(is.na(df$wtd_expectancy), 0, df$wtd_expectancy)
+    # one outlier (e.g. WHR at -11) otherwise stretches the axis and crushes
+    # every other bar into a sliver: clip to the 2-98 pctile span (zero kept
+    # in view); clipped bars keep their true value in the hover
+    qs <- stats::quantile(df$xplot, c(0.02, 0.98), na.rm = TRUE, names = FALSE)
+    pad <- max(0.15, 0.1 * (qs[2] - qs[1]))
+    x_lo <- min(qs[1] - pad, -pad); x_hi <- max(qs[2] + pad, pad)
+    n_clip <- sum(df$xplot < x_lo | df$xplot > x_hi)
+    x_title <- paste0("Payoff-weighted expectancy (mean holdout trade return, %)",
+                      if (n_clip > 0) sprintf(" - axis clipped, %d bar%s extend beyond (hover for value)",
+                                              n_clip, if (n_clip == 1) "" else "s") else "")
+    fill_col <- ifelse(df$global_action != "BUY" | is.na(df$wtd_expectancy), '#64748b',
+                ifelse(df$wtd_expectancy >= 0, '#10b981', '#dc2626'))
+    ring_col <- df$ring_col
+    ring_w   <- df$ring_w
+    if (any(!is.na(df$ring_checks))) chart_text <- paste0(
+      chart_text, " / ring = failed checks: green 0, yellow 1, orange 2, red 3+")
+    plot_ly(df, x = ~xplot, y = ~ylab, type = "bar", orientation = "h",
+            marker = list(color = fill_col,
+                          line = list(color = ring_col, width = ring_w)),
             customdata = ~hover,
             hovertemplate = "%{customdata}<extra></extra>") %>%
+      add_markers(x = ~xplot, y = ~ylab,
+                  marker = list(color = fill_col, size = 5,
+                                line = list(color = ring_col, width = ring_w)),
+                  customdata = ~hover, showlegend = FALSE,
+                  hovertemplate = "%{customdata}<extra></extra>") %>%
       layout(
         paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+        showlegend = FALSE,
         title = list(text = chart_text,
                      font = list(color = "#94a3b8", size = 12)),
         shapes = list(
           list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                line = list(color = "rgba(255,255,255,0.4)"))),
-        xaxis = list(title = "Payoff-weighted expectancy (mean holdout trade return, %)",
+        xaxis = list(title = x_title, range = c(x_lo, x_hi),
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
         yaxis = list(title = "", type = "category",
                      categoryorder = "array", categoryarray = df$ylab,
@@ -3689,15 +3852,20 @@ server <- function(input, output, session) {
     }
     if (app_modeBL() == "wf") {
       hz <- if ("horizon" %in% names(df)) df$horizon[1] else 12L
+      di <- if ("del_info"  %in% names(df)) as.character(df$del_info)  else rep("", nrow(df))
+      dc <- if ("del_class" %in% names(df)) as.character(df$del_class) else rep("", nrow(df))
       display <- data.frame(
         Ticker            = df$ticker,
         Status            = ifelse(df$delisted, "delisted", ""),
+        Delisted          = ifelse(df$delisted,
+                                   ifelse(nzchar(di), di, "no category on file"), ""),
         Id                = df$id,
         Cutoff            = as.character(df$train_cutoff_date),
         Rank              = df$rank_within_cluster,
         `Cluster size`    = df$cluster_size,
         Score             = df$ticker_score,
         excess            = df$fwd_excess_pct,
+        del_class         = dc,
         check.names = FALSE,
         stringsAsFactors = FALSE
       )
@@ -3718,16 +3886,24 @@ server <- function(input, output, session) {
           pageLength = 25, lengthMenu = c(10, 25, 50, 100),
           dom = "Bftip",
           buttons = c("copy", "csv"),
-          order = list(list(7, "desc")),
-          columnDefs = list(list(className = "dt-right", targets = 4:7))
+          order = list(list(8, "desc")),
+          columnDefs = list(
+            list(className = "dt-right", targets = 5:8),
+            list(visible = FALSE, targets = 9))
         )
-      ) %>% DT::formatStyle(c("Ticker", "Status"), valueColumns = "Status",
-                            color = DT::styleEqual("delisted", "#c2410c")))
+      ) %>% DT::formatStyle(c("Ticker", "Status", "Delisted"),
+                            valueColumns = "del_class",
+                            color = DT::styleEqual(names(DELIST_CLASSES),
+                                                   unname(DELIST_CLASSES))))
     }
     if (app_modeBL() == "ledger") {
+      di <- if ("del_info"  %in% names(df)) as.character(df$del_info)  else rep("", nrow(df))
+      dc <- if ("del_class" %in% names(df)) as.character(df$del_class) else rep("", nrow(df))
       display <- data.frame(
         Ticker          = df$ticker,
         Status          = ifelse(df$delisted, "delisted", ""),
+        Delisted        = ifelse(df$delisted,
+                                 ifelse(nzchar(di), di, "no category on file"), ""),
         Snapshot        = as.character(df$prediction_date),
         `Entry date`    = as.character(df$entry_date),
         `Entry close`   = df$entry_adj_close,
@@ -3737,6 +3913,7 @@ server <- function(input, output, session) {
         `Buy weight`    = df$buy_weight,
         `Buy votes`     = as.integer(df$buy_votes),
         `Agg rank`      = as.integer(df$best_agg_rank),
+        del_class       = dc,
         check.names = FALSE,
         stringsAsFactors = FALSE
       )
@@ -3750,11 +3927,15 @@ server <- function(input, output, session) {
           pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
           dom = "Bftip",
           buttons = c("copy", "csv"),
-          order = list(list(7, "desc")),
-          columnDefs = list(list(className = "dt-right", targets = 4:10))
+          order = list(list(8, "desc")),
+          columnDefs = list(
+            list(className = "dt-right", targets = 5:11),
+            list(visible = FALSE, targets = 12))
         )
-      ) %>% DT::formatStyle(c("Ticker", "Status"), valueColumns = "Status",
-                            color = DT::styleEqual("delisted", "#c2410c")))
+      ) %>% DT::formatStyle(c("Ticker", "Status", "Delisted"),
+                            valueColumns = "del_class",
+                            color = DT::styleEqual(names(DELIST_CLASSES),
+                                                   unname(DELIST_CLASSES))))
     }
     view <- input$view_valBL
     if (is.null(view) || !view %in% c("shortlist", "all", "rankall")) view <- "all"
@@ -3767,6 +3948,7 @@ server <- function(input, output, session) {
         Archetype    = df$archetype,
         Action       = df$global_action,
         Evidence     = df$evidence_status,
+        `Tenure mo`  = as.integer(df$ticker_months_count),
         `Rank`       = df$agg_rank,
         `Buy weight` = df$buy_weight,
         `Expectancy` = df$wtd_expectancy,
@@ -3782,7 +3964,7 @@ server <- function(input, output, session) {
         options = list(
           pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500, 2000),
           dom = "Bftip", buttons = c("copy", "csv"),
-          columnDefs = list(list(className = "dt-right", targets = 5:9))
+          columnDefs = list(list(className = "dt-right", targets = 5:10))
         )
       ) %>% DT::formatStyle("Action",
               color = DT::styleEqual(c("BUY", "SELL", "SKIP"),
@@ -3793,9 +3975,21 @@ server <- function(input, output, session) {
                 c("#f59e0b", "#f59e0b", "#d97706"))))
     }
 
-    # BUY-gated views: same subset as the chart
-    if ("global_action" %in% names(df))
-      df <- df[df$global_action == "BUY", , drop = FALSE]
+    # BUY-gated views: same subset as the chart ("all" also keeps the active
+    # long-side young-cluster names, gated by the same Regular/Sparse toggles)
+    if ("global_action" %in% names(df)) {
+      keep <- df$global_action == "BUY"
+      if (view == "all") {
+        cats <- input$show_catBL
+        if (is.null(cats)) cats <- c("regular", "sparse")
+        young_row <- !is.na(df$evidence_status) &
+                     df$evidence_status %in% c("sparse_cluster", "sparse_both") &
+                     df$id <= 12
+        keep <- (("regular" %in% cats) & df$global_action == "BUY") |
+                (("sparse" %in% cats) & young_row)
+      }
+      df <- df[keep, , drop = FALSE]
+    }
     if (nrow(df) == 0) {
       return(DT::datatable(
         data.frame(Note = "No BUY tickers right now."),
@@ -3804,21 +3998,27 @@ server <- function(input, output, session) {
     }
 
     if (view == "shortlist") {
-      # keep in lockstep with the chart's shortlist rule
-      df <- df[!is.na(df$wtd_expectancy) & !is.na(df$wtd_win_pct) & df$wtd_win_pct > 50 &
-               !is.na(df$total_holdout) & df$total_holdout >= 100, ]
-      if (nrow(df) > 0) {
-        df <- df[order(df$wtd_expectancy, decreasing = TRUE), ]
-        df <- head(df, min(nrow(df), max(10, ceiling(0.10 * nrow(df)))))
-      }
+      # keep in lockstep with the chart's shortlist rule: rank bins whose
+      # realized win rate is >= 55 pct on >= 100 graded observations
+      df <- df[!is.na(df$bin_win_pct) & df$bin_win_pct >= 55 &
+               !is.na(df$bin_n) & df$bin_n >= 100, ]
+      if (nrow(df) > 0) df <- df[order(-df$bin_win_pct, df$agg_rank), ]
     }
+    # bin win% blanks out when the bin has < 100 graded obs (young ids):
+    # a noise-level number reads as evidence in a table cell
+    bin_win_shown <- ifelse(!is.na(df$bin_n) & df$bin_n >= 100, df$bin_win_pct, NA)
+    sr_tbl <- severity_ring(df)
     display <- data.frame(
       Ticker        = df$ticker,
       Id            = df$id,
       Archetype     = df$archetype,
+      Action        = df$global_action,
       Evidence      = df$evidence_status,
+      `Tenure mo`   = as.integer(df$ticker_months_count),
       `Expectancy`  = df$wtd_expectancy,
       `Win %`       = df$wtd_win_pct,
+      `Bin`         = as.integer(df$rank_bin),
+      `Bin win %`   = bin_win_shown,
       `Buy cells`   = as.integer(df$n_buy_cells),
       `Holdout n`   = as.integer(df$total_holdout),
       `Cred weight` = df$avg_cred_weight,
@@ -3826,6 +4026,9 @@ server <- function(input, output, session) {
       `Buy weight`  = df$buy_weight,
       `Agg rank`    = df$agg_rank,
       `Cluster IC(12)` = df$cluster_ic_12,
+      `Checks`      = as.integer(sr_tbl$checks),
+      `Reason`      = ifelse(is.na(df$cluster_untradeable_reason), "",
+                             df$cluster_untradeable_reason),
       check.names = FALSE,
       stringsAsFactors = FALSE
     )
@@ -3839,10 +4042,13 @@ server <- function(input, output, session) {
         pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
         dom = "Bftip",
         buttons = c("copy", "csv"),
-        order = list(list(4, "desc")),
-        columnDefs = list(list(className = "dt-right", targets = 4:12))
+        order = list(list(9, "desc"), list(15, "asc")),
+        columnDefs = list(list(className = "dt-right", targets = c(5:16, 17)))
       )
-    ) %>% DT::formatStyle("Evidence",
+    ) %>% DT::formatStyle("Action",
+            color = DT::styleEqual(c("BUY", "SELL", "SKIP"),
+                                   c("#10b981", "#dc2626", "#94a3b8"))) %>%
+      DT::formatStyle("Evidence",
             color = DT::styleEqual(
               c("sparse_cluster", "sparse_ticker", "sparse_both"),
               c("#f59e0b", "#f59e0b", "#d97706")))
