@@ -10,7 +10,12 @@ run_app() {
   while true; do
     echo "[supervisor] starting app.R"
     Rscript /opt/airflow/scripts/app.R > /opt/airflow/scripts/shiny.log 2>&1
-    echo "[supervisor] app.R exited (code $?), restarting in 3s"
+    code=$?
+    echo "[supervisor] app.R exited (code $code), restarting in 3s"
+    # shiny.log is truncated on every start; keep the last crashed run's log
+    if [ "$code" -ne 0 ]; then
+      cp /opt/airflow/scripts/shiny.log /opt/airflow/scripts/shiny_crash_last.log 2>/dev/null
+    fi
     sleep 3
   done
 }
