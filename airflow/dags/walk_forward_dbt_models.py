@@ -121,4 +121,56 @@ with DAG(
         do_xcom_push=False,
     )
 
-    walk_forward >> dbt_run_cluster_id_map >> run_ticker_ic >> dbt_run_gate_evidence
+    # 4. Grade the SERVING score walk-forward (audit G4: estimand alignment).
+    #    walk_forward_ticker_ic grades the evidence score; prod serves
+    #    agg_directional_score, a different formula whose out-of-sample payoff
+    #    was unmeasurable until this step exists. Writes
+    #    walk_forward_serving_rank / walk_forward_serving_ic - the evidence
+    #    base for any live-rank change (rank audit 2026-07-23: live agg_rank
+    #    anti-correlates with its v4 twin in the largest clusters and ordered
+    #    early ledger outcomes backwards; do not re-sort serving without this).
+    run_serving_ic = BashOperator(
+        task_id="run_walk_forward_serving_ic",
+        bash_command=(
+            "set -euo pipefail && "
+            "cd /opt/elt-inference-models && "
+            'if [ "${ENV:-}" = "prod" ] && [ -d .git ]; then '
+            "  git fetch --quiet origin main && "
+            "  git reset --quiet --hard origin/main; "
+            "fi && "
+            "python scripts/walk_forward_serving_ic.py --all --variant both"
+        ),
+        env={"ENV": runtime_env},
+        append_env=True,
+        do_xcom_push=False,
+        execution_timeout=timedelta(hours=6),
+    )
+
+    # 5. Re-anchor the serving evidence_id remap: snapshot serving's
+    #    (ticker, id) memberships AS OF this walk-forward build. Serving
+    #    re-identifies clusters against this table when daily label re-mints
+    #    drift (fix 2026-07-23); a stale snapshot mislabels clusters, so this
+    #    MUST run every walk-forward - and only here, never daily.
+    dbt_bash_snap, dbt_env_snap = get_inference_dbt_bash_command(
+        runtime_env, "__snapshot_op__"
+    )
+    refresh_membership_snapshot = BashOperator(
+        task_id="refresh_membership_snapshot",
+        # reuse the helper's cd/git-reset/env plumbing, swap the dbt verb
+        bash_command=dbt_bash_snap.replace(
+            "dbt run --select __snapshot_op__",
+            "dbt run-operation refresh_membership_snapshot",
+        ),
+        env=dbt_env_snap,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    (
+        walk_forward
+        >> dbt_run_cluster_id_map
+        >> run_ticker_ic
+        >> dbt_run_gate_evidence
+        >> run_serving_ic
+        >> refresh_membership_snapshot
+    )
