@@ -1748,11 +1748,10 @@ server <- function(input, output, session) {
       FROM top_picks tp
       JOIN serving.return_cluster_ticker_pair_current p
         ON p.ticker = tp.ticker AND p.id = %s
-      LEFT JOIN analysis.ticker_cluster_segments s
-        ON s.ticker = p.ticker
+      -- 2026-07-24 grain fix: cell_credibility no longer carries
+      -- vol_bucket_num; join on the cell shape alone.
       LEFT JOIN validation.cell_credibility c
-        ON c.vol_bucket_num = s.monthly_growth_vol_z_bucket_num
-       AND c.id            = p.id
+        ON c.id            = p.id
        AND c.past_lag      = p.past_lag
        AND c.fut_lag       = p.fut_lag
        AND c.bucket        = p.bucket
@@ -3386,10 +3385,10 @@ server <- function(input, output, session) {
                  AVG(cc.credibility_weight) AS avg_cred_weight,
                  COUNT(*) FILTER (WHERE cc.tier IN ('high','medium')) AS n_trusted_cells
           FROM cells c
-          JOIN analysis.ticker_cluster_segments s ON s.ticker = c.ticker
+          -- 2026-07-24 grain fix: cell_credibility no longer carries
+          -- vol_bucket_num; join on the cell shape alone.
           LEFT JOIN validation.cell_credibility cc
-            ON cc.vol_bucket_num = s.monthly_growth_vol_z_bucket_num
-           AND cc.id = c.eid AND cc.past_lag = c.past_lag
+            ON cc.id = c.eid AND cc.past_lag = c.past_lag
            AND cc.fut_lag = c.fut_lag AND cc.bucket = c.bucket
           GROUP BY c.ticker, c.id
       )
