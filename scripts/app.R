@@ -2976,7 +2976,22 @@ server <- function(input, output, session) {
     status_msgBL(sprintf("As-of date set to latest snapshot (%s).", b[2]))
   })
 
-  observeEvent(input$execute_BL, {
+  # Buy List refresh trigger. Bumped by the Generate button AND by any as-of
+  # date change (once connected), so selecting a different past date reloads
+  # the chart, table, and cluster-id filter automatically - no manual Generate.
+  # NULL-seeded so the handler (ignoreNULL default) does not fire on page load.
+  gen_triggerBL <- reactiveVal(NULL)
+  bump_genBL <- function() {
+    cur <- isolate(gen_triggerBL())
+    gen_triggerBL(if (is.null(cur)) 1L else cur + 1L)
+  }
+  observeEvent(input$execute_BL, { bump_genBL() })
+  observeEvent(asof_dateBL(), {
+    if (!is.null(input$db_passBL) && nzchar(input$db_passBL) &&
+        !is.null(ledger_boundsBL())) bump_genBL()
+  }, ignoreInit = TRUE)
+
+  observeEvent(gen_triggerBL(), {
     if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
     status_msgBL("Running query...")
     b <- ledger_boundsBL()
