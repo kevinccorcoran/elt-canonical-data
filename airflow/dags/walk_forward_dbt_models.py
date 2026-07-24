@@ -174,6 +174,24 @@ with DAG(
         execution_timeout=timedelta(hours=6),
     )
 
+    # 6. Reconstructed "model's top picks" per cutoff (2026-07-24): the honest
+    #    past-date recommendation view - top 10 per cluster at each cutoff,
+    #    cluster eligible only on evidence SETTLED by that cutoff (trailing
+    #    trust gate), outcomes graded on real 12mo prices. Reads
+    #    walk_forward_ticker_rank + cluster_id_map, so it re-runs each
+    #    walk-forward. (The literal BUY-gate replay was rejected: the live
+    #    gate pools IC across all years = lookahead on past dates.)
+    dbt_bash_picks, dbt_env_picks = get_inference_dbt_bash_command(
+        runtime_env, "walk_forward_top_picks"
+    )
+    dbt_run_top_picks = BashOperator(
+        task_id="dbt_run_walk_forward_top_picks",
+        bash_command=dbt_bash_picks,
+        env=dbt_env_picks,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     (
         walk_forward
         >> dbt_run_cluster_id_map
@@ -182,3 +200,6 @@ with DAG(
         >> refresh_membership_snapshot
         >> run_serving_ic
     )
+    # parallel non-blocking leaf: like run_serving_ic, nothing in-DAG consumes
+    # it, so a failure here can never strand the critical membership refresh
+    refresh_membership_snapshot >> dbt_run_top_picks

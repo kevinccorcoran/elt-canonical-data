@@ -762,11 +762,12 @@ ui <- navbarPage(
                      class = "btn-primary", style = "margin-bottom: 0.75rem;"),
         tags$p(paste("Latest date = live BUY list with payoff evidence.",
                      "Dates since 2026-06-16 replay the ledger snapshot graded to today.",
-                     "Earlier dates (back to 2007) replay the walk-forward BACKTEST:",
-                     "every ranked ticker per cluster at the nearest quarterly",
-                     "cutoff, graded by realized excess vs SPY over the replay horizon.",
-                     "Ids 13+ are short-side clusters (model expects laggards).",
-                     "No live BUY gates existed then - backtest ranking only."),
+                     "Earlier dates replay the walk-forward BACKTEST at the nearest",
+                     "quarterly cutoff. Default view = the model's TOP PICKS from",
+                     "clusters that had earned trust by that date, graded on real",
+                     "12-month prices vs SPY; switch to every ranked ticker for the",
+                     "full ladder (ids 13+ = short side there).",
+                     "No live BUY gates existed then."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
         # mode-aware controls: View only exists for the current date (replay
         # always draws prediction order); horizon only for backtest dates.
@@ -791,16 +792,24 @@ ui <- navbarPage(
                     min = 1, max = 600, value = c(1, 600), step = 1),
         conditionalPanel(
           condition = "output.blCtlMode == 'wf'",
-          selectInput("wf_horizon_valBL", "Replay horizon (months)",
-                      choices = c("4", "7", "12", "20", "33"), selected = "12"),
-          # replay's shortlist: the slider can't express "top X% of EACH
-          # cluster" when clusters of different sizes are loaded together
-          selectInput("wf_depth_valBL", "Per-cluster depth",
-                      choices = c("All ranks"               = "all",
-                                  "Top 5% of each cluster"  = "p5",
-                                  "Top 10% of each cluster" = "p10",
-                                  "Top 20% of each cluster" = "p20"),
-                      selected = "all"))
+          radioButtons("wf_view_modeBL", "Backtest view",
+                       choices = c("Model's top picks (trust-gated)" = "picks",
+                                   "All ranked tickers"              = "ranking"),
+                       selected = "picks"),
+          # horizon/depth only steer the full-ranking replay; picks are a
+          # fixed top-10 slice graded at 12 months in the table itself
+          conditionalPanel(
+            condition = "input.wf_view_modeBL == 'ranking'",
+            selectInput("wf_horizon_valBL", "Replay horizon (months)",
+                        choices = c("4", "7", "12", "20", "33"), selected = "12"),
+            # replay's shortlist: the slider can't express "top X% of EACH
+            # cluster" when clusters of different sizes are loaded together
+            selectInput("wf_depth_valBL", "Per-cluster depth",
+                        choices = c("All ranks"               = "all",
+                                    "Top 5% of each cluster"  = "p5",
+                                    "Top 10% of each cluster" = "p10",
+                                    "Top 20% of each cluster" = "p20"),
+                        selected = "all")))
       )),
       mainPanel(div(class = "main-card",
         uiOutput("modeNoteBL"),
@@ -2850,8 +2859,31 @@ server <- function(input, output, session) {
 
   output$modeNoteBL <- renderUI({
     mode <- app_modeBL()
+    df <- app_dataBL()
+    is_picks <- mode == "wf" && !is.null(df) && nrow(df) > 0 &&
+      "view_kind" %in% names(df) && identical(df$view_kind[1], "picks")
     h_style <- "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"
-    if (mode == "wf") {
+    if (is_picks) {
+      tagList(
+        h4("Model's top picks (reconstructed) - validation.walk_forward_top_picks",
+           style = h_style),
+        tags$div(class = "caveat-warning",
+          tags$b(style = "color: #fbbf24;", "Read: "),
+          "what the model would have recommended at the nearest quarterly ",
+          "cutoff: its top 10 per cluster (positive evidence only), shown ",
+          "ONLY for clusters that had EARNED TRUST BY THAT DATE - walk-",
+          "forward IC >= 0.10 with positive spread over at least 8 settled ",
+          "prior quarters. No future information decides eligibility, so ",
+          "this is an honest as-of reconstruction; it is NOT the live BUY ",
+          "gate (which did not exist then and pools evidence across all ",
+          "years). Each bar = how the pick REALLY did vs SPY over the next ",
+          "12 months, from actual adjusted prices: green beat SPY, red ",
+          "lagged, grey = no tradable price window. A dot at the bar tip = ",
+          "the company no longer trades; its color = HOW it left (green ",
+          "acquired/private, red bankrupt/failed, amber SPAC/rename, ",
+          "burnt-orange uncategorized). The chips above are this date's ",
+          "scorecard: % positive = share of picks that beat SPY."))
+    } else if (mode == "wf") {
       tagList(
         h4("Backtest replay - validation.walk_forward_ticker_rank", style = h_style),
         tags$div(class = "caveat-warning",
@@ -2950,6 +2982,102 @@ server <- function(input, output, session) {
     has_date <- !is.null(b) && !is.null(asof) && length(asof) == 1 && !is.na(asof)
     is_wf     <- has_date && asof < b[1]
     is_ledger <- has_date && !is_wf && asof < b[2]
+
+    if (is_wf && !identical(input$wf_view_modeBL, "ranking")) {
+      # ── Backtest default: the model's trust-gated TOP PICKS ──
+      # validation.walk_forward_top_picks holds the as-of reconstruction
+      # (top 10 per cluster, cluster eligible only on evidence settled BY
+      # that cutoff, outcomes pre-graded on real 12mo prices). If the table
+      # is missing (first build lands with the next walk-forward) or has no
+      # cutoff early enough, fall through to the full ranking replay below.
+      handled <- tryCatch({
+        con <- get_con(input, "BL")
+        on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+        has_picks <- isTRUE(tryCatch(dbGetQuery(con, "
+          SELECT EXISTS (SELECT 1 FROM information_schema.tables
+                         WHERE table_schema = 'validation'
+                           AND table_name = 'walk_forward_top_picks') AS ok")$ok[1],
+          error = function(e) FALSE))
+        if (!has_picks) {
+          status_msgBL(paste("Top-picks table not built yet (first build lands",
+                             "with the next walk-forward run). Showing the full",
+                             "ranking replay instead."))
+          FALSE
+        } else {
+          query <- sprintf("
+            WITH sel AS (
+                SELECT MAX(train_cutoff_date) AS d
+                FROM validation.walk_forward_top_picks
+                WHERE train_cutoff_date <= '%s'
+            )
+            , mkt AS (
+                SELECT MAX(date) AS market_max FROM cdm.ingest_combined
+                WHERE ticker = 'SPY'
+            )
+            SELECT p.train_cutoff_date, p.id, p.ticker,
+                   p.pick_rank AS rank_within_cluster,
+                   p.cluster_n AS cluster_size,
+                   p.ticker_score,
+                   p.real_excess_pct AS fwd_excess_pct,
+                   p.trailing_ic,
+                   ((SELECT MAX(i.date) FROM cdm.ingest_combined i
+                     WHERE i.ticker = p.ticker)
+                      >= mkt.market_max - INTERVAL '10 days') AS is_active,
+                   mkt.market_max__METACOLS__
+            FROM validation.walk_forward_top_picks p
+            JOIN sel ON p.train_cutoff_date = sel.d
+            CROSS JOIN mkt
+            __METAJOIN__
+            ORDER BY p.id, p.pick_rank;",
+            format(asof, "%Y-%m-%d"))
+          has_meta <- isTRUE(tryCatch(dbGetQuery(con, "
+            SELECT EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_schema = 'raw'
+                             AND table_name = 'ticker_metadata') AS ok")$ok[1],
+            error = function(e) FALSE))
+          query <- gsub("__METACOLS__", if (has_meta)
+            ", tm.name AS company_name, tm.delisting_category, tm.delisted_utc::date AS delisted_date"
+            else "", query, fixed = TRUE)
+          query <- gsub("__METAJOIN__", if (has_meta)
+            "LEFT JOIN raw.ticker_metadata tm ON tm.ticker = p.ticker"
+            else "", query, fixed = TRUE)
+          df <- dbGetQuery(con, query)
+          if (nrow(df) == 0) {
+            earliest <- tryCatch(dbGetQuery(con, "
+              SELECT MIN(train_cutoff_date) AS d
+              FROM validation.walk_forward_top_picks")$d[1],
+              error = function(e) NA)
+            status_msgBL(sprintf(paste(
+              "No trust-gated picks at any cutoff on or before %s (earliest",
+              "qualifying cutoff: %s - before that no cluster had 8 settled",
+              "quarters of passing evidence). Showing the full ranking",
+              "replay instead."), asof, earliest))
+            FALSE
+          } else {
+            for (col in c("id", "rank_within_cluster", "cluster_size"))
+              df[[col]] <- as.integer(df[[col]])
+            df <- coerce_numeric_cols(df, c("ticker_score", "fwd_excess_pct",
+                                            "trailing_ic"))
+            df$delisted <- is.na(df$is_active) | !df$is_active
+            df <- delist_enrich(df)
+            df$horizon <- 12L      # picks are graded at 12mo in the table
+            df$view_kind <- "picks"
+            app_modeBL("wf")
+            app_dataBL(df)
+            status_msgBL(sprintf(
+              "Top picks: cutoff %s, %d picks across %d trust-gated clusters, graded on real 12-month prices.",
+              df$train_cutoff_date[1], nrow(df), length(unique(df$id))))
+            TRUE
+          }
+        }
+      }, error = function(e) {
+        app_dataBL(NULL); app_modeBL("current")
+        status_msgBL(paste("Error:", e$message))
+        TRUE
+      })
+      if (isTRUE(handled)) return()
+      # fall through: full ranking replay below
+    }
 
     if (is_wf) {
       # ── Backtest replay: every ranked ticker at the nearest cutoff ──
@@ -3454,6 +3582,11 @@ server <- function(input, output, session) {
           df$rank_within_cluster, df$cluster_size,
           ifelse(is.na(df$ticker_score), 0, df$ticker_score),
           hz, ifelse(is.na(df$fwd_excess_pct), 0, df$fwd_excess_pct))
+        if ("view_kind" %in% names(df) && identical(df$view_kind[1], "picks") &&
+            "trailing_ic" %in% names(df))
+          df$hover <- paste0(df$hover, sprintf(
+            "<br>cluster trust IC by then %.3f",
+            ifelse(is.na(df$trailing_ic), 0, df$trailing_ic)))
         x_title <- if (is.null(trunc_note))
           sprintf("Realized %dmo excess return vs SPY (%%)", hz)
         else sprintf("Excess return vs SPY so far (%%; %s)", trunc_note)
@@ -3490,8 +3623,11 @@ server <- function(input, output, session) {
       if (rank_mode) {
         df <- df[order(df$id, df$rank_within_cluster), ]   # display top->bottom
         df$ylab <- sprintf("id%d r%d | %s", df$id, df$rank_within_cluster, df$ticker)
+        head_word <- if ("view_kind" %in% names(df) &&
+                         identical(df$view_kind[1], "picks"))
+          "Trust-gated top picks" else "Prediction order"
         chart_title <- list(
-          text = sprintf("Prediction order: %d ranked picks (r1 = model's top pick; bar = realized %dmo vs SPY)", nrow(df), hz),
+          text = sprintf("%s: %d ranked picks (r1 = model's top pick; bar = realized %dmo vs SPY)", head_word, nrow(df), hz),
           font = list(color = "#94a3b8", size = 12))
         if (nrow(df) > 180) {
           n_total <- nrow(df)
