@@ -174,13 +174,38 @@ with DAG(
         execution_timeout=timedelta(hours=6),
     )
 
-    # 6. Reconstructed "model's top picks" per cutoff (2026-07-24): the honest
+    # 6. Overlap-chained cluster identity (label-jump fix 2026-07-25):
+    #    positional ids swap physical clusters in 61-73% of quarter
+    #    transitions (whole-ladder +/-1 shifts), so per-label histories blend
+    #    clusters. The chain follows member overlap across cutoffs (same
+    #    principle as the serving evidence_id remap) and must rebuild from the
+    #    fresh ranks BEFORE the top-picks model that groups its trust gate by
+    #    chain_id.
+    run_cluster_chain = BashOperator(
+        task_id="run_walk_forward_cluster_chain",
+        bash_command=(
+            "set -euo pipefail && "
+            "cd /opt/elt-inference-models && "
+            'if [ "${ENV:-}" = "prod" ] && [ -d .git ]; then '
+            "  git fetch --quiet origin main && "
+            "  git reset --quiet --hard origin/main; "
+            "fi && "
+            "python scripts/walk_forward_cluster_chain.py --all"
+        ),
+        env={"ENV": runtime_env},
+        append_env=True,
+        do_xcom_push=False,
+        execution_timeout=timedelta(minutes=30),
+    )
+
+    # 7. Reconstructed "model's top picks" per cutoff (2026-07-24): the honest
     #    past-date recommendation view - top 10 per cluster at each cutoff,
     #    cluster eligible only on evidence SETTLED by that cutoff (trailing
-    #    trust gate), outcomes graded on real 12mo prices. Reads
-    #    walk_forward_ticker_rank + cluster_id_map, so it re-runs each
-    #    walk-forward. (The literal BUY-gate replay was rejected: the live
-    #    gate pools IC across all years = lookahead on past dates.)
+    #    trust gate, grouped by chain_id), outcomes graded on real 12mo
+    #    prices. Reads walk_forward_ticker_rank + cluster_id_map +
+    #    cluster_chain, so it re-runs each walk-forward. (The literal
+    #    BUY-gate replay was rejected: the live gate pools IC across all
+    #    years = lookahead on past dates.)
     dbt_bash_picks, dbt_env_picks = get_inference_dbt_bash_command(
         runtime_env, "walk_forward_top_picks"
     )
@@ -200,6 +225,6 @@ with DAG(
         >> refresh_membership_snapshot
         >> run_serving_ic
     )
-    # parallel non-blocking leaf: like run_serving_ic, nothing in-DAG consumes
-    # it, so a failure here can never strand the critical membership refresh
-    refresh_membership_snapshot >> dbt_run_top_picks
+    # parallel non-blocking leaf chain: nothing in-DAG consumes these, so a
+    # failure here can never strand the critical membership refresh
+    refresh_membership_snapshot >> run_cluster_chain >> dbt_run_top_picks
