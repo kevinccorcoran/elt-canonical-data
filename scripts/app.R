@@ -301,7 +301,7 @@ hr {
 "
 
 # ─── Helper: sidebar panel for a given tab suffix ───
-make_sidebar <- function(suffix, title, filter_widgets) {
+make_sidebar <- function(suffix, title, filter_widgets, post_widgets = NULL) {
   sidebarPanel(
     h4(title),
     selectInput(paste0("db_env", suffix), "Environment", choices = c("Production", "Staging", "Dev"), selected = "Production"),
@@ -315,6 +315,13 @@ make_sidebar <- function(suffix, title, filter_widgets) {
     div(id = paste0("filter_panel", suffix), filter_widgets),
     hr(),
     actionButton(paste0("execute_", suffix), "Generate Chart", class = "btn-primary w-100", style = "margin-top: 1rem;"),
+    # post_widgets render UNDER Generate: controls that refine already-loaded
+    # data (cluster id filter, rank range) belong after the button, not mixed
+    # in with the pre-Generate query params (Kevin 2026-07-25).
+    if (!is.null(post_widgets)) tagList(
+      hr(),
+      div(id = paste0("post_panel", suffix), post_widgets)
+    ),
     hr(),
     textOutput(paste0("statusMessage", suffix))
   )
@@ -785,11 +792,6 @@ ui <- navbarPage(
                              choices = c("Regular entries (BUYs)"      = "regular",
                                          "Sparse entries (young ids)"  = "sparse"),
                              selected = c("regular", "sparse"))),
-        selectInput("flt_id_valBL", "Cluster id filter",
-                    choices = c("All" = "ALL", setNames(1:19, 1:19)),
-                    selected = "ALL"),
-        sliderInput("flt_rank_rangeBL", "Rank range (within cluster)",
-                    min = 1, max = 600, value = c(1, 600), step = 1),
         conditionalPanel(
           condition = "output.blCtlMode == 'wf'",
           radioButtons("wf_view_modeBL", "Backtest view",
@@ -797,7 +799,7 @@ ui <- navbarPage(
                                    "All ranked tickers"              = "ranking"),
                        selected = "picks"),
           # horizon/depth only steer the full-ranking replay; picks are a
-          # fixed top-10 slice graded at 12 months in the table itself
+          # top ~5% (tie-inclusive) slice graded at 12 months in the table
           conditionalPanel(
             condition = "input.wf_view_modeBL == 'ranking'",
             selectInput("wf_horizon_valBL", "Replay horizon (months)",
@@ -810,6 +812,16 @@ ui <- navbarPage(
                                     "Top 10% of each cluster" = "p10",
                                     "Top 20% of each cluster" = "p20"),
                         selected = "all")))
+      ),
+      # rendered UNDER Generate Chart via make_sidebar's post_widgets slot:
+      # both are post-load refinements (reactive on the loaded data, no
+      # re-Generate needed), so they follow the button, not precede it.
+      tagList(
+        selectInput("flt_id_valBL", "Cluster id filter",
+                    choices = c("All" = "ALL", setNames(1:19, 1:19)),
+                    selected = "ALL"),
+        sliderInput("flt_rank_rangeBL", "Rank range (within cluster)",
+                    min = 1, max = 600, value = c(1, 600), step = 1)
       )),
       mainPanel(div(class = "main-card",
         uiOutput("modeNoteBL"),
@@ -2869,7 +2881,8 @@ server <- function(input, output, session) {
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
           "what the model would have recommended at the nearest quarterly ",
-          "cutoff: its top 10 per cluster (positive evidence only), shown ",
+          "cutoff: its top ~5% of each cluster (tie-inclusive, positive ",
+          "evidence only), shown ",
           "ONLY for clusters that had EARNED TRUST BY THAT DATE - walk-",
           "forward IC >= 0.10 with positive spread over at least 8 settled ",
           "prior quarters. No future information decides eligibility, so ",
