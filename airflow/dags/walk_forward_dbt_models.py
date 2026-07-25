@@ -217,6 +217,31 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # 8. Append the newest cutoff's top picks to the IMMUTABLE forward ledger
+    #    (monitoring.top_picks_ledger). walk_forward_top_picks is rebuilt in
+    #    full every run and spans the in-sample 2012-2024 backtest, so it cannot
+    #    itself be the out-of-sample record. This step freezes each new
+    #    (>= freeze date) cutoff's picks + entry prices exactly once; re-runs
+    #    insert nothing and alter nothing (cutoff guard + ON CONFLICT). Correct
+    #    no-op until the walk-forward grid rolls a cutoff past the freeze.
+    #    Non-blocking leaf: nothing downstream consumes it.
+    capture_top_picks_ledger = BashOperator(
+        task_id="capture_top_picks_ledger",
+        bash_command=(
+            "set -euo pipefail && "
+            "cd /opt/elt-inference-models && "
+            'if [ "${ENV:-}" = "prod" ] && [ -d .git ]; then '
+            "  git fetch --quiet origin main && "
+            "  git reset --quiet --hard origin/main; "
+            "fi && "
+            "python scripts/top_picks_ledger.py"
+        ),
+        env={"ENV": runtime_env},
+        append_env=True,
+        do_xcom_push=False,
+        execution_timeout=timedelta(minutes=15),
+    )
+
     (
         walk_forward
         >> dbt_run_cluster_id_map
@@ -227,4 +252,9 @@ with DAG(
     )
     # parallel non-blocking leaf chain: nothing in-DAG consumes these, so a
     # failure here can never strand the critical membership refresh
-    refresh_membership_snapshot >> run_cluster_chain >> dbt_run_top_picks
+    (
+        refresh_membership_snapshot
+        >> run_cluster_chain
+        >> dbt_run_top_picks
+        >> capture_top_picks_ledger
+    )
