@@ -767,51 +767,50 @@ ui <- navbarPage(
         ),
         actionButton("todayBtnBL", "Set current date",
                      class = "btn-primary", style = "margin-bottom: 0.75rem;"),
-        tags$p(paste("Latest date = live BUY list with payoff evidence.",
-                     "Dates since 2026-06-16 replay the ledger snapshot graded to today.",
-                     "Earlier dates replay the walk-forward BACKTEST at the nearest",
-                     "quarterly cutoff. Default view = the model's TOP PICKS from",
-                     "clusters that had earned trust by that date, graded on real",
-                     "12-month prices vs SPY; switch to every ranked ticker for the",
-                     "full ladder (ids 13+ = short side there).",
-                     "No live BUY gates existed then."),
+        tags$p(paste("Latest date = live data; dates since 2026-06-16 replay the",
+                     "recorded ledger; earlier dates replay the walk-forward",
+                     "BACKTEST at the nearest quarterly cutoff. Same three views",
+                     "at every date: Model's top picks (trust-gated, the validated",
+                     "rule), BUY list (live today, recorded from 2026-06-16,",
+                     "unavailable earlier - no gate existed to record), and the",
+                     "full ladder of every ranked ticker (ids 13+ = short side)."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
-        # mode-aware controls: View only exists for the current date (replay
-        # always draws prediction order); horizon only for backtest dates.
-        # Showing an inert control read as "Generate is broken".
+        # Unified 3-slot View (same menu at every date). Rendered server-side
+        # so the BUY slot can grey out for pre-ledger dates: no recorded gate
+        # exists before 2026-06-16 and reconstructing it would be lookahead
+        # (see walk_forward_top_picks header for why that replay was rejected).
+        uiOutput("blViewUI"),
+        # BUY-view refinements (current date only): the decision shortlist is
+        # a refinement of the BUY list, not a separate universe - so it lives
+        # INSIDE the BUY view as a default-on toggle. Regular/Sparse toggles
+        # only matter when the shortlist is off (sparse rows carry no bin).
         conditionalPanel(
-          condition = "output.blCtlMode == 'current'",
-          selectInput("view_valBL", "View",
-                      choices = c("Shortlist - rank bins that win (55%+)" = "shortlist",
-                                  "All BUYs + young clusters"             = "all",
-                                  "ALL tickers by cluster & rank"         = "rankall"),
-                      selected = "shortlist")),
-        conditionalPanel(
-          condition = "output.blCtlMode == 'current' && input.view_valBL == 'all'",
-          checkboxGroupInput("show_catBL", NULL,
-                             choices = c("Regular entries (BUYs)"      = "regular",
-                                         "Sparse entries (young ids)"  = "sparse"),
-                             selected = c("regular", "sparse"))),
-        conditionalPanel(
-          condition = "output.blCtlMode == 'wf'",
-          radioButtons("wf_view_modeBL", "Backtest view",
-                       choices = c("Model's top picks (trust-gated)" = "picks",
-                                   "All ranked tickers"              = "ranking"),
-                       selected = "picks"),
-          # horizon/depth only steer the full-ranking replay; picks are a
-          # top ~5% (tie-inclusive) slice graded at 12 months in the table
+          condition = "output.blCtlMode == 'current' && input.bl_viewBL == 'buys'",
+          checkboxInput("buys_shortlistBL",
+                        "Shortlist only - rank bins winning >= 55%",
+                        value = TRUE),
           conditionalPanel(
-            condition = "input.wf_view_modeBL == 'ranking'",
-            selectInput("wf_horizon_valBL", "Replay horizon (months)",
-                        choices = c("4", "7", "12", "20", "33"), selected = "12"),
-            # replay's shortlist: the slider can't express "top X% of EACH
-            # cluster" when clusters of different sizes are loaded together
-            selectInput("wf_depth_valBL", "Per-cluster depth",
-                        choices = c("All ranks"               = "all",
-                                    "Top 5% of each cluster"  = "p5",
-                                    "Top 10% of each cluster" = "p10",
-                                    "Top 20% of each cluster" = "p20"),
-                        selected = "all")))
+            condition = "!input.buys_shortlistBL",
+            checkboxGroupInput("show_catBL", NULL,
+                               choices = c("Regular entries (BUYs)"      = "regular",
+                                           "Sparse entries (young ids)"  = "sparse"),
+                               selected = c("regular", "sparse")))),
+        conditionalPanel(
+          condition = "output.blCtlMode != 'current' && input.bl_viewBL == 'ladder'",
+          # horizon/depth only steer the full-ladder replay; picks are a
+          # top ~5% (tie-inclusive) slice graded at 12 months in the table.
+          # Horizon is past-only by design: it selects a GRADING window, and
+          # current-date rows have no realized outcomes to grade.
+          selectInput("wf_horizon_valBL", "Replay horizon (months)",
+                      choices = c("4", "7", "12", "20", "33"), selected = "12"),
+          # replay's shortlist: the slider can't express "top X% of EACH
+          # cluster" when clusters of different sizes are loaded together
+          selectInput("wf_depth_valBL", "Per-cluster depth",
+                      choices = c("All ranks"               = "all",
+                                  "Top 5% of each cluster"  = "p5",
+                                  "Top 10% of each cluster" = "p10",
+                                  "Top 20% of each cluster" = "p20"),
+                      selected = "all"))
       ),
       # rendered UNDER Generate Chart via make_sidebar's post_widgets slot:
       # both are post-load refinements (reactive on the loaded data, no
@@ -2858,15 +2857,77 @@ server <- function(input, output, session) {
   }
 
   # Which mode the SELECTED date will resolve to (live, pre-Generate), driving
-  # the conditionalPanels: 'current' shows View, 'wf' shows the horizon.
-  # Before Connect (no ledger bounds) default to 'current'.
-  output$blCtlMode <- renderText({
+  # the conditionalPanels and the View menu. Before Connect (no ledger bounds)
+  # default to 'current'.
+  bl_ctl_modeR <- reactive({
     b <- ledger_boundsBL(); asof <- asof_dateBL()
     if (is.null(b) || is.null(asof) || length(asof) != 1 || is.na(asof))
       return("current")
     if (asof < b[1]) "wf" else if (asof < b[2]) "ledger" else "current"
   })
+  output$blCtlMode <- renderText(bl_ctl_modeR())
   outputOptions(output, "blCtlMode", suspendWhenHidden = FALSE)
+
+  # Unified View selector: the SAME three slots at every date (top picks /
+  # BUY list / full ladder). The BUY slot only exists where a gate record
+  # does - live today, ledger snapshots since 2026-06-16; for earlier dates
+  # it renders as a greyed explanation instead of an option, because no gate
+  # existed then and reconstructing one is lookahead (the rejected replay).
+  # Selection is sticky across date flips; a choice that vanishes (buys on a
+  # pre-ledger date) falls back to picks.
+  output$blViewUI <- renderUI({
+    mode <- bl_ctl_modeR()
+    ch <- if (mode == "wf")
+      c("Model's top picks (trust-gated)"  = "picks",
+        "Full ladder - every ranked ticker" = "ladder")
+    else if (mode == "ledger")
+      c("Model's top picks (trust-gated)"  = "picks",
+        "BUY list (recorded snapshot)"      = "buys",
+        "Full ladder - every ranked ticker" = "ladder")
+    else
+      c("Model's top picks (trust-gated)"  = "picks",
+        "Live BUY list (production gate)"   = "buys",
+        "Full ladder - every ranked ticker" = "ladder")
+    sel <- isolate(input$bl_viewBL)
+    if (is.null(sel) || !sel %in% ch) sel <- "picks"
+    tagList(
+      radioButtons("bl_viewBL", "View", choices = ch, selected = sel),
+      if (mode == "wf") tags$p(
+        paste("BUY list: unavailable before 2026-06-16 - no recorded gate",
+              "exists and reconstructing it would use future information."),
+        style = paste0("color: #64748b; font-size: 0.7rem; ",
+                       "margin-top: -0.5rem; margin-bottom: 0.75rem;"))
+    )
+  })
+
+  # Past-date view switches change the QUERY (picks vs ladder vs snapshot), so
+  # they re-Generate; current-date switches are renderer-side and instant. Two
+  # guards keep this from double-firing: skip when the value is unchanged, and
+  # skip when the MODE just changed (a date flip rebuilt the radio - the date
+  # observer already bumped the generator, and coercion handles a vanished
+  # option in the query itself).
+  last_viewBL     <- reactiveVal(NULL)
+  last_viewModeBL <- reactiveVal(NULL)
+  observeEvent(input$bl_viewBL, {
+    v <- input$bl_viewBL; m <- bl_ctl_modeR()
+    prev_v <- last_viewBL(); prev_m <- last_viewModeBL()
+    last_viewBL(v); last_viewModeBL(m)
+    if (is.null(prev_v)) return()              # first render, no reload
+    if (!identical(m, prev_m)) return()        # date/mode flip: date observer handles it
+    if (identical(v, prev_v)) return()         # no real change
+    if (m %in% c("wf", "ledger") &&
+        !is.null(input$db_passBL) && nzchar(input$db_passBL) &&
+        !is.null(ledger_boundsBL())) bump_genBL()
+  })
+
+  # Resolve the unified View input against a mode: anything unset or invalid
+  # is picks; buys on a pre-ledger date coerces to picks (no gate to show).
+  bl_view_resolved <- function(mode) {
+    v <- input$bl_viewBL
+    if (is.null(v) || !v %in% c("picks", "buys", "ladder")) v <- "picks"
+    if (mode == "wf" && v == "buys") v <- "picks"
+    v
+  }
 
   output$modeNoteBL <- renderUI({
     mode <- app_modeBL()
@@ -2931,21 +2992,49 @@ server <- function(input, output, session) {
           "table's Delisted column); its 'latest close' is the final traded ",
           "price."))
     } else {
-      tagList(
-        h4("Current BUY list - serving.return_cluster_ticker_global_action_current x validated payoff",
-           style = h_style),
-        tags$div(class = "caveat-warning",
-          tags$b(style = "color: #fbbf24;", "Read: "),
-          "tickers the model currently marks BUY. Order = win likelihood: each ",
-          "ticker's bin = its slot in the latest WALK-FORWARD ranking (20 bins ",
-          "of 5%; same ranking the bin win rates were measured on), and rows ",
-          "sort by their bin's realized win rate vs SPY (most winners on top; ",
-          "bars still show expectancy = mean holdout trade return). Tickers the ",
-          "walk-forward has no scored evidence for show 'no evidence' and sink ",
-          "below the graded BUYs. Use the View selector to switch between the ",
-          "decision shortlist (rank bins winning >= 55% on >= 100 graded obs), ",
-          "every BUY, and ALL ranked tickers per cluster - it switches ",
-          "instantly, no re-Generate."))
+      # Current date: view-aware note (picks-today / live BUY list / ladder)
+      uview <- bl_view_resolved("current")
+      if (uview == "picks") {
+        tagList(
+          h4("Model's top picks (live, as of today)", style = h_style),
+          tags$div(class = "caveat-warning",
+            tags$b(style = "color: #fbbf24;", "Read: "),
+            "the SAME rule the backtest validates, applied to today: the top ~5% ",
+            "by serving rank within each long cluster the live gate currently ",
+            "trades. This is what the model would pick right now. There is NO ",
+            "realized outcome yet (that arrives over the next 12 months through ",
+            "the ledger), so the bar is each pick's WALK-FORWARD rank-bin win ",
+            "rate centered at 50% (the priced evidence), not a price return. ",
+            "Green = the live gate also marks it BUY; grey = it sits in the top ",
+            "slice but the per-ticker gate holds off - that disagreement is the ",
+            "gate's extra density/coverage conditions at work, not an error."))
+      } else if (uview == "ladder") {
+        tagList(
+          h4("Full ladder - every ranked ticker (live)", style = h_style),
+          tags$div(class = "caveat-warning",
+            tags$b(style = "color: #fbbf24;", "Read: "),
+            "every ticker the model ranks right now, grouped by cluster in rank ",
+            "order (ids 13+ = short side), colored by live action (green BUY / ",
+            "grey SKIP / red SELL). The diagnostic ladder - no BUY gate or ",
+            "evidence filter applied. Use the rank slider to compare cluster ",
+            "heads side by side."))
+      } else {
+        tagList(
+          h4("Live BUY list - serving.return_cluster_ticker_global_action_current x validated payoff",
+             style = h_style),
+          tags$div(class = "caveat-warning",
+            tags$b(style = "color: #fbbf24;", "Read: "),
+            "tickers the model currently marks BUY. Order = win likelihood: each ",
+            "ticker's bin = its slot in the latest WALK-FORWARD ranking (20 bins ",
+            "of 5%; same ranking the bin win rates were measured on), and rows ",
+            "sort by their bin's realized win rate vs SPY (most winners on top; ",
+            "bars still show expectancy = mean holdout trade return). Tickers the ",
+            "walk-forward has no scored evidence for show 'no evidence' and sink ",
+            "below the graded BUYs. The Shortlist toggle keeps only rank bins ",
+            "winning >= 55% on >= 100 graded obs; untoggle it for every BUY plus ",
+            "the young-cluster watchlist (Regular/Sparse). Switches instantly, no ",
+            "re-Generate."))
+      }
     }
   })
 
@@ -3012,9 +3101,14 @@ server <- function(input, output, session) {
     has_date <- !is.null(b) && !is.null(asof) && length(asof) == 1 && !is.na(asof)
     is_wf     <- has_date && asof < b[1]
     is_ledger <- has_date && !is_wf && asof < b[2]
+    ctl_mode  <- if (is_wf) "wf" else if (is_ledger) "ledger" else "current"
+    uview     <- bl_view_resolved(ctl_mode)
 
-    if (is_wf && !identical(input$wf_view_modeBL, "ranking")) {
-      # ── Backtest default: the model's trust-gated TOP PICKS ──
+    if ((is_wf || (is_ledger && uview != "buys")) && uview == "picks") {
+      # ── Trust-gated TOP PICKS at the nearest quarterly cutoff <= asof ──
+      # (backtest dates, and recent ledger dates asking for picks: the same
+      # validated reconstruction. Current-date picks are computed live in the
+      # renderer from serving, not here, since serving holds only today.)
       # validation.walk_forward_top_picks holds the as-of reconstruction
       # (top 10 per cluster, cluster eligible only on evidence settled BY
       # that cutoff, outcomes pre-graded on real 12mo prices). If the table
@@ -3109,13 +3203,15 @@ server <- function(input, output, session) {
       # fall through: full ranking replay below
     }
 
-    if (is_wf) {
-      # ── Backtest replay: every ranked ticker at the nearest cutoff ──
+    if (is_wf || (is_ledger && uview != "buys")) {
+      # ── Full ladder replay: every ranked ticker at the nearest cutoff ──
       # (rank depth is the client-side Rank filter, not a query knob)
       # Horizon selector: ranking AND grading window switch together, so the
       # question stays matched ("best over N months" graded over N months)
+      # horizon control is hidden unless the ladder view is active (it grades a
+      # window; picks/fallthrough leave it NULL) - default to 12 then
       hz <- suppressWarnings(as.integer(input$wf_horizon_valBL))
-      if (!hz %in% c(4L, 7L, 12L, 20L, 33L)) hz <- 12L
+      if (length(hz) != 1 || is.na(hz) || !hz %in% c(4L, 7L, 12L, 20L, 33L)) hz <- 12L
       query <- sprintf("
         WITH sel AS (
             -- nearest USABLE cutoff: must have ranks at this horizon and
@@ -3215,7 +3311,7 @@ server <- function(input, output, session) {
       return()
     }
 
-    if (is_ledger) {
+    if (is_ledger && uview == "buys") {
       # ── As-of replay: ledger snapshot graded to the latest price ──
       # NOTE: this string is a sprintf FORMAT - any literal % in it (even in
       # a SQL comment) must be %%, or sprintf dies with "too few arguments".
@@ -3750,12 +3846,74 @@ server <- function(input, output, session) {
                           t = if (is.null(chart_title)) 10 else 40))
       )
     }
-    # Current mode. Three altitudes, switchable live (no re-Generate):
-    #   shortlist - top 10% by expectancy among names with win% > 50 (decision view)
-    #   all       - every BUY (chart caps at 60 bars; table has everything)
-    #   cluster   - one bar per id: the cohort's median expectancy
-    view <- input$view_valBL
-    if (is.null(view) || !view %in% c("shortlist", "all", "rankall")) view <- "all"
+    # Current mode: the unified View (picks / buys / ladder), switchable live
+    # (no re-Generate) - the live query loaded every ranked ticker, so each
+    # view is a renderer-side subset.
+    uview <- bl_view_resolved("current")
+    if (uview == "picks") {
+      # Live model top picks: within each LONG cluster the live gate currently
+      # trades (a cluster yields BUYs iff cluster_is_tradeable), the top ~5% by
+      # the serving rank - the today analogue of the validated backtest rule.
+      # No realized outcome exists yet, so the bar is the ticker's WALK-FORWARD
+      # rank-bin win rate (the same priced evidence the shortlist uses),
+      # centered at 50 = coin flip. Green = the gate also marks it BUY today;
+      # grey = in the top slice but the per-ticker gate holds off (the honest
+      # rule-vs-gate disagreement).
+      d <- df[!is.na(df$id) & df$id <= 12, , drop = FALSE]
+      tradeable <- unique(d$id[d$global_action == "BUY"])
+      d <- d[d$id %in% tradeable, , drop = FALSE]
+      if (nrow(d) == 0) return(empty_plot(
+        "No long cluster is trust-gated right now - nothing the rule would pick."))
+      d <- do.call(rbind, lapply(split(d, d$id), function(g) {
+        g <- g[order(g$agg_rank), ]
+        head(g, max(1L, ceiling(0.05 * nrow(g))))
+      }))
+      d <- d[order(d$id, d$agg_rank), ]
+      d$pick_rank <- as.integer(stats::ave(d$agg_rank, d$id, FUN = seq_along))
+      set_sel_statsBL(d$bin_win_pct, "avg rank-bin win rate (%)")
+      set_chart_rowsBL(nrow(d))
+      d$ylab <- sprintf("id%d r%d | %s", d$id, d$pick_rank, d$ticker)
+      d$edge <- ifelse(!is.na(d$bin_win_pct) & !is.na(d$bin_n) & d$bin_n >= 100,
+                       d$bin_win_pct - 50, 0)
+      is_buy <- d$global_action == "BUY"
+      d$hover <- sprintf(
+        "%s (id %d, pick r%d)<br>live action %s | serving rank %d<br>wf bin %s | bin win %s | expectancy %s",
+        d$ticker, d$id, d$pick_rank, d$global_action, d$agg_rank,
+        ifelse(is.na(d$rank_bin), "n/a", as.character(as.integer(d$rank_bin))),
+        ifelse(is.na(d$bin_win_pct) | is.na(d$bin_n) | d$bin_n < 100, "n/a",
+               sprintf("%.1f%%", d$bin_win_pct)),
+        ifelse(is.na(d$wtd_expectancy), "n/a", sprintf("%.3f", d$wtd_expectancy)))
+      bar_col <- ifelse(is_buy, "#10b981", "#64748b")
+      chart_text <- sprintf(
+        "Model's top ~5%% of each trust-gated cluster: %d picks across %d clusters (bar = wf rank-bin win rate vs 50%%; green = live BUY, grey = gate holds)",
+        nrow(d), length(unique(d$id)))
+      return(
+        plot_ly(d, x = ~edge, y = ~ylab, type = "bar", orientation = "h",
+                marker = list(color = bar_col), customdata = ~hover,
+                hovertemplate = "%{customdata}<extra></extra>") %>%
+          layout(
+            paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+            showlegend = FALSE,
+            title = list(text = chart_text, font = list(color = "#94a3b8", size = 12)),
+            shapes = c(
+              list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
+                        line = list(color = "rgba(255,255,255,0.4)"))),
+              rank_sep_shapes(d$id)),
+            xaxis = list(title = "Walk-forward rank-bin win rate over 50% (pp)",
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+            yaxis = list(title = "", type = "category",
+                         categoryorder = "array", categoryarray = rev(d$ylab),
+                         range = c(-0.5, nrow(d) - 0.5),
+                         tickfont = list(size = 9),
+                         color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
+            margin = list(l = 130, r = 30, b = 50, t = 40))
+      )
+    }
+    # BUY and ladder reuse the existing renderer branches:
+    #   buys + shortlist toggle on  -> "shortlist"; off -> "all"
+    #   ladder                      -> "rankall"
+    view <- if (uview == "ladder") "rankall"
+            else if (isTRUE(input$buys_shortlistBL)) "shortlist" else "all"
 
     if (view == "rankall") {
       # Every ranked ticker per id - BUY gate and evidence filters ignored.
@@ -3867,7 +4025,8 @@ server <- function(input, output, session) {
       df <- df[keep, , drop = FALSE]
     }
     if (nrow(df) == 0) return(empty_plot(
-      "Nothing to chart - check the Regular/Sparse toggles and filters."))
+      if (view == "all") "No BUYs match the Regular/Sparse toggles and filters."
+      else "No BUY tickers right now."))
 
     if (view == "shortlist") {
       # decision view = rank bins that actually win: the cluster's ranks cut
@@ -4103,8 +4262,51 @@ server <- function(input, output, session) {
                             color = DT::styleEqual(names(DELIST_CLASSES),
                                                    unname(DELIST_CLASSES))))
     }
-    view <- input$view_valBL
-    if (is.null(view) || !view %in% c("shortlist", "all", "rankall")) view <- "all"
+    uview <- bl_view_resolved("current")
+    if (uview == "picks") {
+      # Same top-~5%-per-trust-gated-cluster subset as the chart, as a table:
+      # the names the validated rule would pick TODAY, with each one's live
+      # gate action so the rule-vs-gate agreement is visible per row.
+      d <- df[!is.na(df$id) & df$id <= 12, , drop = FALSE]
+      tradeable <- unique(d$id[d$global_action == "BUY"])
+      d <- d[d$id %in% tradeable, , drop = FALSE]
+      if (nrow(d) == 0) return(DT::datatable(
+        data.frame(Note = "No long cluster is trust-gated right now."),
+        selection = "none", rownames = FALSE, class = "compact",
+        options = list(dom = "t", ordering = FALSE)))
+      d <- do.call(rbind, lapply(split(d, d$id), function(g) {
+        g <- g[order(g$agg_rank), ]
+        head(g, max(1L, ceiling(0.05 * nrow(g))))
+      }))
+      d <- d[order(d$id, d$agg_rank), ]
+      d$pick_rank <- as.integer(stats::ave(d$agg_rank, d$id, FUN = seq_along))
+      bin_win_shown <- ifelse(!is.na(d$bin_n) & d$bin_n >= 100, d$bin_win_pct, NA)
+      display <- data.frame(
+        Ticker          = d$ticker,
+        Id              = d$id,
+        `Pick rank`     = d$pick_rank,
+        `Live action`   = d$global_action,
+        `Serving rank`  = d$agg_rank,
+        `Bin`           = as.integer(d$rank_bin),
+        `Bin win %`     = bin_win_shown,
+        `Expectancy`    = d$wtd_expectancy,
+        `Cluster IC(12)` = d$cluster_ic_12,
+        check.names = FALSE, stringsAsFactors = FALSE
+      )
+      return(DT::datatable(
+        display, selection = "none", rownames = FALSE, class = "compact",
+        extensions = "Buttons",
+        options = list(
+          pageLength = 25, lengthMenu = c(10, 25, 50, 100),
+          dom = "Bftip", buttons = c("copy", "csv"),
+          columnDefs = list(list(className = "dt-right", targets = 4:8))
+        )
+      ) %>% DT::formatStyle("Live action",
+              color = DT::styleEqual(c("BUY", "SELL", "SKIP"),
+                                     c("#10b981", "#dc2626", "#94a3b8"))))
+    }
+    view <- if (uview == "ladder") "rankall"
+            else if (isTRUE(input$buys_shortlistBL)) "shortlist" else "all"
 
     if (view == "rankall") {
       df <- df[order(df$id, df$agg_rank), ]
