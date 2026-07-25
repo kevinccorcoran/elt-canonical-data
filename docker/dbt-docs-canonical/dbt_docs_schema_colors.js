@@ -83,7 +83,7 @@
     var box = document.createElement("div");
     box.id = "schema-color-legend";
     box.style.cssText =
-      "position:fixed;right:12px;bottom:12px;z-index:99999;" +
+      "position:fixed;right:12px;top:12px;z-index:99999;" +
       "background:rgba(255,255,255,0.96);border:1px solid #ccc;border-radius:6px;" +
       "padding:8px 10px;font:11px/1.4 Helvetica,Arial,sans-serif;color:#222;" +
       "box-shadow:0 1px 4px rgba(0,0,0,0.25);max-height:45vh;overflow:auto;";

@@ -32,7 +32,7 @@ The end-to-end flow grouped by stage, each box labeled with the database schema 
 From raw ingestion to the standardized, deduplicated tables that serve as the single source of truth for every downstream model.
 
 ### ELT — Forecasting & Signals
-![ELT Inference Lineage](tools/inference_lineage_graph.jpg)
+![ELT Inference Lineage](tools/inference_lineage_graph.jpg?v=2)
 
 Statistical forecasting and signal-generation tables that sit on top of the canonical layer.
 
