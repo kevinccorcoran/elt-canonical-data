@@ -12,7 +12,7 @@ AlphaStream is organized into three repositories:
 
 - **`elt-canonical-data`** (this repo, public) — the data layer. Ingestion, raw storage, cleaned canonical tables, and shared infrastructure and documentation.
 - **`inference-models`** (private) — the modeling layer: unsupervised clustering, statistical scoring, walk-forward validation, and serving tables that sit on top of the canonical tables.
-- **`qualstream`** (private, not yet integrated, ETA mid-August 2026) — a standalone agent that grades each group member qualitatively using an LLM with web research, refreshed every 3 months.
+- **`qualstream`** (private, not yet integrated, ETA mid-August 2026) — a standalone agent that grades each group member qualitatively via the Claude API with Anthropic's web-search tool, refreshed every 3 months.
 
 ## Environments
 
