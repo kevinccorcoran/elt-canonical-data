@@ -123,6 +123,9 @@ Supports:
 - Added quality gates that screen out unreliable data before training
 - Focused forecasts on the rank ranges with proven out-of-sample edge
 - Automated monthly retraining and walk-forward validation
+- Added a live out-of-sample log that grades every published pick against the benchmark
+- Built a backtest replay that scores each pick, flagging beats, laggards, and delistings
+- Added a forecast view that stands at any past date and tracks real picks forward against the benchmark
 
 ---
 
