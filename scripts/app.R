@@ -576,7 +576,7 @@ per_strat AS (SELECT s, id, vdate, 100*(value/NULLIF(invested,0)-1) AS ret FROM 
 SELECT ps.vdate::text AS vdate, ps.id::int AS id, ROUND(AVG(ps.ret)::numeric,2) AS ret_pct
 FROM per_strat ps GROUP BY ps.id, ps.vdate ORDER BY ps.id, ps.vdate;"
 
-# Live ledger vs SPY on the ledger's OWN clock: daily cumulative return of the
+# Live ledger vs Benchmark on the ledger's OWN clock: daily cumulative return of the
 # inception BUY basket (equal-weight, split-safe current-series entry) and the
 # same-day SPY, both rebased to 0 at 2026-06-15. Fast (~0.1s). This is the fair
 # out-of-sample view - the ledger is 6 weeks old and cannot share the 2-year
@@ -1007,6 +1007,9 @@ ui <- navbarPage(
         ),
         actionButton("todayBtnBL", "Set current date",
                      class = "btn-primary", style = "margin-bottom: 0.75rem;"),
+        selectInput("wf_cutoffBL", "Jump to a backtest cutoff",
+                    choices = c("Connect first..." = "")),
+        uiOutput("wf_resolvedBL"),
         tags$p(paste("Latest date = live data; dates since 2026-06-16 replay the",
                      "recorded ledger; earlier dates replay the walk-forward",
                      "BACKTEST at the nearest quarterly cutoff. Same three views",
@@ -1056,9 +1059,12 @@ ui <- navbarPage(
       # both are post-load refinements (reactive on the loaded data, no
       # re-Generate needed), so they follow the button, not precede it.
       tagList(
-        selectInput("flt_id_valBL", "Cluster id filter",
-                    choices = c("All" = "ALL", setNames(1:19, 1:19)),
-                    selected = "ALL"),
+        checkboxGroupInput("idsBL", "Cluster id filter (all on; uncheck to narrow)",
+                           choices = NULL, inline = TRUE),
+        div(style = "margin-top:-0.3rem; margin-bottom:0.5rem;",
+          actionButton("idsAllBL", "Select all", style = "padding:2px 10px; font-size:0.72rem; margin-right:0.35rem;"),
+          actionButton("idsNoneBL", "Deselect all", style = "padding:2px 10px; font-size:0.72rem;"),
+          tags$span("Generate to load ids.", style = "color:#64748b; font-size:0.7rem; margin-left:0.4rem;")),
         sliderInput("flt_rank_rangeBL", "Rank range (within cluster)",
                     min = 1, max = 600, value = c(1, 600), step = 1)
       )),
@@ -1084,6 +1090,9 @@ ui <- navbarPage(
           selectInput("asof_yearFC", NULL, choices = c("Connect first..." = ""), selected = "")),
         actionButton("asofRecentFC", "12 months ago", class = "btn-primary",
                      style = "margin-bottom: 0.5rem; padding:3px 10px; font-size:0.72rem;"),
+        selectInput("cutoffFC", "Jump to a backtest cutoff",
+                    choices = c("Connect first..." = "")),
+        uiOutput("cutoffResolvedFC"),
         selectInput("holdFC", "Hold length (model horizons)",
                     choices = c("4 months" = "4", "7 months" = "7", "12 months" = "12",
                                 "20 months" = "20", "33 months" = "33", "To today" = "240"),
@@ -3073,6 +3082,7 @@ server <- function(input, output, session) {
   app_modeBL <- reactiveVal("current")   # "current", "ledger" (as-of replay), or "wf" (backtest replay)
   ledger_boundsBL <- reactiveVal(NULL)   # c(min_date, max_date) of prediction_ledger
   wf_minBL <- reactiveVal(NULL)          # earliest walk-forward train cutoff
+  wf_cutoffsBL <- reactiveVal(NULL)      # all distinct backtest cutoffs (desc) for the bundle picker
   status_msgBL <- reactiveVal("Ready")
   output$statusMessageBL <- renderText({ status_msgBL() })
   setup_env_switcher(input, session, "BL")
@@ -3098,6 +3108,20 @@ server <- function(input, output, session) {
     updateSelectInput(session, "asof_yearBL",  selected = format(date, "%Y"))
     updateSelectInput(session, "asof_monthBL", selected = as.integer(format(date, "%m")))
     updateSelectInput(session, "asof_dayBL",   selected = as.integer(format(date, "%d")))
+  }
+
+  # A backtest date bundles: every date in [cutoff, next_cutoff) resolves to the
+  # SAME cutoff (MAX cutoff <= date), so the picker offers one entry PER cutoff
+  # instead of raw days that mostly no-op. Quarter label from the cutoff month.
+  bl_qtr <- function(d) paste0("Q", (as.integer(format(d, "%m")) + 2) %/% 3, " ", format(d, "%Y"))
+  bl_cutoff_choices <- function(cuts) {
+    if (length(cuts) == 0) return(character(0))
+    cuts <- sort(cuts, decreasing = TRUE)
+    labs <- vapply(seq_along(cuts), function(i) {
+      base <- sprintf("%s  (%s)", format(cuts[i], "%Y-%m-%d"), bl_qtr(cuts[i]))
+      if (i == 1) paste0(base, "  - and all later dates") else base
+    }, character(1))
+    setNames(as.character(cuts), labs)
   }
 
   # ── Delisting metadata display (raw.ticker_metadata) ──
@@ -3238,8 +3262,8 @@ server <- function(input, output, session) {
           "prior quarters. No future information decides eligibility, so ",
           "this is an honest as-of reconstruction; it is NOT the live BUY ",
           "gate (which did not exist then and pools evidence across all ",
-          "years). Each bar = how the pick REALLY did vs SPY over the next ",
-          "12 months, from actual adjusted prices: green beat SPY, red ",
+          "years). Each bar = how the pick REALLY did vs Benchmark over the next ",
+          "12 months, from actual adjusted prices: green beat the Benchmark, red ",
           "lagged, grey = no tradable price window. Cluster identity is ",
           "membership-chained across quarters (labels can swap between ",
           "physical clusters; trust follows the members, not the label). ",
@@ -3247,7 +3271,7 @@ server <- function(input, output, session) {
           "the company no longer trades; its color = HOW it left (green ",
           "acquired/private, red bankrupt/failed, amber SPAC/rename, ",
           "burnt-orange uncategorized). The chips above are this date's ",
-          "scorecard: % positive = share of picks that beat SPY."))
+          "scorecard: % positive = share of picks that beat the Benchmark."))
     } else if (mode == "wf") {
       tagList(
         h4("Backtest replay", style = h_style),
@@ -3257,10 +3281,10 @@ server <- function(input, output, session) {
           "cutoff: every ranked ticker per cluster (ids 13+ = short side), ",
           "in the model's own ",
           "order (r1 at the top of each cluster block = its top pick). ",
-          "Each bar = how that pick REALLY did vs SPY over the replay horizon ",
+          "Each bar = how that pick REALLY did vs Benchmark over the replay horizon ",
           "(sidebar, default 12 months), from actual adjusted prices (first ",
           "close after the cutoff to the last close within the horizon): green ",
-          "beat SPY, red lagged, grey = no tradable price window. Ranking and ",
+          "beat the Benchmark, red lagged, grey = no tradable price window. Ranking and ",
           "grading window switch together with the horizon. If the model works, ",
           "green concentrates near each block's r1. A dot at the bar tip = the ",
           "company no longer trades; its color = HOW it left: green acquired/",
@@ -3275,7 +3299,7 @@ server <- function(input, output, session) {
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the BUY calls the live system actually logged on the selected date, ",
           "graded to the latest close. Each bar = one ticker's return since entry ",
-          "relative to SPY. Green beat SPY, red lagged it. A dot = delisted since ",
+          "relative to the Benchmark. Green beat it, red lagged it. A dot = delisted since ",
           "entry; dot color = why (green acquired/private, red bankrupt/failed, ",
           "amber SPAC/rename, burnt-orange uncategorized - hover it or see the ",
           "table's Delisted column); its 'latest close' is the final traded ",
@@ -3316,7 +3340,7 @@ server <- function(input, output, session) {
             "tickers the model currently marks BUY. Order = win likelihood: each ",
             "ticker's bin = its slot in the latest WALK-FORWARD ranking (20 bins ",
             "of 5%; same ranking the bin win rates were measured on), and rows ",
-            "sort by their bin's realized win rate vs SPY (most winners on top; ",
+            "sort by their bin's realized win rate vs Benchmark (most winners on top; ",
             "bars still show expectancy = mean holdout trade return). Tickers the ",
             "walk-forward has no scored evidence for show 'no evidence' and sink ",
             "below the graded BUYs. The Shortlist toggle keeps only rank bins ",
@@ -3340,15 +3364,17 @@ server <- function(input, output, session) {
       bounds <- dbGetQuery(con, "
         SELECT MIN(prediction_date) AS min_d, MAX(prediction_date) AS max_d
         FROM monitoring.prediction_ledger")
-      wf_min <- dbGetQuery(con, "
-        SELECT MIN(r.train_cutoff_date) AS d
-        FROM validation.walk_forward_ticker_rank r
-        WHERE r.fut_lag = 12
-          AND EXISTS (SELECT 1 FROM validation.walk_forward_cluster_id_map m
-                      WHERE m.train_cutoff_date = r.train_cutoff_date)")$d[1]
+      wf_cuts <- as.Date(dbGetQuery(con, "
+        SELECT DISTINCT train_cutoff_date AS d
+        FROM validation.walk_forward_top_picks
+        ORDER BY train_cutoff_date DESC")$d)
+      wf_min <- if (length(wf_cuts)) min(wf_cuts) else as.Date(NA)
       if (!is.na(bounds$min_d[1])) {
         ledger_boundsBL(c(bounds$min_d[1], bounds$max_d[1]))
         wf_minBL(wf_min)
+        wf_cutoffsBL(wf_cuts)
+        updateSelectInput(session, "wf_cutoffBL",
+                          choices = c("Pick a cutoff..." = "", bl_cutoff_choices(wf_cuts)))
         yr_lo <- as.integer(format(if (!is.na(wf_min)) wf_min else bounds$min_d[1], "%Y"))
         yr_hi <- as.integer(format(bounds$max_d[1], "%Y"))
         updateSelectInput(session, "asof_yearBL", choices = seq(yr_hi, yr_lo),
@@ -3365,6 +3391,36 @@ server <- function(input, output, session) {
     if (is.null(b)) { status_msgBL("Connect first to load the date range."); return() }
     set_asof_dropdowns(session, b[2])
     status_msgBL(sprintf("As-of date set to latest snapshot (%s).", b[2]))
+  })
+
+  # Bundle picker -> set the date to the chosen cutoff (one-way; the readout
+  # below reflects where any manually-typed date lands). A date change already
+  # auto-reloads, so picking a cutoff loads that bundle immediately.
+  observeEvent(input$wf_cutoffBL, {
+    v <- input$wf_cutoffBL
+    if (is.null(v) || !nzchar(v)) return()
+    set_asof_dropdowns(session, as.Date(v))
+  }, ignoreInit = TRUE)
+
+  # Show where the current as-of date actually resolves: which backtest cutoff
+  # it bundles into (so 2025+ dates visibly collapse onto 2024-12-31), or that
+  # it is a live/ledger day where every date is distinct.
+  output$wf_resolvedBL <- renderUI({
+    d <- asof_dateBL(); cuts <- wf_cutoffsBL()
+    if (is.null(d) || is.na(d) || is.null(cuts) || length(cuts) == 0) return(NULL)
+    lb <- ledger_boundsBL()
+    ledger_start <- if (!is.null(lb)) as.Date(lb[1]) else as.Date("2026-06-16")
+    sty <- "color:#64748b; font-size:0.7rem; margin:-0.4rem 0 0.75rem;"
+    if (d >= ledger_start)
+      return(tags$p("Live / ledger date - daily, not bundled.", style = sty))
+    elig <- cuts[cuts <= d]
+    if (length(elig) == 0)
+      return(tags$p(sprintf("Before the first cutoff (%s) - no backtest picks here.",
+                            format(min(cuts), "%Y-%m-%d")), style = sty))
+    rc <- max(elig)
+    note <- if (rc == max(cuts) && d > max(cuts)) " (no newer cutoff yet)" else ""
+    tags$p(sprintf("Resolves to backtest cutoff %s%s.", format(rc, "%Y-%m-%d"), note),
+           style = sty)
   })
 
   # Buy List refresh trigger. Bumped by the Generate button AND by any as-of
@@ -3531,7 +3587,7 @@ server <- function(input, output, session) {
         -- after the cutoff -> last bar within 12 months, minus SPY over the
         -- same window. The model's forward_return column is a holdout LABEL
         -- statistic (smoothed basis, pre-cutoff anchors) - it graded BRO -30
-        -- in a year it beat SPY by 9pts; never chart it as a trade outcome.
+        -- in a year it beat the Benchmark by 9pts; never chart it as a trade outcome.
         SELECT r.train_cutoff_date, m.id, r.ticker, r.rank_within_cluster,
                r.cluster_size,
                ROUND(r.ticker_score::numeric, 4)   AS ticker_score,
@@ -3857,14 +3913,23 @@ server <- function(input, output, session) {
     })
   })
 
+  # ids present in the currently-loaded data (checkbox choices); empty OR every
+  # box checked = "all ids", no filter (mirrors the Forecast idsFC semantics).
+  avail_idsBL <- reactiveVal(NULL)
+  bl_ids_all_on <- function() {
+    ids_sel <- suppressWarnings(as.integer(input$idsBL))
+    av <- avail_idsBL()
+    length(ids_sel) == 0 || (!is.null(av) && setequal(ids_sel, av))
+  }
+
   # Shared id/rank filter, applied identically by chart + table (live, no
   # re-Generate). id filter: wf replay + current mode (ledger rows carry no
   # id). rank range: keep ranks in [lo, hi] on rank_within_cluster (wf) /
   # agg_rank (current) - e.g. 5-20 = skip the head, take the mid-block.
   bl_apply_filters <- function(df) {
-    idv <- input$flt_id_valBL
-    if (!is.null(idv) && !idv %in% c("", "ALL") && "id" %in% names(df))
-      df <- df[!is.na(df$id) & df$id == as.integer(idv), , drop = FALSE]
+    ids_sel <- suppressWarnings(as.integer(input$idsBL))
+    if (!bl_ids_all_on() && "id" %in% names(df))
+      df <- df[!is.na(df$id) & df$id %in% ids_sel, , drop = FALSE]
     rr <- input$flt_rank_rangeBL
     if (!is.null(rr) && length(rr) == 2) {
       col <- if ("rank_within_cluster" %in% names(df)) "rank_within_cluster"
@@ -3908,36 +3973,47 @@ server <- function(input, output, session) {
   # slider itself, or user narrowing would instantly snap back. Ledger rows
   # carry no rank column, so the slider is left alone there (the filter
   # no-ops anyway).
-  observeEvent(list(input$flt_id_valBL, app_dataBL()), {
+  observeEvent(list(input$idsBL, app_dataBL()), {
     df <- app_dataBL()
     if (is.null(df) || nrow(df) == 0) return()
     col <- if ("rank_within_cluster" %in% names(df)) "rank_within_cluster"
            else if ("agg_rank" %in% names(df)) "agg_rank" else return()
-    idv <- input$flt_id_valBL
-    if (!is.null(idv) && !idv %in% c("", "ALL") && "id" %in% names(df))
-      df <- df[!is.na(df$id) & df$id == as.integer(idv), , drop = FALSE]
+    ids_sel <- suppressWarnings(as.integer(input$idsBL))
+    if (!bl_ids_all_on() && "id" %in% names(df))
+      df <- df[!is.na(df$id) & df$id %in% ids_sel, , drop = FALSE]
     if (nrow(df) == 0) return()
     mx <- suppressWarnings(max(df[[col]], na.rm = TRUE))
     if (!is.finite(mx) || mx < 1) return()
     updateSliderInput(session, "flt_rank_rangeBL", max = mx, value = c(1, mx))
   })
 
-  # Cluster dropdown mirrors the LOADED data: only ids that actually have
-  # rows, each labeled with its row count, so an all-delisted cluster (id 1
-  # today) can't be selected into a confusing empty chart. A selection that
-  # vanishes falls back to All. Ledger rows carry no id - leave it alone.
+  # Cluster checkboxes mirror the LOADED data: only ids that actually have
+  # rows, so an all-delisted cluster (id 1 today) can't be checked into a
+  # confusing empty chart. Preserve any still-valid current selection; a
+  # selection that vanishes (or first load) falls back to all-on. Ledger rows
+  # carry no id - leave the boxes alone there.
   observeEvent(app_dataBL(), {
     df <- app_dataBL()
     if (is.null(df) || nrow(df) == 0 || !"id" %in% names(df)) return()
-    tab <- table(df$id)
-    ids <- sort(as.integer(names(tab)))
+    ids <- sort(as.integer(names(table(df$id))))
     if (length(ids) == 0) return()
-    labs <- sprintf("%d  (%d rows)", ids, as.integer(tab[as.character(ids)]))
-    sel <- isolate(input$flt_id_valBL)
-    if (is.null(sel) || !(sel %in% c("ALL", as.character(ids)))) sel <- "ALL"
-    updateSelectInput(session, "flt_id_valBL",
-                      choices = c("All" = "ALL", setNames(as.character(ids), labs)),
-                      selected = sel)
+    avail_idsBL(ids)
+    prev <- suppressWarnings(as.integer(isolate(input$idsBL)))
+    keep <- prev[!is.na(prev) & prev %in% ids]
+    sel  <- if (length(keep) == 0) ids else keep     # default / vanished => all on
+    updateCheckboxGroupInput(session, "idsBL", choices = ids, selected = sel, inline = TRUE)
+  })
+
+  # Select all / Deselect all, mirroring the Forecast tab's id checkboxes.
+  observeEvent(input$idsAllBL, {
+    req(avail_idsBL())
+    updateCheckboxGroupInput(session, "idsBL", choices = avail_idsBL(),
+                             selected = avail_idsBL(), inline = TRUE)
+  })
+  observeEvent(input$idsNoneBL, {
+    req(avail_idsBL())
+    updateCheckboxGroupInput(session, "idsBL", choices = avail_idsBL(),
+                             selected = character(0), inline = TRUE)
   })
 
   # Selection stats: mean/median of the metric over ALL graded rows in the
@@ -3975,8 +4051,8 @@ server <- function(input, output, session) {
     df <- bl_apply_filters(app_dataBL())
     if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
     if (app_modeBL() %in% c("wf", "ledger")) {
-      # Replay modes: one bar per pick, sorted by realized excess vs SPY.
-      # Green = beat SPY, red = lagged it. Reads top-to-bottom: best to worst.
+      # Replay modes: one bar per pick, sorted by realized excess vs Benchmark.
+      # Green = beat the Benchmark, red = lagged it. Reads top-to-bottom: best to worst.
       trunc_note <- NULL   # set when the horizon outruns the price data
       if (app_modeBL() == "wf") {
         hz <- if ("horizon" %in% names(df)) df$horizon[1] else 12L
@@ -3992,7 +4068,7 @@ server <- function(input, output, session) {
               floor(as.numeric(difftime(mm, co, units = "days")) / 30.44), hz)
         }
         df$hover <- sprintf(
-          "%s (id %d)<br>cutoff %s | rank %d of %d | score %.4f<br>realized %dmo excess vs SPY %+.1f%%",
+          "%s (id %d)<br>cutoff %s | rank %d of %d | score %.4f<br>realized %dmo excess vs Benchmark %+.1f%%",
           df$ticker, df$id, df$train_cutoff_date,
           df$rank_within_cluster, df$cluster_size,
           ifelse(is.na(df$ticker_score), 0, df$ticker_score),
@@ -4027,9 +4103,9 @@ server <- function(input, output, session) {
       # graded row in the current mode/id/rank selection
       set_sel_statsBL(
         df$excess,
-        if (app_modeBL() != "wf") "avg excess vs SPY since entry (pp)"
-        else if (is.null(trunc_note)) sprintf("avg %dmo excess vs SPY (pp)", hz)
-        else sprintf("avg excess vs SPY so far (pp; %s)", trunc_note))
+        if (app_modeBL() != "wf") "avg excess vs Benchmark since entry (pp)"
+        else if (is.null(trunc_note)) sprintf("avg %dmo excess vs Benchmark (pp)", hz)
+        else sprintf("avg excess vs Benchmark so far (pp; %s)", trunc_note))
       # Replay shows the PREDICTION as it stood: always grouped by cluster
       # then model rank (r1 = top pick), bar = realized outcome. Sorting by
       # outcome read as a results chart (the model ranked LXP 508/548 yet it
@@ -4042,7 +4118,7 @@ server <- function(input, output, session) {
                          identical(df$view_kind[1], "picks"))
           "Trust-gated top picks" else "Prediction order"
         chart_title <- list(
-          text = sprintf("%s: %d ranked picks (r1 = model's top pick; bar = realized %dmo vs SPY)", head_word, nrow(df), hz),
+          text = sprintf("%s: %d ranked picks (r1 = model's top pick; bar = realized %dmo vs Benchmark)", head_word, nrow(df), hz),
           font = list(color = "#94a3b8", size = 12))
         if (nrow(df) > 180) {
           n_total <- nrow(df)
@@ -4055,7 +4131,7 @@ server <- function(input, output, session) {
         # right, so flag it or green reads as a win
         if (all(df$id > 12L))
           chart_title$text <- paste0(chart_title$text,
-            " | SHORT-side cluster: model expected these to LAG SPY")
+            " | SHORT-side cluster: model expected these to LAG the Benchmark")
         if (!is.null(trunc_note))
           chart_title$text <- paste0(chart_title$text,
             " | horizon outruns data: ", trunc_note)
@@ -4488,8 +4564,8 @@ server <- function(input, output, session) {
       hz_cut <- "market_max" %in% names(df) &&
         !is.na(hz_end) && hz_end > as.Date(df$market_max[1])
       names(display)[names(display) == "excess"] <-
-        if (hz_cut) sprintf("excess vs SPY %% so far (of %dmo)", hz)
-        else sprintf("%dmo excess vs SPY %%", hz)
+        if (hz_cut) sprintf("excess vs Benchmark %% so far (of %dmo)", hz)
+        else sprintf("%dmo excess vs Benchmark %%", hz)
       return(DT::datatable(
         display,
         selection = "none",
@@ -4523,7 +4599,7 @@ server <- function(input, output, session) {
         `Entry close`   = df$entry_adj_close,
         `Latest close`  = df$latest_close,
         `Ret %`         = df$ret_since_pct,
-        `vs SPY %`      = df$excess_vs_spy_pct,
+        `vs Benchmark %`      = df$excess_vs_spy_pct,
         `Buy weight`    = df$buy_weight,
         `Buy votes`     = as.integer(df$buy_votes),
         `Agg rank`      = as.integer(df$best_agg_rank),
@@ -4767,6 +4843,9 @@ server <- function(input, output, session) {
       cim <- dbGetQuery(con, "SELECT DISTINCT train_cutoff_date AS cutoff, id FROM validation.walk_forward_top_picks ORDER BY 1, 2")
       cim$cutoff <- as.Date(cim$cutoff); cim$id <- as.integer(cim$id)
       cut_ids_mapFC(cim)
+      updateSelectInput(session, "cutoffFC",
+                        choices = c("Pick a cutoff..." = "",
+                                    bl_cutoff_choices(sort(unique(cim$cutoff), decreasing = TRUE))))
       yr_lo <- as.integer(format(min(cim$cutoff), "%Y")); yr_hi <- as.integer(format(Sys.Date(), "%Y"))
       updateSelectInput(session, "asof_yearFC", choices = seq(yr_hi, yr_lo))
       def <- Sys.Date() - 365                              # default: ~12 months ago
@@ -4793,6 +4872,27 @@ server <- function(input, output, session) {
     if (!is.null(cut_ids_mapFC())) fc_refresh_ids()
   }, ignoreInit = TRUE)
   observeEvent(input$asofRecentFC, { set_asof_FC(Sys.Date() - 365) })
+
+  # Bundle picker: jump straight to a cutoff (one-way -> date dropdowns; the
+  # asof-change observer above then repopulates the id boxes for that cutoff).
+  observeEvent(input$cutoffFC, {
+    v <- input$cutoffFC
+    if (is.null(v) || !nzchar(v)) return()
+    set_asof_FC(as.Date(v))
+  }, ignoreInit = TRUE)
+
+  output$cutoffResolvedFC <- renderUI({
+    a <- asof_dateFC(); m <- cut_ids_mapFC()
+    if (is.null(a) || is.na(a) || is.null(m) || nrow(m) == 0) return(NULL)
+    cuts <- sort(unique(m$cutoff), decreasing = TRUE)
+    elig <- cuts[cuts <= a]
+    sty <- "color:#64748b; font-size:0.7rem; margin:-0.2rem 0 0.6rem;"
+    if (length(elig) == 0)
+      return(tags$p(sprintf("Before the first cutoff (%s).", format(min(cuts), "%Y-%m-%d")), style = sty))
+    rc <- max(elig)
+    note <- if (rc == max(cuts) && a > max(cuts)) " (no newer cutoff yet)" else ""
+    tags$p(sprintf("Selections as of backtest cutoff %s%s.", format(rc, "%Y-%m-%d"), note), style = sty)
+  })
 
   observeEvent(input$execute_FC, {
     if (input$db_passFC == "") { status_msgFC("Error: Password is not set."); return() }
