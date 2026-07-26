@@ -2,16 +2,17 @@
 
 ![Architecture Diagram](tools/alphastream_system_architecture.png?v=4)
 
-AlphaStream is an end-to-end data and machine-learning platform. It ingests time-series data, cleans and standardizes it, then applies unsupervised clustering and statistical forecasting to produce signals, with an interactive dashboard on top.
+AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans and standardizes it, then applies unsupervised clustering (Gaussian mixture models) and statistical scoring to rank groups, validated by walk-forward backtesting with no lookahead and trailing trust gates. An interactive dashboard sits on top.
 
 Walk-forward backtesting shows 61.2% sign agreement across 643,466 cells (June 2026).
 
 ## Repositories
 
-AlphaStream is split into two repositories:
+AlphaStream is organized into three repositories:
 
 - **`elt-canonical-data`** (this repo, public) — the data layer. Ingestion, raw storage, cleaned canonical tables, and shared infrastructure and documentation.
-- **`inference-models`** (private) — the forecasting and signal-generation layer that sits on top of the canonical tables.
+- **`inference-models`** (private) — the modeling layer: unsupervised clustering, statistical scoring, walk-forward validation, and serving tables that sit on top of the canonical tables.
+- **`qualstream`** (private, not yet integrated, ETA mid-August 2026) — a standalone weekly agent that produces a qualitative grade for each group member using an LLM with web research, written to a shared `qual` table in Postgres. The inference layer will read it to surface consensus selections, where the statistical grade and the qualitative grade agree. Intentionally decoupled: the only integration point is the shared Postgres.
 
 ## Environments
 
@@ -22,7 +23,7 @@ AlphaStream is split into two repositories:
 
 ![Pipeline](tools/pipeline_grouped.png?v=2)
 
-The end-to-end flow grouped by stage, each box labeled with the database schema it lands in. Data is pulled in, screened for quality, and standardized into a canonical layer, then split into return features and clusters (unsupervised machine learning) that feed a scoring model, which walk-forward backtesting validates before the dashboard serves it. The machine-learning stages are flagged in the diagram.
+The end-to-end flow grouped by stage, each box labeled with the database schema it lands in. Data is pulled in, screened for quality, and standardized into a canonical layer, then split into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, which walk-forward backtesting validates (no lookahead) before it reaches the serving tables the dashboard reads. The machine-learning stages are flagged in the diagram.
 
 ## Data Lineage
 
@@ -31,16 +32,18 @@ The end-to-end flow grouped by stage, each box labeled with the database schema 
 
 From raw ingestion to the standardized, deduplicated tables that serve as the single source of truth for every downstream model.
 
-### ELT — Forecasting & Signals
+### ELT — Modeling & Scoring
 ![ELT Inference Lineage](tools/inference_lineage_graph.jpg?v=2)
 
-Statistical forecasting and signal-generation tables that sit on top of the canonical layer.
+Unsupervised clustering, statistical scoring, and walk-forward validation tables that sit on top of the canonical layer.
 
 ## Interactive Analytics Dashboard
 
 ![Dashboard](tools/alpha_forecast.jpg?v=2)
 
 Visualizes cohorts that share similar attributes across lag time horizons spanning up to 60 years.
+
+The dashboard is an interactive R/Shiny app for exploring the model's outputs against real outcomes. You can stand at any point in the past and see which groups the model ranked highest at that time, using only information available then, and how those selections actually performed over the following window against a benchmark. It also shows the current live selections and tracks a running log of past selections forward in real prices.
 
 Supports:
 - Side-by-side comparison of past and future distributions across groups.
