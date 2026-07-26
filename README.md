@@ -119,13 +119,10 @@ Supports:
 - Added 300% data coverage, removing survivorship bias
 
 **2026 Q3 — Reliability & Data Quality**
-- Restructured the database into clean, stage-named schemas
-- Added quality gates that screen out unreliable data before training
-- Focused forecasts on the rank ranges with proven out-of-sample edge
-- Automated monthly retraining and walk-forward validation
-- Added a live out-of-sample log that grades every published pick against the benchmark
-- Built a backtest replay that scores each pick, flagging beats, laggards, and delistings
 - Added a forecast view that stands at any past date and tracks real picks forward against the benchmark
+- Built a backtest replay that scores each pick, flagging beats, laggards, and delistings
+- Added a live log that grades every published pick against the benchmark as prices come in
+- Focused forecasts on the rank ranges with proven out-of-sample edge
 
 ---
 
