@@ -119,10 +119,10 @@ Supports:
 - Added 300% data coverage, removing survivorship bias
 
 **2026 Q3 — Reliability & Data Quality**
-- Added a forecast view that stands at any past date and tracks real picks forward against the benchmark
-- Built a backtest replay that scores each pick, flagging beats, laggards, and delistings
-- Added a live log that grades every published pick against the benchmark as prices come in
-- Focused forecasts on the rank ranges with proven out-of-sample edge
+- Added a point-in-time forecast view, tracking real picks forward against the benchmark
+- Built a backtest replay, scoring every pick against the benchmark
+- Added a live out-of-sample log, grading each published pick as prices arrive
+- Gated forecasts to the rank ranges with proven edge
 
 ---
 
