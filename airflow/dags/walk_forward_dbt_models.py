@@ -198,6 +198,25 @@ with DAG(
         execution_timeout=timedelta(minutes=30),
     )
 
+    # 6b. AS-OF membership lineage for the cluster chains (split-orphan fix,
+    #     2026-07-26): a cluster SPLIT orphans one child onto a fresh chain_id,
+    #     starving it of the mature-cohort history its members earned under the
+    #     parent chain, so the top-picks trust gate wrongly fails a strong,
+    #     long-lived cluster. This resolves each chain's as-of predecessor spine
+    #     (member overlap, settled-only) so the trust gate can credit that
+    #     history. Runs AFTER the chain rebuild and BEFORE top_picks, which
+    #     reads walk_forward_chain_ancestry.
+    dbt_bash_ancestry, dbt_env_ancestry = get_inference_dbt_bash_command(
+        runtime_env, "walk_forward_chain_ancestry"
+    )
+    dbt_run_chain_ancestry = BashOperator(
+        task_id="dbt_run_walk_forward_chain_ancestry",
+        bash_command=dbt_bash_ancestry,
+        env=dbt_env_ancestry,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
     # 7. Reconstructed "model's top picks" per cutoff (2026-07-24): the honest
     #    past-date recommendation view - top 10 per cluster at each cutoff,
     #    cluster eligible only on evidence SETTLED by that cutoff (trailing
@@ -255,6 +274,7 @@ with DAG(
     (
         refresh_membership_snapshot
         >> run_cluster_chain
+        >> dbt_run_chain_ancestry
         >> dbt_run_top_picks
         >> capture_top_picks_ledger
     )
