@@ -534,6 +534,48 @@ SELECT ps.vdate::text AS vdate,
 FROM per_strat ps JOIN spy_val sv ON sv.vdate=ps.vdate
 GROUP BY ps.vdate, sv.px ORDER BY ps.vdate;"
 
+# Per-id decomposition: the SAME 6-strategy DCA as the portfolio line, but grouped
+# by cluster id (all ids, no filter) -> one monthly return path per id. Drawn as
+# faint grey dashed lines (one per id, id labelled at the right end) when EVERY id
+# is selected. Same anchor/hold placeholders as the live query. ~0.7s.
+FORECAST_PERID_SQL <- "
+WITH params AS (SELECT DATE '__ANCHOR__' AS start_d),
+cutoffp AS (SELECT MAX(train_cutoff_date) AS cutoff FROM validation.walk_forward_top_picks, params p WHERE train_cutoff_date <= p.start_d),
+maxd AS (SELECT MAX(date) AS md FROM cdm.ingest_combined WHERE ticker='SPY'),
+picks AS (SELECT t.ticker, t.id FROM validation.walk_forward_top_picks t, cutoffp c WHERE t.train_cutoff_date = c.cutoff),
+mons AS (SELECT generate_series(0,11) AS m),
+spy_hist AS (SELECT date, adj_close, adj_close/lag(adj_close) OVER (ORDER BY date) - 1 AS ret,
+               CASE WHEN adj_close >= AVG(adj_close) OVER (ORDER BY date ROWS BETWEEN 199 PRECEDING AND CURRENT ROW) THEN 1 ELSE 0 END AS above200
+             FROM cdm.ingest_combined WHERE ticker='SPY'
+               AND date >= (SELECT start_d FROM params) - INTERVAL '400 days'
+               AND date <= (SELECT start_d FROM params) + INTERVAL '13 months'),
+spy_drops AS (SELECT date FROM (
+      SELECT s.date, ROW_NUMBER() OVER (ORDER BY s.ret ASC) AS rn
+      FROM spy_hist s, params p WHERE s.ret IS NOT NULL AND s.date BETWEEN p.start_d AND (p.start_d + INTERVAL '12 months')) z WHERE rn <= 10),
+month_regime AS (SELECT md.d, (SELECT s.above200 FROM spy_hist s WHERE s.date >= md.d ORDER BY s.date LIMIT 1) AS above
+      FROM (SELECT (p.start_d + (mo.m||' months')::interval)::date AS d FROM params p CROSS JOIN mons mo) md),
+sched AS (
+    SELECT 'A) MONTHLY'::text AS s, pk.id, pk.ticker, (p.start_d + (mo.m||' months')::interval)::date AS d, 10.0 AS amt FROM picks pk CROSS JOIN mons mo, params p
+    UNION ALL SELECT 'B) SPY DIP', pk.id, pk.ticker, (sd.date + 10)::date, 10.0 FROM picks pk CROSS JOIN spy_drops sd
+    UNION ALL SELECT 'C) LUMP', pk.id, pk.ticker, p.start_d, 120.0 FROM picks pk, params p
+    UNION ALL SELECT 'D) FRONT 6MO', pk.id, pk.ticker, (p.start_d + (mo.m||' months')::interval)::date, 20.0 FROM picks pk CROSS JOIN mons mo, params p WHERE mo.m < 6
+    UNION ALL SELECT 'E) QUARTERLY', pk.id, pk.ticker, (p.start_d + (mo.m||' months')::interval)::date, 30.0 FROM picks pk CROSS JOIN mons mo, params p WHERE mo.m % 3 = 0
+    UNION ALL SELECT 'F) MON+200DMA', pk.id, pk.ticker, (p.start_d + (mo.m||' months')::interval)::date, 10.0
+       FROM picks pk CROSS JOIN mons mo, params p
+       WHERE EXISTS (SELECT 1 FROM month_regime mr WHERE mr.d=(p.start_d + (mo.m||' months')::interval)::date AND mr.above=1)),
+buy_prices AS (SELECT bn.ticker, bn.d, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=bn.ticker AND i.date>=bn.d ORDER BY i.date LIMIT 1) AS px FROM (SELECT DISTINCT ticker, d FROM sched) bn),
+priced_buys AS (SELECT sc.s, sc.id, sc.ticker, sc.d AS buy_d, sc.amt, sc.amt/NULLIF(bp.px,0) AS shares FROM sched sc JOIN buy_prices bp ON bp.ticker=sc.ticker AND bp.d=sc.d WHERE bp.px>0),
+vdates AS (SELECT generate_series(p.start_d, LEAST((p.start_d + INTERVAL '__HOLD__ months'), (SELECT md FROM maxd)), INTERVAL '1 month')::date AS d FROM params p),
+val_prices AS (SELECT k.ticker, k.vdate, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=k.ticker AND i.date<=k.vdate ORDER BY i.date DESC LIMIT 1) AS px
+      FROM (SELECT DISTINCT pb.ticker, vd.d AS vdate FROM priced_buys pb CROSS JOIN vdates vd) k),
+holdings AS (SELECT pb.s, pb.id, pb.ticker, vd.d AS vdate, SUM(pb.shares) AS shares, SUM(pb.amt) AS invested
+      FROM priced_buys pb CROSS JOIN vdates vd WHERE pb.buy_d <= vd.d GROUP BY pb.s, pb.id, pb.ticker, vd.d),
+valued AS (SELECT h.s, h.id, h.vdate, SUM(h.shares*vp.px) AS value, SUM(h.invested) AS invested
+      FROM holdings h JOIN val_prices vp ON vp.ticker=h.ticker AND vp.vdate=h.vdate GROUP BY h.s, h.id, h.vdate),
+per_strat AS (SELECT s, id, vdate, 100*(value/NULLIF(invested,0)-1) AS ret FROM valued)
+SELECT ps.vdate::text AS vdate, ps.id::int AS id, ROUND(AVG(ps.ret)::numeric,2) AS ret_pct
+FROM per_strat ps GROUP BY ps.id, ps.vdate ORDER BY ps.id, ps.vdate;"
+
 # Live ledger vs SPY on the ledger's OWN clock: daily cumulative return of the
 # inception BUY basket (equal-weight, split-safe current-series entry) and the
 # same-day SPY, both rebased to 0 at 2026-06-15. Fast (~0.1s). This is the fair
@@ -4809,6 +4851,15 @@ server <- function(input, output, session) {
                   gsub("__IDFILTER__", "", FORECAST_LIVE_SQL, fixed = TRUE), fixed = TRUE), fixed = TRUE))
         bench <- data.frame(vdate = b0$vdate, bench_pct = as.numeric(b0$portfolio_pct), stringsAsFactors = FALSE)
       }
+      # Per-id decomposition (only when every id is selected): one backtest path per
+      # cluster id, drawn as faint grey dashed lines labelled by id in the plot.
+      perid <- NULL
+      if (all_on) {
+        p0 <- tryCatch(dbGetQuery(con, gsub("__ANCHOR__", format(anchor, "%Y-%m-%d"),
+                gsub("__HOLD__", as.character(H), FORECAST_PERID_SQL, fixed = TRUE), fixed = TRUE)),
+              error = function(e) NULL)
+        if (!is.null(p0) && nrow(p0) > 0) { p0$ret_pct <- as.numeric(p0$ret_pct); p0$id <- as.integer(p0$id); perid <- p0 }
+      }
       # risk-adjustment: equal-weight held basket monthly series -> beta / alpha / vol / info-ratio
       risk <- tryCatch({
         rs0 <- dbGetQuery(con, gsub("__ANCHOR__", format(anchor, "%Y-%m-%d"),
@@ -4824,7 +4875,7 @@ server <- function(input, output, session) {
                vol_pf = sd(rb)*sqrt(12)*100, vol_spy = sd(rsp)*sqrt(12)*100, n = length(rb))
         } else NULL
       }, error = function(e) NULL)
-      app_dataFC(list(curve = curve, live = live, bench = bench, all_on = all_on, ledger = ledger,
+      app_dataFC(list(curve = curve, live = live, bench = bench, perid = perid, all_on = all_on, ledger = ledger,
                       ledseries = ledseries, anchor = anchor,
                       id_lbl = id_lbl, hold_months = H, to_today = to_today, market_max = market_max, risk = risk))
       win_lbl <- if (to_today) sprintf("%d mo to today", nrow(live) - 1) else sprintf("%dmo hold", H)
@@ -4903,14 +4954,32 @@ server <- function(input, output, session) {
     pend  <- tail(live$portfolio_pct, 1); spend <- tail(live$spy_pct, 1)
 
     fig <- plot_ly()
-    # grey benchmark = all-picks backtest over THIS window. Drawn only when the
-    # portfolio is a narrowed subset; with all ids selected it would just overlap
-    # the green portfolio line (the portfolio already IS every pick).
+    perid_ann <- list()
+    # Grey backtest lines. Filtered (a narrowed subset): ONE all-selections line.
+    # All ids on: ONE faint grey line PER id (the per-cluster backtest), each
+    # labelled with its id at the right end, so you can see which cluster drove
+    # the result. (With all ids on the single all-picks line would just overlap
+    # the green line, so we decompose instead.)
     if (!isTRUE(d$all_on) && !is.null(d$bench) && nrow(d$bench) > 0) {
       bench <- d$bench; bench$vdate <- as.Date(bench$vdate)
       fig <- add_trace(fig, x = bench$vdate, y = bench$bench_pct, type = "scatter", mode = "lines",
         name = "All selections (this window)", line = list(color = "#94a3b8", width = 2, dash = "dot"),
         hovertemplate = "all selections<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
+    } else if (isTRUE(d$all_on) && !is.null(d$perid) && nrow(d$perid) > 0) {
+      pid <- d$perid; pid$vdate <- as.Date(pid$vdate); leg <- TRUE
+      for (k in sort(unique(pid$id))) {
+        sub <- pid[pid$id == k, ]; sub <- sub[order(sub$vdate), ]
+        if (nrow(sub) == 0) next
+        fig <- add_trace(fig, x = sub$vdate, y = sub$ret_pct, type = "scatter", mode = "lines",
+          name = "per-cluster backtest", legendgroup = "perid", showlegend = leg,
+          line = list(color = "rgba(148,163,184,0.5)", width = 1, dash = "dot"),
+          hovertemplate = paste0("cluster ", k, "<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>"))
+        leg <- FALSE
+        last <- sub[nrow(sub), ]
+        perid_ann[[length(perid_ann) + 1]] <- list(x = format(last$vdate, "%Y-%m-%d"), y = last$ret_pct,
+          text = as.character(k), showarrow = FALSE, xanchor = "left", xshift = 5,
+          font = list(color = "rgba(148,163,184,0.95)", size = 10))
+      }
     }
     fig <- add_trace(fig, x = live$vdate, y = live$spy_pct, type = "scatter", mode = "lines",
       name = "Benchmark", legendgroup = "spy", line = list(color = "#3b82f6", width = 3),
@@ -4968,7 +5037,7 @@ server <- function(input, output, session) {
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
                    zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%"),
       legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.14),
-      hovermode = "closest", shapes = shapes, annotations = ann,
+      hovermode = "closest", shapes = shapes, annotations = c(ann, perid_ann),
       margin = list(l = 60, r = 80, t = 50, b = 50))
   })
 
