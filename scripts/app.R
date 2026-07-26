@@ -576,7 +576,7 @@ per_strat AS (SELECT s, id, vdate, 100*(value/NULLIF(invested,0)-1) AS ret FROM 
 SELECT ps.vdate::text AS vdate, ps.id::int AS id, ROUND(AVG(ps.ret)::numeric,2) AS ret_pct
 FROM per_strat ps GROUP BY ps.id, ps.vdate ORDER BY ps.id, ps.vdate;"
 
-# Live ledger vs SPY on the ledger's OWN clock: daily cumulative return of the
+# Live ledger vs Benchmark on the ledger's OWN clock: daily cumulative return of the
 # inception BUY basket (equal-weight, split-safe current-series entry) and the
 # same-day SPY, both rebased to 0 at 2026-06-15. Fast (~0.1s). This is the fair
 # out-of-sample view - the ledger is 6 weeks old and cannot share the 2-year
@@ -1056,9 +1056,12 @@ ui <- navbarPage(
       # both are post-load refinements (reactive on the loaded data, no
       # re-Generate needed), so they follow the button, not precede it.
       tagList(
-        selectInput("flt_id_valBL", "Cluster id filter",
-                    choices = c("All" = "ALL", setNames(1:19, 1:19)),
-                    selected = "ALL"),
+        checkboxGroupInput("idsBL", "Cluster id filter (all on; uncheck to narrow)",
+                           choices = NULL, inline = TRUE),
+        div(style = "margin-top:-0.3rem; margin-bottom:0.5rem;",
+          actionButton("idsAllBL", "Select all", style = "padding:2px 10px; font-size:0.72rem; margin-right:0.35rem;"),
+          actionButton("idsNoneBL", "Deselect all", style = "padding:2px 10px; font-size:0.72rem;"),
+          tags$span("Generate to load ids.", style = "color:#64748b; font-size:0.7rem; margin-left:0.4rem;")),
         sliderInput("flt_rank_rangeBL", "Rank range (within cluster)",
                     min = 1, max = 600, value = c(1, 600), step = 1)
       )),
@@ -3238,8 +3241,8 @@ server <- function(input, output, session) {
           "prior quarters. No future information decides eligibility, so ",
           "this is an honest as-of reconstruction; it is NOT the live BUY ",
           "gate (which did not exist then and pools evidence across all ",
-          "years). Each bar = how the pick REALLY did vs SPY over the next ",
-          "12 months, from actual adjusted prices: green beat SPY, red ",
+          "years). Each bar = how the pick REALLY did vs Benchmark over the next ",
+          "12 months, from actual adjusted prices: green beat the Benchmark, red ",
           "lagged, grey = no tradable price window. Cluster identity is ",
           "membership-chained across quarters (labels can swap between ",
           "physical clusters; trust follows the members, not the label). ",
@@ -3247,7 +3250,7 @@ server <- function(input, output, session) {
           "the company no longer trades; its color = HOW it left (green ",
           "acquired/private, red bankrupt/failed, amber SPAC/rename, ",
           "burnt-orange uncategorized). The chips above are this date's ",
-          "scorecard: % positive = share of picks that beat SPY."))
+          "scorecard: % positive = share of picks that beat the Benchmark."))
     } else if (mode == "wf") {
       tagList(
         h4("Backtest replay", style = h_style),
@@ -3257,10 +3260,10 @@ server <- function(input, output, session) {
           "cutoff: every ranked ticker per cluster (ids 13+ = short side), ",
           "in the model's own ",
           "order (r1 at the top of each cluster block = its top pick). ",
-          "Each bar = how that pick REALLY did vs SPY over the replay horizon ",
+          "Each bar = how that pick REALLY did vs Benchmark over the replay horizon ",
           "(sidebar, default 12 months), from actual adjusted prices (first ",
           "close after the cutoff to the last close within the horizon): green ",
-          "beat SPY, red lagged, grey = no tradable price window. Ranking and ",
+          "beat the Benchmark, red lagged, grey = no tradable price window. Ranking and ",
           "grading window switch together with the horizon. If the model works, ",
           "green concentrates near each block's r1. A dot at the bar tip = the ",
           "company no longer trades; its color = HOW it left: green acquired/",
@@ -3275,7 +3278,7 @@ server <- function(input, output, session) {
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the BUY calls the live system actually logged on the selected date, ",
           "graded to the latest close. Each bar = one ticker's return since entry ",
-          "relative to SPY. Green beat SPY, red lagged it. A dot = delisted since ",
+          "relative to the Benchmark. Green beat it, red lagged it. A dot = delisted since ",
           "entry; dot color = why (green acquired/private, red bankrupt/failed, ",
           "amber SPAC/rename, burnt-orange uncategorized - hover it or see the ",
           "table's Delisted column); its 'latest close' is the final traded ",
@@ -3316,7 +3319,7 @@ server <- function(input, output, session) {
             "tickers the model currently marks BUY. Order = win likelihood: each ",
             "ticker's bin = its slot in the latest WALK-FORWARD ranking (20 bins ",
             "of 5%; same ranking the bin win rates were measured on), and rows ",
-            "sort by their bin's realized win rate vs SPY (most winners on top; ",
+            "sort by their bin's realized win rate vs Benchmark (most winners on top; ",
             "bars still show expectancy = mean holdout trade return). Tickers the ",
             "walk-forward has no scored evidence for show 'no evidence' and sink ",
             "below the graded BUYs. The Shortlist toggle keeps only rank bins ",
@@ -3531,7 +3534,7 @@ server <- function(input, output, session) {
         -- after the cutoff -> last bar within 12 months, minus SPY over the
         -- same window. The model's forward_return column is a holdout LABEL
         -- statistic (smoothed basis, pre-cutoff anchors) - it graded BRO -30
-        -- in a year it beat SPY by 9pts; never chart it as a trade outcome.
+        -- in a year it beat the Benchmark by 9pts; never chart it as a trade outcome.
         SELECT r.train_cutoff_date, m.id, r.ticker, r.rank_within_cluster,
                r.cluster_size,
                ROUND(r.ticker_score::numeric, 4)   AS ticker_score,
@@ -3857,14 +3860,23 @@ server <- function(input, output, session) {
     })
   })
 
+  # ids present in the currently-loaded data (checkbox choices); empty OR every
+  # box checked = "all ids", no filter (mirrors the Forecast idsFC semantics).
+  avail_idsBL <- reactiveVal(NULL)
+  bl_ids_all_on <- function() {
+    ids_sel <- suppressWarnings(as.integer(input$idsBL))
+    av <- avail_idsBL()
+    length(ids_sel) == 0 || (!is.null(av) && setequal(ids_sel, av))
+  }
+
   # Shared id/rank filter, applied identically by chart + table (live, no
   # re-Generate). id filter: wf replay + current mode (ledger rows carry no
   # id). rank range: keep ranks in [lo, hi] on rank_within_cluster (wf) /
   # agg_rank (current) - e.g. 5-20 = skip the head, take the mid-block.
   bl_apply_filters <- function(df) {
-    idv <- input$flt_id_valBL
-    if (!is.null(idv) && !idv %in% c("", "ALL") && "id" %in% names(df))
-      df <- df[!is.na(df$id) & df$id == as.integer(idv), , drop = FALSE]
+    ids_sel <- suppressWarnings(as.integer(input$idsBL))
+    if (!bl_ids_all_on() && "id" %in% names(df))
+      df <- df[!is.na(df$id) & df$id %in% ids_sel, , drop = FALSE]
     rr <- input$flt_rank_rangeBL
     if (!is.null(rr) && length(rr) == 2) {
       col <- if ("rank_within_cluster" %in% names(df)) "rank_within_cluster"
@@ -3908,36 +3920,47 @@ server <- function(input, output, session) {
   # slider itself, or user narrowing would instantly snap back. Ledger rows
   # carry no rank column, so the slider is left alone there (the filter
   # no-ops anyway).
-  observeEvent(list(input$flt_id_valBL, app_dataBL()), {
+  observeEvent(list(input$idsBL, app_dataBL()), {
     df <- app_dataBL()
     if (is.null(df) || nrow(df) == 0) return()
     col <- if ("rank_within_cluster" %in% names(df)) "rank_within_cluster"
            else if ("agg_rank" %in% names(df)) "agg_rank" else return()
-    idv <- input$flt_id_valBL
-    if (!is.null(idv) && !idv %in% c("", "ALL") && "id" %in% names(df))
-      df <- df[!is.na(df$id) & df$id == as.integer(idv), , drop = FALSE]
+    ids_sel <- suppressWarnings(as.integer(input$idsBL))
+    if (!bl_ids_all_on() && "id" %in% names(df))
+      df <- df[!is.na(df$id) & df$id %in% ids_sel, , drop = FALSE]
     if (nrow(df) == 0) return()
     mx <- suppressWarnings(max(df[[col]], na.rm = TRUE))
     if (!is.finite(mx) || mx < 1) return()
     updateSliderInput(session, "flt_rank_rangeBL", max = mx, value = c(1, mx))
   })
 
-  # Cluster dropdown mirrors the LOADED data: only ids that actually have
-  # rows, each labeled with its row count, so an all-delisted cluster (id 1
-  # today) can't be selected into a confusing empty chart. A selection that
-  # vanishes falls back to All. Ledger rows carry no id - leave it alone.
+  # Cluster checkboxes mirror the LOADED data: only ids that actually have
+  # rows, so an all-delisted cluster (id 1 today) can't be checked into a
+  # confusing empty chart. Preserve any still-valid current selection; a
+  # selection that vanishes (or first load) falls back to all-on. Ledger rows
+  # carry no id - leave the boxes alone there.
   observeEvent(app_dataBL(), {
     df <- app_dataBL()
     if (is.null(df) || nrow(df) == 0 || !"id" %in% names(df)) return()
-    tab <- table(df$id)
-    ids <- sort(as.integer(names(tab)))
+    ids <- sort(as.integer(names(table(df$id))))
     if (length(ids) == 0) return()
-    labs <- sprintf("%d  (%d rows)", ids, as.integer(tab[as.character(ids)]))
-    sel <- isolate(input$flt_id_valBL)
-    if (is.null(sel) || !(sel %in% c("ALL", as.character(ids)))) sel <- "ALL"
-    updateSelectInput(session, "flt_id_valBL",
-                      choices = c("All" = "ALL", setNames(as.character(ids), labs)),
-                      selected = sel)
+    avail_idsBL(ids)
+    prev <- suppressWarnings(as.integer(isolate(input$idsBL)))
+    keep <- prev[!is.na(prev) & prev %in% ids]
+    sel  <- if (length(keep) == 0) ids else keep     # default / vanished => all on
+    updateCheckboxGroupInput(session, "idsBL", choices = ids, selected = sel, inline = TRUE)
+  })
+
+  # Select all / Deselect all, mirroring the Forecast tab's id checkboxes.
+  observeEvent(input$idsAllBL, {
+    req(avail_idsBL())
+    updateCheckboxGroupInput(session, "idsBL", choices = avail_idsBL(),
+                             selected = avail_idsBL(), inline = TRUE)
+  })
+  observeEvent(input$idsNoneBL, {
+    req(avail_idsBL())
+    updateCheckboxGroupInput(session, "idsBL", choices = avail_idsBL(),
+                             selected = character(0), inline = TRUE)
   })
 
   # Selection stats: mean/median of the metric over ALL graded rows in the
@@ -3975,8 +3998,8 @@ server <- function(input, output, session) {
     df <- bl_apply_filters(app_dataBL())
     if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
     if (app_modeBL() %in% c("wf", "ledger")) {
-      # Replay modes: one bar per pick, sorted by realized excess vs SPY.
-      # Green = beat SPY, red = lagged it. Reads top-to-bottom: best to worst.
+      # Replay modes: one bar per pick, sorted by realized excess vs Benchmark.
+      # Green = beat the Benchmark, red = lagged it. Reads top-to-bottom: best to worst.
       trunc_note <- NULL   # set when the horizon outruns the price data
       if (app_modeBL() == "wf") {
         hz <- if ("horizon" %in% names(df)) df$horizon[1] else 12L
@@ -3992,7 +4015,7 @@ server <- function(input, output, session) {
               floor(as.numeric(difftime(mm, co, units = "days")) / 30.44), hz)
         }
         df$hover <- sprintf(
-          "%s (id %d)<br>cutoff %s | rank %d of %d | score %.4f<br>realized %dmo excess vs SPY %+.1f%%",
+          "%s (id %d)<br>cutoff %s | rank %d of %d | score %.4f<br>realized %dmo excess vs Benchmark %+.1f%%",
           df$ticker, df$id, df$train_cutoff_date,
           df$rank_within_cluster, df$cluster_size,
           ifelse(is.na(df$ticker_score), 0, df$ticker_score),
@@ -4027,9 +4050,9 @@ server <- function(input, output, session) {
       # graded row in the current mode/id/rank selection
       set_sel_statsBL(
         df$excess,
-        if (app_modeBL() != "wf") "avg excess vs SPY since entry (pp)"
-        else if (is.null(trunc_note)) sprintf("avg %dmo excess vs SPY (pp)", hz)
-        else sprintf("avg excess vs SPY so far (pp; %s)", trunc_note))
+        if (app_modeBL() != "wf") "avg excess vs Benchmark since entry (pp)"
+        else if (is.null(trunc_note)) sprintf("avg %dmo excess vs Benchmark (pp)", hz)
+        else sprintf("avg excess vs Benchmark so far (pp; %s)", trunc_note))
       # Replay shows the PREDICTION as it stood: always grouped by cluster
       # then model rank (r1 = top pick), bar = realized outcome. Sorting by
       # outcome read as a results chart (the model ranked LXP 508/548 yet it
@@ -4042,7 +4065,7 @@ server <- function(input, output, session) {
                          identical(df$view_kind[1], "picks"))
           "Trust-gated top picks" else "Prediction order"
         chart_title <- list(
-          text = sprintf("%s: %d ranked picks (r1 = model's top pick; bar = realized %dmo vs SPY)", head_word, nrow(df), hz),
+          text = sprintf("%s: %d ranked picks (r1 = model's top pick; bar = realized %dmo vs Benchmark)", head_word, nrow(df), hz),
           font = list(color = "#94a3b8", size = 12))
         if (nrow(df) > 180) {
           n_total <- nrow(df)
@@ -4055,7 +4078,7 @@ server <- function(input, output, session) {
         # right, so flag it or green reads as a win
         if (all(df$id > 12L))
           chart_title$text <- paste0(chart_title$text,
-            " | SHORT-side cluster: model expected these to LAG SPY")
+            " | SHORT-side cluster: model expected these to LAG the Benchmark")
         if (!is.null(trunc_note))
           chart_title$text <- paste0(chart_title$text,
             " | horizon outruns data: ", trunc_note)
@@ -4488,8 +4511,8 @@ server <- function(input, output, session) {
       hz_cut <- "market_max" %in% names(df) &&
         !is.na(hz_end) && hz_end > as.Date(df$market_max[1])
       names(display)[names(display) == "excess"] <-
-        if (hz_cut) sprintf("excess vs SPY %% so far (of %dmo)", hz)
-        else sprintf("%dmo excess vs SPY %%", hz)
+        if (hz_cut) sprintf("excess vs Benchmark %% so far (of %dmo)", hz)
+        else sprintf("%dmo excess vs Benchmark %%", hz)
       return(DT::datatable(
         display,
         selection = "none",
@@ -4523,7 +4546,7 @@ server <- function(input, output, session) {
         `Entry close`   = df$entry_adj_close,
         `Latest close`  = df$latest_close,
         `Ret %`         = df$ret_since_pct,
-        `vs SPY %`      = df$excess_vs_spy_pct,
+        `vs Benchmark %`      = df$excess_vs_spy_pct,
         `Buy weight`    = df$buy_weight,
         `Buy votes`     = as.integer(df$buy_votes),
         `Agg rank`      = as.integer(df$best_agg_rank),
