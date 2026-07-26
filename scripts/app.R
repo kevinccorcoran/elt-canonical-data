@@ -645,15 +645,15 @@ ui <- navbarPage(
             tags$summary("Aggregates"),
             tags$div(
               tags$div(HTML("<b>net_score</b> = positive_score &minus; negative_score")),
-              tags$div(HTML("<b>signal_score</b>: STRONG_BUY=+3, BUY=+2, HOLD=0, WATCH=&minus;1, AVOID=&minus;2, SELL=&minus;3")),
+              tags$div(HTML("<b>signal_score</b>: tiered from +3 (strongest) down to &minus;3 (weakest)")),
               tags$div(HTML("<b>combined_score</b> = signal_score + net_score")),
-              tags$div(HTML("<b>recommendation</b> = combined_score tier (STRONG_PICK / BUY / HOLD / AVOID / OUTLIER_*)"))
+              tags$div(HTML("<b>recommendation</b> = combined_score tier"))
             )
           )
         )
       )),
       mainPanel(div(class = "main-card", style = "height: calc(100vh - 4rem); display: flex; flex-direction: column;",
-        h4("Transition range — scoring.return_cluster_cell_score_extended",
+        h4("Transition range",
            style = "color: #f8fafc; margin-bottom: 0.5rem; font-weight: 600;"),
         uiOutput("transitionHeader"),
         div(style = "flex: 1; min-height: 0;", plotlyOutput("transitionPlot", height = "100%"))
@@ -684,7 +684,7 @@ ui <- navbarPage(
           #qaHistoryTable tr:hover td { background: rgba(56,189,248,0.08); }
         ")),
         div(class = "main-card",
-          h4("Ticker counts per table (parquet history)",
+          h4("Series counts per table (parquet history)",
              style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
           tags$style(HTML("
             .qa-filter-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.25rem; }
@@ -763,7 +763,7 @@ ui <- navbarPage(
   ),
 
   # ── Tab 4: Ticker Coverage ──
-  tabPanel("Ticker Coverage",
+  tabPanel("Coverage",
     sidebarLayout(
       make_sidebar("V", "Database Connection (Coverage)", tagList(
         tags$div(
@@ -776,7 +776,7 @@ ui <- navbarPage(
         )
       )),
       mainPanel(div(class = "main-card",
-        h4("Ticker history coverage — cdm.ingest_combined",
+        h4("Series history coverage",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         uiOutput("coveragePlotContainer")
       ))
@@ -788,7 +788,7 @@ ui <- navbarPage(
     sidebarLayout(
       make_sidebar("K", "Database Connection (Clusters)", tagList()),
       mainPanel(div(class = "main-card",
-        h4("Per-ticker scatter — analysis.ticker_cluster_segments × clustering.ticker_cluster_volatility_summary",
+        h4("Per-series scatter",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         tags$div(style = "margin-bottom: 0.35rem;",
           actionButton("clusterShowAll", "Show all", class = "btn-primary",
@@ -802,14 +802,14 @@ ui <- navbarPage(
   ),
 
   # ── Tab: Top Picks ──
-  tabPanel("Top Picks",
+  tabPanel("Shortlist",
     sidebarLayout(
       make_sidebar("P", "Database Connection (Top Picks)", tagList(
         selectInput("id_valP", "Cluster ID", choices = c("Connect first..." = ""), selected = ""),
         sliderInput("top_n_valP", "Top N tickers", min = 5, max = 400, value = 30, step = 5)
       )),
       mainPanel(div(class = "main-card",
-        h4("Top picks across horizons — serving.return_cluster_ticker_summary_current x return_cluster_ticker_pair_current",
+        h4("Top-ranked across horizons",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         tags$div(
           style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
@@ -856,7 +856,7 @@ ui <- navbarPage(
                        startview = "year", separator = " to ")
       )),
       mainPanel(div(class = "main-card",
-        h4("Rank stability across walk-forward cohorts - validation.walk_forward_ticker_rank",
+        h4("Rank stability across walk-forward cohorts",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         tags$div(
           style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
@@ -913,11 +913,11 @@ ui <- navbarPage(
                     choices = c("Connect first..." = ""), selected = "")
       )),
       mainPanel(div(class = "main-card",
-        h4("Walk-forward IC - validation.walk_forward_id_ic",
+        h4("Walk-forward IC",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         plotlyOutput("icHeatmapMV", height = "600px"),
         tags$br(),
-        h4("Holdout payoff backtest - validation.return_cluster_payoff_backtest",
+        h4("Holdout payoff backtest",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         tags$div(
           style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
@@ -934,7 +934,7 @@ ui <- navbarPage(
            style = "color: #f8fafc; font-weight: 600;"),
         plotlyOutput("payoffHeatmapMV", height = "420px"),
         tags$br(),
-        h4("Cell credibility - validation.cell_credibility",
+        h4("Cell credibility",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
         h5("Cells by tier per id (high/medium = actionable, thin = n<10, anti = reliably wrong)",
            style = "color: #f8fafc; font-weight: 600;"),
@@ -948,7 +948,7 @@ ui <- navbarPage(
   ),
 
   # ── Tab 9: Buy List ──
-  tabPanel("Buy List",
+  tabPanel("Predictions",
     sidebarLayout(
       make_sidebar("BL", "Database Connection (Buy List)", tagList(
         tags$label("As-of date", style = "color: #94a3b8; font-weight: 600;"),
@@ -1047,18 +1047,18 @@ ui <- navbarPage(
                                 "20 months" = "20", "33 months" = "33", "To today" = "240"),
                     selected = "12"),
         tags$span(paste("How long you hold before measuring. These are the model's Fibonacci forecast",
-                        "horizons (same set as the Buy List's replay), capped at 33mo - holding to a",
+                        "horizons (same set as the Predictions tab's replay), capped at 33mo - holding to a",
                         "horizon realizes that prediction. 'To today' holds past it, where the edge decays."),
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
-        checkboxGroupInput("idsFC", "Portfolio cluster ids (all on; uncheck to narrow)",
+        checkboxGroupInput("idsFC", "Cluster ids (all on; uncheck to narrow)",
                            choices = NULL, inline = TRUE),
         div(style = "margin-top:-0.3rem; margin-bottom:0.5rem;",
           actionButton("idsAllFC", "Select all", style = "padding:2px 10px; font-size:0.72rem; margin-right:0.35rem;"),
           actionButton("idsNoneFC", "Deselect all", style = "padding:2px 10px; font-size:0.72rem;"),
           tags$span("Connect to load ids.", style = "color:#64748b; font-size:0.7rem; margin-left:0.4rem;")),
-        tags$p(paste("Stand at any past date: it buys the picks known then (all-strategy",
-                     "DCA) and tracks them to today in REAL prices vs SPY, with the backtest",
-                     "as the expectation and the live ledger in its own panel below. Solid =",
+        tags$p(paste("Stand at any past date: it takes the selections known then (all-strategy",
+                     "phased entry) and tracks them to today in REAL prices vs Benchmark, with the backtest",
+                     "as the expectation and the live log in its own panel below. Solid =",
                      "realized, dotted = forward. First Generate ~6s, then under a second."),
                style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;")
       )),
@@ -1550,7 +1550,7 @@ server <- function(input, output, session) {
         ORDER BY table_schema, table_name", placeholders))
 
       if (nrow(tables) == 0) {
-        status_msgQ("No tables with a ticker column.")
+        status_msgQ("No tables with a series column.")
         return()
       }
 
@@ -1766,7 +1766,7 @@ server <- function(input, output, session) {
   # ── COVERAGE: Execute — load min/max date per ticker ──
   observeEvent(input$execute_V, {
     if (input$db_passV == "") { status_msgV("Error: Password is not set."); return() }
-    status_msgV("Loading ticker coverage...")
+    status_msgV("Loading coverage...")
     tryCatch({
       con <- get_con(input, "V")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
@@ -2142,7 +2142,7 @@ server <- function(input, output, session) {
       xaxis = list(title = "Future lag (months, sqrt-spaced)", type = "linear",
                    tickvals = fut_lag_pos, ticktext = as.character(fut_lag_vals),
                    color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-      yaxis = list(title = "Ticker (by agg_rank)", type = "category",
+      yaxis = list(title = "Series (by agg_rank)", type = "category",
                    autorange = "reversed",
                    color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
       margin = list(l = 160, r = 60, b = 60, t = 60)
@@ -2910,7 +2910,7 @@ server <- function(input, output, session) {
                line = list(dash = "dash", color = "rgba(255,255,255,0.25)"))),
         xaxis = list(title = "Win % (holdout, coin flip = 50)",
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-        yaxis = list(title = "Expectancy (mean trade return)",
+        yaxis = list(title = "Expectancy (mean period return)",
                      color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
         margin = list(l = 70, r = 30, b = 50, t = 30))
   })
@@ -3133,14 +3133,14 @@ server <- function(input, output, session) {
         "Full ladder - every ranked ticker" = "ladder")
     else
       c("Model's top picks (trust-gated)"  = "picks",
-        "Live BUY list (production gate)"   = "buys",
+        "Live signals (production gate)"   = "buys",
         "Full ladder - every ranked ticker" = "ladder")
     sel <- isolate(input$bl_viewBL)
     if (is.null(sel) || !sel %in% ch) sel <- "picks"
     tagList(
       radioButtons("bl_viewBL", "View", choices = ch, selected = sel),
       if (mode == "wf") tags$p(
-        paste("BUY list: unavailable before 2026-06-16 - no recorded gate",
+        paste("Signals: unavailable before 2026-06-16 - no recorded gate",
               "exists and reconstructing it would use future information."),
         style = paste0("color: #64748b; font-size: 0.7rem; ",
                        "margin-top: -0.5rem; margin-bottom: 0.75rem;"))
@@ -3184,7 +3184,7 @@ server <- function(input, output, session) {
     h_style <- "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"
     if (is_picks) {
       tagList(
-        h4("Model's top picks (reconstructed) - validation.walk_forward_top_picks",
+        h4("Model's top-ranked (reconstructed)",
            style = h_style),
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
@@ -3208,7 +3208,7 @@ server <- function(input, output, session) {
           "scorecard: % positive = share of picks that beat SPY."))
     } else if (mode == "wf") {
       tagList(
-        h4("Backtest replay - validation.walk_forward_ticker_rank", style = h_style),
+        h4("Backtest replay", style = h_style),
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the PREDICTION as it stood at the nearest quarterly walk-forward ",
@@ -3228,7 +3228,7 @@ server <- function(input, output, session) {
           "only - the live BUY gates did not exist then."))
     } else if (mode == "ledger") {
       tagList(
-        h4("Ledger replay - monitoring.prediction_ledger", style = h_style),
+        h4("Live-log replay", style = h_style),
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the BUY calls the live system actually logged on the selected date, ",
@@ -3243,7 +3243,7 @@ server <- function(input, output, session) {
       uview <- bl_view_resolved("current")
       if (uview == "picks") {
         tagList(
-          h4("Model's top picks (live, as of today)", style = h_style),
+          h4("Model's top-ranked (live, as of today)", style = h_style),
           tags$div(class = "caveat-warning",
             tags$b(style = "color: #fbbf24;", "Read: "),
             "the SAME rule the backtest validates, applied to today: the top ~5% ",
@@ -3257,7 +3257,7 @@ server <- function(input, output, session) {
             "gate's extra density/coverage conditions at work, not an error."))
       } else if (uview == "ladder") {
         tagList(
-          h4("Full ladder - every ranked ticker (live)", style = h_style),
+          h4("Full ladder - every ranked series (live)", style = h_style),
           tags$div(class = "caveat-warning",
             tags$b(style = "color: #fbbf24;", "Read: "),
             "every ticker the model ranks right now, grouped by cluster in rank ",
@@ -3267,7 +3267,7 @@ server <- function(input, output, session) {
             "heads side by side."))
       } else {
         tagList(
-          h4("Live BUY list - serving.return_cluster_ticker_global_action_current x validated payoff",
+          h4("Live signals - validated payoff",
              style = h_style),
           tags$div(class = "caveat-warning",
             tags$b(style = "color: #fbbf24;", "Read: "),
@@ -3961,19 +3961,19 @@ server <- function(input, output, session) {
             "<br>cluster trust IC by then %.3f",
             ifelse(is.na(df$trailing_ic), 0, df$trailing_ic)))
         x_title <- if (is.null(trunc_note))
-          sprintf("Realized %dmo excess return vs SPY (%%)", hz)
-        else sprintf("Excess return vs SPY so far (%%; %s)", trunc_note)
+          sprintf("Realized %dmo excess return vs Benchmark (%%)", hz)
+        else sprintf("Excess return vs Benchmark so far (%%; %s)", trunc_note)
       } else {
         hz <- NA_integer_
         df$excess <- df$excess_vs_spy_pct
         df$hover <- sprintf(
-          "%s<br>snapshot %s | entry %s @ %.2f -> latest %.2f<br>ret %.1f%% | vs SPY %+.1f%% | buy weight %.2f",
+          "%s<br>snapshot %s | start %s @ %.2f -> latest %.2f<br>ret %.1f%% | vs Benchmark %+.1f%% | signal weight %.2f",
           df$ticker, df$prediction_date, df$entry_date, df$entry_adj_close,
           ifelse(is.na(df$latest_close), 0, df$latest_close),
           ifelse(is.na(df$ret_since_pct), 0, df$ret_since_pct),
           ifelse(is.na(df$excess_vs_spy_pct), 0, df$excess_vs_spy_pct),
           df$buy_weight)
-        x_title <- "Return since entry, relative to SPY (%)"
+        x_title <- "Return since start, relative to Benchmark (%)"
       }
       # delisted rows carry the exit story on the bar hover too (the dot has
       # it as well, but bars are the bigger hover target)
@@ -4046,7 +4046,7 @@ server <- function(input, output, session) {
       p <- plot_ly(df, x = ~xplot, y = ~ylab, type = "bar", orientation = "h",
                    marker = list(color = ifelse(is.na(df$excess), '#64748b',
                                          ifelse(df$excess >= 0, '#10b981', '#dc2626'))),
-                   customdata = ~hover, name = "excess vs SPY",
+                   customdata = ~hover, name = "excess vs Benchmark",
                    hovertemplate = "%{customdata}<extra></extra>")
       # dot at the bar tip = ticker no longer trades (no price bar within 10
       # days of the latest market date); dot color = HOW it left the market
@@ -4240,7 +4240,7 @@ server <- function(input, output, session) {
               list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                         line = list(color = "rgba(255,255,255,0.4)"))),
               rank_sep_shapes(df$id)),
-            xaxis = list(title = "Payoff-weighted expectancy (%, 0 = no BUY-cell evidence)",
+            xaxis = list(title = "Payoff-weighted expectancy (%, 0 = no signal-cell evidence)",
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
             yaxis = list(title = "", type = "category",
                          categoryorder = "array", categoryarray = rev(df$ylab),
@@ -4273,7 +4273,7 @@ server <- function(input, output, session) {
     }
     if (nrow(df) == 0) return(empty_plot(
       if (view == "all") "No BUYs match the Regular/Sparse toggles and filters."
-      else "No BUY tickers right now."))
+      else "No signal series right now."))
 
     if (view == "shortlist") {
       # decision view = rank bins that actually win: the cluster's ranks cut
@@ -4607,7 +4607,7 @@ server <- function(input, output, session) {
     }
     if (nrow(df) == 0) {
       return(DT::datatable(
-        data.frame(Note = "No BUY tickers right now."),
+        data.frame(Note = "No signal series right now."),
         selection = "none", rownames = FALSE, class = "compact",
         options = list(dom = "t", ordering = FALSE)))
     }
@@ -4756,7 +4756,7 @@ server <- function(input, output, session) {
     if (input$db_passFC == "") { status_msgFC("Error: Password is not set."); return() }
     anchor <- asof_dateFC()
     if (is.null(anchor) || is.na(anchor)) { status_msgFC("Pick an as-of date first."); return() }
-    status_msgFC(sprintf("Loading portfolio + SPY from %s to today...", format(anchor, "%b %Y")))
+    status_msgFC(sprintf("Loading selected set + Benchmark from %s to today...", format(anchor, "%b %Y")))
     tryCatch({
       con <- get_con(input, "FC")
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
@@ -4794,7 +4794,7 @@ server <- function(input, output, session) {
                   gsub("__HOLD__", as.character(H),
                     gsub("__IDFILTER__", idfilter, FORECAST_LIVE_SQL, fixed = TRUE), fixed = TRUE), fixed = TRUE))
       if (nrow(live) == 0) { app_dataFC(NULL)
-        status_msgFC(sprintf("No portfolio picks for %s in the cutoff at %s - clear the filter or choose other ids.",
+        status_msgFC(sprintf("No selections for %s in the cutoff at %s - clear the filter or choose other ids.",
           id_lbl, format(anchor, "%b %Y"))); return() }
       live$portfolio_pct <- as.numeric(live$portfolio_pct); live$spy_pct <- as.numeric(live$spy_pct)
       # Grey benchmark = the SAME 6-strategy DCA backtest for THIS window but over
@@ -4828,7 +4828,7 @@ server <- function(input, output, session) {
                       ledseries = ledseries, anchor = anchor,
                       id_lbl = id_lbl, hold_months = H, to_today = to_today, market_max = market_max, risk = risk))
       win_lbl <- if (to_today) sprintf("%d mo to today", nrow(live) - 1) else sprintf("%dmo hold", H)
-      status_msgFC(sprintf("Loaded - %s from %s, %s; portfolio %+.1f%% vs SPY %+.1f%%.",
+      status_msgFC(sprintf("Loaded - %s from %s, %s; selected set %+.1f%% vs Benchmark %+.1f%%.",
         win_lbl, format(anchor, "%b %Y"), id_lbl, tail(live$portfolio_pct, 1), tail(live$spy_pct, 1)))
     }, error = function(e) { app_dataFC(NULL); status_msgFC(paste("Error:", e$message)) })
   })
@@ -4843,10 +4843,10 @@ server <- function(input, output, session) {
     win <- if (isTRUE(d$to_today)) sprintf("%d mo, held to today", nrow(live) - 1) else sprintf("%dmo hold", H)
     tags$div(style = "color:#cbd5e1; font-size:0.82rem; margin-bottom:0.6rem; line-height:1.5;",
       HTML(sprintf(paste0(
-        "<b>As of %s</b> (%s): the picks returned <b>%+.1f%%</b> vs SPY <b>%+.1f%%</b> = <b>%+.1fpp</b>. ",
-        "Typically +%.1fpp at 12mo (avg of all starts, not this window). &nbsp;|&nbsp; <b>Ledger</b> (live out-of-sample, since %s): ",
-        "<b>%+.1f%%</b> vs SPY <b>%+.1f%%</b> = <b>%+.1fpp</b>. A fixed hold makes as-of dates comparable; ",
-        "'to today' lets old dates run 8-13 years (delisting-freeze drags them)."),
+        "<b>As of %s</b> (%s): the selections returned <b>%+.1f%%</b> vs Benchmark <b>%+.1f%%</b> = <b>%+.1fpp</b>. ",
+        "Typically +%.1fpp at 12mo (avg of all starts, not this window). &nbsp;|&nbsp; <b>Live log</b> (live out-of-sample, since %s): ",
+        "<b>%+.1f%%</b> vs Benchmark <b>%+.1f%%</b> = <b>%+.1fpp</b>. A fixed hold makes as-of dates comparable; ",
+        "'to today' lets old dates run 8-13 years (dropped series get frozen and drag them)."),
         format(d$anchor, "%b %Y"), win, pend, spend, beat_live, beat12,
         lg$entry_d[1], lg$basket_ret_pct[1], lg$spy_ret_pct[1], lg$basket_ret_pct[1] - lg$spy_ret_pct[1])))
   })
@@ -4858,7 +4858,7 @@ server <- function(input, output, session) {
     d <- app_dataFC(); if (is.null(d) || is.null(d$risk)) return(NULL)
     r <- d$risk
     a_col <- if (isTRUE(r$alpha_ann > 0)) "#34d399" else "#f87171"
-    b_note <- if (isTRUE(r$beta < 1)) "less market risk than SPY" else "more market risk than SPY"
+    b_note <- if (isTRUE(r$beta < 1)) "less market risk than benchmark" else "more market risk than benchmark"
     card <- function(label, val, col = "#e2e8f0", sub = "") tags$div(
       style = "flex:1; min-width:118px; padding:8px 14px; background:rgba(148,163,184,0.06); border-radius:8px;",
       tags$div(label, style = "color:#94a3b8; font-size:0.64rem; text-transform:uppercase; letter-spacing:0.04em;"),
@@ -4872,9 +4872,9 @@ server <- function(input, output, session) {
     tags$div(
       tags$div(style = "display:flex; gap:8px; flex-wrap:wrap; margin-bottom:0.4rem;",
         card("Alpha (ann.)", sprintf("%+.1f%%", r$alpha_ann), a_col, "beat beyond beta"),
-        card("Beta vs SPY", sprintf("%.2f", r$beta), "#e2e8f0", b_note),
+        card("Beta vs benchmark", sprintf("%.2f", r$beta), "#e2e8f0", b_note),
         card("Info ratio", sprintf("%.2f", r$ir), if (isTRUE(r$ir > 0.5)) "#34d399" else "#e2e8f0", "excess / tracking risk"),
-        card("Vol picks / SPY", sprintf("%.0f%% / %.0f%%", r$vol_pf, r$vol_spy), "#e2e8f0", sprintf("%d monthly obs", r$n))),
+        card("Vol selections / benchmark", sprintf("%.0f%% / %.0f%%", r$vol_pf, r$vol_spy), "#e2e8f0", sprintf("%d monthly obs", r$n))),
       tags$p(verdict, style = "color:#cbd5e1; font-size:0.75rem; margin-bottom:0.7rem;"))
   })
 
@@ -4882,7 +4882,7 @@ server <- function(input, output, session) {
     req(app_dataFC())
     d <- app_dataFC(); live <- d$live; cv <- d$curve; lg <- d$ledger; anchor <- d$anchor
     if (is.null(live) || nrow(live) == 0) return(empty_plot("No data."))
-    pf_lbl <- if (is.null(d$id_lbl) || d$id_lbl == "all ids") "current picks" else d$id_lbl
+    pf_lbl <- if (is.null(d$id_lbl) || d$id_lbl == "all ids") "current selections" else d$id_lbl
     live$vdate <- as.Date(live$vdate)
     realized_end <- max(live$vdate)                          # last date with real prices in window
     H  <- if (is.null(d$hold_months)) 36 else d$hold_months
@@ -4909,15 +4909,15 @@ server <- function(input, output, session) {
     if (!isTRUE(d$all_on) && !is.null(d$bench) && nrow(d$bench) > 0) {
       bench <- d$bench; bench$vdate <- as.Date(bench$vdate)
       fig <- add_trace(fig, x = bench$vdate, y = bench$bench_pct, type = "scatter", mode = "lines",
-        name = "All picks (this window)", line = list(color = "#94a3b8", width = 2, dash = "dot"),
-        hovertemplate = "all picks<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
+        name = "All selections (this window)", line = list(color = "#94a3b8", width = 2, dash = "dot"),
+        hovertemplate = "all selections<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
     }
     fig <- add_trace(fig, x = live$vdate, y = live$spy_pct, type = "scatter", mode = "lines",
-      name = "SPY", legendgroup = "spy", line = list(color = "#3b82f6", width = 3),
-      hovertemplate = "SPY<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
+      name = "Benchmark", legendgroup = "spy", line = list(color = "#3b82f6", width = 3),
+      hovertemplate = "Benchmark<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
     fig <- add_trace(fig, x = live$vdate, y = live$portfolio_pct, type = "scatter", mode = "lines",
-      name = sprintf("Portfolio (%s)", pf_lbl), legendgroup = "pf", line = list(color = "#10b981", width = 3.5),
-      hovertemplate = "Portfolio<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
+      name = sprintf("Selected set (%s)", pf_lbl), legendgroup = "pf", line = list(color = "#10b981", width = 3.5),
+      hovertemplate = "Selected set<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
 
     shapes <- list(); ann <- list()
     if (show_today) {
@@ -4933,10 +4933,10 @@ server <- function(input, output, session) {
       p_proj <- pend  + (mfun_all(H) - mfun_all(mo_r)); s_proj <- spend + (mfun_spy(H) - mfun_spy(mo_r))
       fig <- add_trace(fig, x = c(realized_end, exit_date), y = c(spend, s_proj), type = "scatter", mode = "lines",
         legendgroup = "spy", showlegend = FALSE, line = list(color = "#3b82f6", width = 2, dash = "dot"),
-        hovertemplate = "SPY projected<br>%{y:.1f}%<extra></extra>")
+        hovertemplate = "Benchmark projected<br>%{y:.1f}%<extra></extra>")
       fig <- add_trace(fig, x = c(realized_end, exit_date), y = c(pend, p_proj), type = "scatter", mode = "lines",
         legendgroup = "pf", showlegend = FALSE, line = list(color = "#10b981", width = 2.5, dash = "dot"),
-        hovertemplate = "Portfolio projected<br>%{y:.1f}%<extra></extra>")
+        hovertemplate = "Selected set projected<br>%{y:.1f}%<extra></extra>")
       shapes[[length(shapes) + 1]] <- list(type = "rect", x0 = format(realized_end, "%Y-%m-%d"),
         x1 = format(exit_date, "%Y-%m-%d"), yref = "paper", y0 = 0, y1 = 1,
         fillcolor = "rgba(148,163,184,0.06)", line = list(width = 0))
@@ -4957,8 +4957,8 @@ server <- function(input, output, session) {
     ann[[length(ann) + 1]] <- list(x = px, y = spend, text = sprintf("%+.0f%%", spend),
       showarrow = FALSE, xanchor = pxa, xshift = pxs, font = list(color = "#3b82f6", size = 13))
 
-    ttl <- if (to_today) "Actual portfolio vs SPY vs backtest (held to today)"
-           else sprintf("Actual portfolio vs SPY vs backtest (%dmo hold)", H)
+    ttl <- if (to_today) "Actual selected set vs Benchmark vs backtest (held to today)"
+           else sprintf("Actual selected set vs Benchmark vs backtest (%dmo hold)", H)
     dark_layout(fig,
       title = list(text = ttl, font = list(color = "#f8fafc", size = 15), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
@@ -4976,7 +4976,7 @@ server <- function(input, output, session) {
   output$forecastLedgerFC <- renderPlotly({
     req(app_dataFC())
     d <- app_dataFC(); ls <- d$ledseries; cv <- d$curve
-    if (is.null(ls) || nrow(ls) == 0) return(empty_plot("No ledger data yet."))
+    if (is.null(ls) || nrow(ls) == 0) return(empty_plot("No log data yet."))
     ls$d <- as.Date(ls$d)
     start <- min(ls$d); today <- max(ls$d)
     lend <- tail(ls$ledger_pct, 1); send <- tail(ls$spy_pct, 1)
@@ -4984,12 +4984,12 @@ server <- function(input, output, session) {
     # projection - it borrowed the backtest portfolio's slope (not the ledger's),
     # and reading a down 6-week ledger as "heading up" was misleading.
     fig <- plot_ly()
-    fig <- add_trace(fig, x = ls$d, y = ls$spy_pct, type = "scatter", mode = "lines", name = "SPY",
+    fig <- add_trace(fig, x = ls$d, y = ls$spy_pct, type = "scatter", mode = "lines", name = "Benchmark",
       legendgroup = "s", line = list(color = "#3b82f6", width = 2.5),
-      hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
-    fig <- add_trace(fig, x = ls$d, y = ls$ledger_pct, type = "scatter", mode = "lines", name = "Ledger (BUY basket)",
+      hovertemplate = "Benchmark<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    fig <- add_trace(fig, x = ls$d, y = ls$ledger_pct, type = "scatter", mode = "lines", name = "Live log (signal basket)",
       legendgroup = "l", line = list(color = "#f59e0b", width = 3),
-      hovertemplate = "Ledger<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+      hovertemplate = "Live log<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     tdy <- format(today, "%Y-%m-%d")
     ann <- list(
       list(x = tdy, y = 1, yref = "paper", text = "today", showarrow = FALSE,
@@ -4999,7 +4999,7 @@ server <- function(input, output, session) {
       list(x = tdy, y = send, text = sprintf("%+.1f%%", send), showarrow = FALSE,
            xanchor = "left", xshift = 6, font = list(color = "#3b82f6", size = 12)))
     dark_layout(fig,
-      title = list(text = "Live ledger vs SPY, own clock (out-of-sample, since Jun 2026)",
+      title = list(text = "Live log vs Benchmark, own clock (out-of-sample, since Jun 2026)",
                    font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
@@ -5037,20 +5037,20 @@ server <- function(input, output, session) {
       tags$table(style = "border-collapse:collapse; width:100%; max-width:640px;",
         tags$thead(tags$tr(
           tags$th("Series", style = thl), tags$th("Window", style = thl),
-          tags$th("Return", style = th), tags$th("vs SPY", style = th))),
+          tags$th("Return", style = th), tags$th("vs Benchmark", style = th))),
         tags$tbody(
-          row("Portfolio (current picks)", since_anchor, sprintf("%+.1f%%", pend),
+          row("Selected set (current selections)", since_anchor, sprintf("%+.1f%%", pend),
               sprintf("%+.1fpp", pend - spend), "#34d399"),
-          row("SPY", since_anchor, sprintf("%+.1f%%", spend), "—", "#93c5fd"),
-          row("Ledger (live BUY gate)", sprintf("since %s", lg$entry_d[1]),
+          row("Benchmark", since_anchor, sprintf("%+.1f%%", spend), "—", "#93c5fd"),
+          row("Live log (live signal)", sprintf("since %s", lg$entry_d[1]),
               sprintf("%+.1f%%", lg$basket_ret_pct[1]),
               sprintf("%+.1fpp", lg$basket_ret_pct[1] - lg$spy_ret_pct[1]), "#fbbf24"),
           row("Typical (avg of all starts, 12mo)", "avg 2012-2024", sprintf("%+.1f%%", exp12),
               sprintf("%+.1fpp", beat12), "#94a3b8"))),
-      tags$p(paste("Portfolio (green) = your picks (latest cutoff) run through the 6-strategy DCA in",
-                   "real prices; narrows with the id filter. Grey = the same backtest over ALL picks for",
+      tags$p(paste("Selected set (green) = your selections (latest cutoff) run through phased entry in",
+                   "real prices; narrows with the id filter. Grey = the same backtest over ALL selections for",
                    "the selected window, shown only when you've filtered (otherwise it equals the",
-                   "portfolio). Bold % marks today's level where the solid line ends; dotted lines carry",
+                   "selection). Bold % marks today's level where the solid line ends; dotted lines carry",
                    "it forward along the typical all-years slope."),
              style = "color:#64748b; font-size:0.7rem; margin-top:0.5rem;"))
   })
