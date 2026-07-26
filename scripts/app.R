@@ -1007,6 +1007,9 @@ ui <- navbarPage(
         ),
         actionButton("todayBtnBL", "Set current date",
                      class = "btn-primary", style = "margin-bottom: 0.75rem;"),
+        selectInput("wf_cutoffBL", "Jump to a backtest cutoff",
+                    choices = c("Connect first..." = "")),
+        uiOutput("wf_resolvedBL"),
         tags$p(paste("Latest date = live data; dates since 2026-06-16 replay the",
                      "recorded ledger; earlier dates replay the walk-forward",
                      "BACKTEST at the nearest quarterly cutoff. Same three views",
@@ -1087,6 +1090,9 @@ ui <- navbarPage(
           selectInput("asof_yearFC", NULL, choices = c("Connect first..." = ""), selected = "")),
         actionButton("asofRecentFC", "12 months ago", class = "btn-primary",
                      style = "margin-bottom: 0.5rem; padding:3px 10px; font-size:0.72rem;"),
+        selectInput("cutoffFC", "Jump to a backtest cutoff",
+                    choices = c("Connect first..." = "")),
+        uiOutput("cutoffResolvedFC"),
         selectInput("holdFC", "Hold length (model horizons)",
                     choices = c("4 months" = "4", "7 months" = "7", "12 months" = "12",
                                 "20 months" = "20", "33 months" = "33", "To today" = "240"),
@@ -3076,6 +3082,7 @@ server <- function(input, output, session) {
   app_modeBL <- reactiveVal("current")   # "current", "ledger" (as-of replay), or "wf" (backtest replay)
   ledger_boundsBL <- reactiveVal(NULL)   # c(min_date, max_date) of prediction_ledger
   wf_minBL <- reactiveVal(NULL)          # earliest walk-forward train cutoff
+  wf_cutoffsBL <- reactiveVal(NULL)      # all distinct backtest cutoffs (desc) for the bundle picker
   status_msgBL <- reactiveVal("Ready")
   output$statusMessageBL <- renderText({ status_msgBL() })
   setup_env_switcher(input, session, "BL")
@@ -3101,6 +3108,20 @@ server <- function(input, output, session) {
     updateSelectInput(session, "asof_yearBL",  selected = format(date, "%Y"))
     updateSelectInput(session, "asof_monthBL", selected = as.integer(format(date, "%m")))
     updateSelectInput(session, "asof_dayBL",   selected = as.integer(format(date, "%d")))
+  }
+
+  # A backtest date bundles: every date in [cutoff, next_cutoff) resolves to the
+  # SAME cutoff (MAX cutoff <= date), so the picker offers one entry PER cutoff
+  # instead of raw days that mostly no-op. Quarter label from the cutoff month.
+  bl_qtr <- function(d) paste0("Q", (as.integer(format(d, "%m")) + 2) %/% 3, " ", format(d, "%Y"))
+  bl_cutoff_choices <- function(cuts) {
+    if (length(cuts) == 0) return(character(0))
+    cuts <- sort(cuts, decreasing = TRUE)
+    labs <- vapply(seq_along(cuts), function(i) {
+      base <- sprintf("%s  (%s)", format(cuts[i], "%Y-%m-%d"), bl_qtr(cuts[i]))
+      if (i == 1) paste0(base, "  - and all later dates") else base
+    }, character(1))
+    setNames(as.character(cuts), labs)
   }
 
   # ── Delisting metadata display (raw.ticker_metadata) ──
@@ -3343,15 +3364,17 @@ server <- function(input, output, session) {
       bounds <- dbGetQuery(con, "
         SELECT MIN(prediction_date) AS min_d, MAX(prediction_date) AS max_d
         FROM monitoring.prediction_ledger")
-      wf_min <- dbGetQuery(con, "
-        SELECT MIN(r.train_cutoff_date) AS d
-        FROM validation.walk_forward_ticker_rank r
-        WHERE r.fut_lag = 12
-          AND EXISTS (SELECT 1 FROM validation.walk_forward_cluster_id_map m
-                      WHERE m.train_cutoff_date = r.train_cutoff_date)")$d[1]
+      wf_cuts <- as.Date(dbGetQuery(con, "
+        SELECT DISTINCT train_cutoff_date AS d
+        FROM validation.walk_forward_top_picks
+        ORDER BY train_cutoff_date DESC")$d)
+      wf_min <- if (length(wf_cuts)) min(wf_cuts) else as.Date(NA)
       if (!is.na(bounds$min_d[1])) {
         ledger_boundsBL(c(bounds$min_d[1], bounds$max_d[1]))
         wf_minBL(wf_min)
+        wf_cutoffsBL(wf_cuts)
+        updateSelectInput(session, "wf_cutoffBL",
+                          choices = c("Pick a cutoff..." = "", bl_cutoff_choices(wf_cuts)))
         yr_lo <- as.integer(format(if (!is.na(wf_min)) wf_min else bounds$min_d[1], "%Y"))
         yr_hi <- as.integer(format(bounds$max_d[1], "%Y"))
         updateSelectInput(session, "asof_yearBL", choices = seq(yr_hi, yr_lo),
@@ -3368,6 +3391,36 @@ server <- function(input, output, session) {
     if (is.null(b)) { status_msgBL("Connect first to load the date range."); return() }
     set_asof_dropdowns(session, b[2])
     status_msgBL(sprintf("As-of date set to latest snapshot (%s).", b[2]))
+  })
+
+  # Bundle picker -> set the date to the chosen cutoff (one-way; the readout
+  # below reflects where any manually-typed date lands). A date change already
+  # auto-reloads, so picking a cutoff loads that bundle immediately.
+  observeEvent(input$wf_cutoffBL, {
+    v <- input$wf_cutoffBL
+    if (is.null(v) || !nzchar(v)) return()
+    set_asof_dropdowns(session, as.Date(v))
+  }, ignoreInit = TRUE)
+
+  # Show where the current as-of date actually resolves: which backtest cutoff
+  # it bundles into (so 2025+ dates visibly collapse onto 2024-12-31), or that
+  # it is a live/ledger day where every date is distinct.
+  output$wf_resolvedBL <- renderUI({
+    d <- asof_dateBL(); cuts <- wf_cutoffsBL()
+    if (is.null(d) || is.na(d) || is.null(cuts) || length(cuts) == 0) return(NULL)
+    lb <- ledger_boundsBL()
+    ledger_start <- if (!is.null(lb)) as.Date(lb[1]) else as.Date("2026-06-16")
+    sty <- "color:#64748b; font-size:0.7rem; margin:-0.4rem 0 0.75rem;"
+    if (d >= ledger_start)
+      return(tags$p("Live / ledger date - daily, not bundled.", style = sty))
+    elig <- cuts[cuts <= d]
+    if (length(elig) == 0)
+      return(tags$p(sprintf("Before the first cutoff (%s) - no backtest picks here.",
+                            format(min(cuts), "%Y-%m-%d")), style = sty))
+    rc <- max(elig)
+    note <- if (rc == max(cuts) && d > max(cuts)) " (no newer cutoff yet)" else ""
+    tags$p(sprintf("Resolves to backtest cutoff %s%s.", format(rc, "%Y-%m-%d"), note),
+           style = sty)
   })
 
   # Buy List refresh trigger. Bumped by the Generate button AND by any as-of
@@ -4790,6 +4843,9 @@ server <- function(input, output, session) {
       cim <- dbGetQuery(con, "SELECT DISTINCT train_cutoff_date AS cutoff, id FROM validation.walk_forward_top_picks ORDER BY 1, 2")
       cim$cutoff <- as.Date(cim$cutoff); cim$id <- as.integer(cim$id)
       cut_ids_mapFC(cim)
+      updateSelectInput(session, "cutoffFC",
+                        choices = c("Pick a cutoff..." = "",
+                                    bl_cutoff_choices(sort(unique(cim$cutoff), decreasing = TRUE))))
       yr_lo <- as.integer(format(min(cim$cutoff), "%Y")); yr_hi <- as.integer(format(Sys.Date(), "%Y"))
       updateSelectInput(session, "asof_yearFC", choices = seq(yr_hi, yr_lo))
       def <- Sys.Date() - 365                              # default: ~12 months ago
@@ -4816,6 +4872,27 @@ server <- function(input, output, session) {
     if (!is.null(cut_ids_mapFC())) fc_refresh_ids()
   }, ignoreInit = TRUE)
   observeEvent(input$asofRecentFC, { set_asof_FC(Sys.Date() - 365) })
+
+  # Bundle picker: jump straight to a cutoff (one-way -> date dropdowns; the
+  # asof-change observer above then repopulates the id boxes for that cutoff).
+  observeEvent(input$cutoffFC, {
+    v <- input$cutoffFC
+    if (is.null(v) || !nzchar(v)) return()
+    set_asof_FC(as.Date(v))
+  }, ignoreInit = TRUE)
+
+  output$cutoffResolvedFC <- renderUI({
+    a <- asof_dateFC(); m <- cut_ids_mapFC()
+    if (is.null(a) || is.na(a) || is.null(m) || nrow(m) == 0) return(NULL)
+    cuts <- sort(unique(m$cutoff), decreasing = TRUE)
+    elig <- cuts[cuts <= a]
+    sty <- "color:#64748b; font-size:0.7rem; margin:-0.2rem 0 0.6rem;"
+    if (length(elig) == 0)
+      return(tags$p(sprintf("Before the first cutoff (%s).", format(min(cuts), "%Y-%m-%d")), style = sty))
+    rc <- max(elig)
+    note <- if (rc == max(cuts) && a > max(cuts)) " (no newer cutoff yet)" else ""
+    tags$p(sprintf("Selections as of backtest cutoff %s%s.", format(rc, "%Y-%m-%d"), note), style = sty)
+  })
 
   observeEvent(input$execute_FC, {
     if (input$db_passFC == "") { status_msgFC("Error: Password is not set."); return() }
