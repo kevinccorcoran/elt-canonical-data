@@ -2,7 +2,7 @@
 
 ![Architecture Diagram](tools/alphastream_system_architecture.png?v=4)
 
-AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans and standardizes it, then applies unsupervised clustering (Gaussian mixture models) and statistical scoring to rank groups, validated by walk-forward backtesting with no lookahead and trailing trust gates. An interactive dashboard sits on top.
+AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans and standardizes it, then uses unsupervised clustering and statistical scoring to rank groups, checked against later periods it did not use. An interactive dashboard sits on top.
 
 Walk-forward backtesting shows 61.2% sign agreement across 643,466 cells (June 2026).
 
@@ -12,7 +12,7 @@ AlphaStream is organized into three repositories:
 
 - **`elt-canonical-data`** (this repo, public) — the data layer. Ingestion, raw storage, cleaned canonical tables, and shared infrastructure and documentation.
 - **`inference-models`** (private) — the modeling layer: unsupervised clustering, statistical scoring, walk-forward validation, and serving tables that sit on top of the canonical tables.
-- **`qualstream`** (private, not yet integrated, ETA mid-August 2026) — a standalone weekly agent that produces a qualitative grade for each group member using an LLM with web research, written to a shared `qual` table in Postgres. The inference layer will read it to surface consensus selections, where the statistical grade and the qualitative grade agree. Intentionally decoupled: the only integration point is the shared Postgres.
+- **`qualstream`** (private, not yet integrated, ETA mid-August 2026) — a standalone agent that grades each group member qualitatively using an LLM with web research, refreshed every 3 months.
 
 ## Environments
 
@@ -23,7 +23,7 @@ AlphaStream is organized into three repositories:
 
 ![Pipeline](tools/pipeline_grouped.png?v=2)
 
-The end-to-end flow grouped by stage, each box labeled with the database schema it lands in. Data is pulled in, screened for quality, and standardized into a canonical layer, then split into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, which walk-forward backtesting validates (no lookahead) before it reaches the serving tables the dashboard reads. The machine-learning stages are flagged in the diagram.
+The end-to-end flow grouped by stage, each box labeled with the database schema it lands in. Data is pulled in, screened for quality, and standardized into a canonical layer, then split into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, validated before it reaches the dashboard. The machine-learning stages are flagged in the diagram.
 
 ## Data Lineage
 
