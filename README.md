@@ -38,18 +38,6 @@ Statistical forecasting and signal-generation tables that sit on top of the cano
 
 ## Interactive Analytics Dashboard
 
-### Forecast
-
-![Forecast: selections vs benchmark vs walk-forward backtest](tools/dashboard_forecast.jpg?v=1)
-
-Stand at any past as-of date and track the model's selections forward in real prices against the benchmark, with the walk-forward backtest as the expected path and a live out-of-sample log below. Alpha, beta, and information ratio summarize the selected window.
-
-### Predictions (Backtest Replay)
-
-![Predictions: per-pick realized excess vs benchmark](tools/dashboard_predictions.jpg?v=1)
-
-Replays every ranked pick as it stood at each walk-forward cutoff and shows how each did versus the benchmark over the following window, colored by whether it beat, lagged, or delisted. Tickers and company names are redacted.
-
 ![Dashboard](tools/alpha_forecast.jpg?v=2)
 
 Visualizes cohorts that share similar attributes across lag time horizons spanning up to 60 years.
@@ -83,6 +71,28 @@ Supports:
 - Longs (id 1-12) shade green when both hold; shorts (id 13-19) shade purple when the short worked.
 - Filtering by environment, cluster, vingtile depth, metric, and cutoff range.
 
+### Predictions (Backtest Replay)
+
+![Predictions: per-pick realized excess vs benchmark](tools/dashboard_predictions.jpg?v=1)
+
+Replays every ranked pick as it stood at each walk-forward cutoff and shows how it actually performed against the benchmark.
+
+Supports:
+- One bar per pick, sized by its realized excess return versus the benchmark over the hold window.
+- Color by outcome: beat the benchmark, lagged, or delisted.
+- Filtering by as-of date, replay horizon, cluster, and rank depth.
+
+### Forecast
+
+![Forecast: selections vs benchmark vs walk-forward backtest](tools/dashboard_forecast.jpg?v=1)
+
+Stands at any past date and tracks the model's selections forward in real prices against the benchmark, with the walk-forward backtest as the expected path.
+
+Supports:
+- Selected set versus benchmark versus per-cluster backtest over the chosen hold length.
+- A live out-of-sample log tracked on its own clock since the strategy went live.
+- Alpha, beta, and information ratio for the selected window.
+
 ## Project Timeline
 
 **2024 — Foundation**
@@ -109,10 +119,10 @@ Supports:
 - Added 300% data coverage, removing survivorship bias
 
 **2026 Q3 — Reliability & Data Quality**
-- Restructured the database into clean, clearly named layers
-- Cut out unreliable data so the models train on trustworthy inputs
-- Focused forecasts on the ranges the model handles well
-- Automated monthly retraining and validation to keep the system honest
+- Restructured the database into clean, stage-named schemas
+- Added quality gates that screen out unreliable data before training
+- Focused forecasts on the rank ranges with proven out-of-sample edge
+- Automated monthly retraining and walk-forward validation
 
 ---
 
