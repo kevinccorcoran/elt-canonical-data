@@ -4980,30 +4980,24 @@ server <- function(input, output, session) {
     ls$d <- as.Date(ls$d)
     start <- min(ls$d); today <- max(ls$d)
     lend <- tail(ls$ledger_pct, 1); send <- tail(ls$spy_pct, 1)
-    hmon <- c(0, cv$horizon_months); yb_all <- c(0, cv$all_strategies_ret_pct); yb_spy <- c(0, cv$spy_ret_pct)
-    mfun_all <- function(m) approx(hmon, yb_all, xout = m, rule = 2)$y
-    mfun_spy <- function(m) approx(hmon, yb_spy, xout = m, rule = 2)$y
-    add_m <- function(dt, m) { p <- as.POSIXlt(dt); p$mon <- p$mon + m; as.Date(p) }
-    fedge  <- add_m(start, 12)                         # ledger's own 12mo mark
-    mo_now <- as.numeric(today - start) / 30.44
-    mo_ed  <- as.numeric(fedge - start) / 30.44
-    l_proj <- lend + (mfun_all(mo_ed) - mfun_all(mo_now))
-    s_proj <- send + (mfun_spy(mo_ed) - mfun_spy(mo_now))
-
+    # Out-of-sample panel: show ONLY the realized ledger track. No typical-pace
+    # projection - it borrowed the backtest portfolio's slope (not the ledger's),
+    # and reading a down 6-week ledger as "heading up" was misleading.
     fig <- plot_ly()
     fig <- add_trace(fig, x = ls$d, y = ls$spy_pct, type = "scatter", mode = "lines", name = "SPY",
       legendgroup = "s", line = list(color = "#3b82f6", width = 2.5),
       hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
-    fig <- add_trace(fig, x = c(today, fedge), y = c(send, s_proj), type = "scatter", mode = "lines",
-      legendgroup = "s", showlegend = FALSE, line = list(color = "#3b82f6", width = 2, dash = "dot"),
-      hovertemplate = "SPY projected<br>%{y:.1f}%<extra></extra>")
     fig <- add_trace(fig, x = ls$d, y = ls$ledger_pct, type = "scatter", mode = "lines", name = "Ledger (BUY basket)",
       legendgroup = "l", line = list(color = "#f59e0b", width = 3),
       hovertemplate = "Ledger<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
-    fig <- add_trace(fig, x = c(today, fedge), y = c(lend, l_proj), type = "scatter", mode = "lines",
-      legendgroup = "l", showlegend = FALSE, line = list(color = "#f59e0b", width = 2, dash = "dot"),
-      hovertemplate = "Ledger projected<br>%{y:.1f}%<extra></extra>")
     tdy <- format(today, "%Y-%m-%d")
+    ann <- list(
+      list(x = tdy, y = 1, yref = "paper", text = "today", showarrow = FALSE,
+           font = list(color = "#94a3b8", size = 10), yanchor = "bottom"),
+      list(x = tdy, y = lend, text = sprintf("%+.1f%%", lend), showarrow = FALSE,
+           xanchor = "left", xshift = 6, font = list(color = "#f59e0b", size = 12)),
+      list(x = tdy, y = send, text = sprintf("%+.1f%%", send), showarrow = FALSE,
+           xanchor = "left", xshift = 6, font = list(color = "#3b82f6", size = 12)))
     dark_layout(fig,
       title = list(text = "Live ledger vs SPY, own clock (out-of-sample, since Jun 2026)",
                    font = list(color = "#f8fafc", size = 13), x = 0.5),
@@ -5016,9 +5010,8 @@ server <- function(input, output, session) {
       hovermode = "x unified",
       shapes = list(list(type = "line", x0 = tdy, x1 = tdy, yref = "paper", y0 = 0, y1 = 1,
                          line = list(color = "rgba(148,163,184,0.5)", width = 1, dash = "dot"))),
-      annotations = list(list(x = tdy, y = 1, yref = "paper", text = "today", showarrow = FALSE,
-                              font = list(color = "#94a3b8", size = 10), yanchor = "bottom")),
-      margin = list(l = 60, r = 30, t = 44, b = 40))
+      annotations = ann,
+      margin = list(l = 60, r = 52, t = 44, b = 40))
   })
 
   output$forecastTableFC <- renderUI({
