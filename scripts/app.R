@@ -385,6 +385,203 @@ rank_sep_shapes <- function(ids_display) {
   Filter(Negate(is.null), shapes)
 }
 
+# ─── Forecast tab SQL ───
+# Backtest growth curve: the 8-strategy x 12-vintage $10/mo DCA backtest of the
+# trust-gated top-picks basket, averaged to ONE cumulative return per horizon
+# (12/18/24/30/36 mo) plus the same money's SPY leg. ~10s on prod. The (0,0)
+# anchor and the ledger projection are added in R, not here.
+FORECAST_CURVE_SQL <- "
+WITH vintages AS (
+    SELECT unnest(ARRAY[
+        DATE '2013-07-01', DATE '2014-07-01', DATE '2015-07-01', DATE '2016-07-01',
+        DATE '2017-07-01', DATE '2018-07-01', DATE '2019-07-01', DATE '2020-07-01',
+        DATE '2021-07-01', DATE '2022-07-01', DATE '2023-07-01', DATE '2024-07-01'
+    ]) AS start_d),
+mkt AS (SELECT MAX(date) AS max_d FROM cdm.ingest_combined WHERE ticker='SPY'),
+horizons AS (SELECT unnest(ARRAY[12,18,24,30,36]) AS h),
+vcut AS (SELECT v.start_d, (SELECT MAX(t.train_cutoff_date) FROM validation.walk_forward_top_picks t WHERE t.train_cutoff_date <= v.start_d) AS c FROM vintages v),
+picks AS (SELECT vc.start_d, vc.c, t.ticker FROM vcut vc JOIN validation.walk_forward_top_picks t ON t.train_cutoff_date=vc.c),
+mons AS (SELECT generate_series(0,11) AS m),
+spy_hist AS (SELECT date, adj_close, adj_close/lag(adj_close) OVER (ORDER BY date) - 1 AS ret,
+               CASE WHEN adj_close >= AVG(adj_close) OVER (ORDER BY date ROWS BETWEEN 199 PRECEDING AND CURRENT ROW) THEN 1 ELSE 0 END AS above200
+             FROM cdm.ingest_combined WHERE ticker='SPY'
+               AND date >= (SELECT MIN(start_d) FROM vintages) - INTERVAL '400 days'
+               AND date <= (SELECT MAX(start_d) FROM vintages) + INTERVAL '13 months'),
+spy_drops AS (SELECT start_d, date FROM (
+      SELECT v.start_d, s.date, ROW_NUMBER() OVER (PARTITION BY v.start_d ORDER BY s.ret ASC) AS rn
+      FROM vintages v JOIN spy_hist s ON s.ret IS NOT NULL AND s.date BETWEEN v.start_d AND (v.start_d + INTERVAL '12 months')) z WHERE rn <= 10),
+month_regime AS (SELECT md.start_d, md.d, (SELECT s.above200 FROM spy_hist s WHERE s.date >= md.d ORDER BY s.date LIMIT 1) AS above
+      FROM (SELECT DISTINCT v.start_d, (v.start_d + (mo.m||' months')::interval)::date AS d FROM vintages v CROSS JOIN mons mo) md),
+sched AS (
+    SELECT 'A) MONTHLY'::text AS s, p.start_d, p.ticker, (p.start_d + (mo.m||' months')::interval)::date AS d, 10.0 AS amt FROM picks p CROSS JOIN mons mo
+    UNION ALL SELECT 'B) SPY DIP', p.start_d, p.ticker, (sd.date + 10)::date, 10.0 FROM picks p JOIN spy_drops sd ON sd.start_d=p.start_d
+    UNION ALL SELECT 'C) LUMP', p.start_d, p.ticker, p.start_d, 120.0 FROM picks p
+    UNION ALL SELECT 'D) FRONT 6MO', p.start_d, p.ticker, (p.start_d + (mo.m||' months')::interval)::date, 20.0 FROM picks p CROSS JOIN mons mo WHERE mo.m < 6
+    UNION ALL SELECT 'E) QUARTERLY', p.start_d, p.ticker, (p.start_d + (mo.m||' months')::interval)::date, 30.0 FROM picks p CROSS JOIN mons mo WHERE mo.m % 3 = 0
+    UNION ALL SELECT 'F) MON+200DMA', p.start_d, p.ticker, (p.start_d + (mo.m||' months')::interval)::date, 10.0
+       FROM picks p CROSS JOIN mons mo
+       WHERE EXISTS (SELECT 1 FROM month_regime mr WHERE mr.start_d=p.start_d AND mr.d=(p.start_d + (mo.m||' months')::interval)::date AND mr.above=1)),
+buy_prices AS (SELECT bn.ticker, bn.d, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=bn.ticker AND i.date>=bn.d ORDER BY i.date LIMIT 1) AS px FROM (SELECT DISTINCT ticker, d FROM sched) bn),
+spy_buy AS (SELECT x.d, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker='SPY' AND i.date>=x.d ORDER BY i.date LIMIT 1) AS spy_px FROM (SELECT DISTINCT d FROM sched) x),
+priced AS (SELECT b.s, b.start_d, b.ticker, b.amt, bp.px AS buy_px, sb.spy_px FROM sched b JOIN buy_prices bp ON bp.ticker=b.ticker AND bp.d=b.d JOIN spy_buy sb ON sb.d=b.d),
+acc AS (SELECT s, start_d, ticker,
+      SUM(CASE WHEN buy_px>0 THEN amt/buy_px ELSE 0 END) AS sh, SUM(CASE WHEN buy_px>0 THEN amt ELSE 0 END) AS inv,
+      SUM(CASE WHEN buy_px>0 AND spy_px>0 THEN amt/spy_px ELSE 0 END) AS spy_sh FROM priced GROUP BY s, start_d, ticker),
+ax AS (SELECT a.*, hz.h, (a.start_d + (hz.h||' months')::interval)::date AS exit_d,
+              ((a.start_d + (hz.h||' months')::interval)::date <= (SELECT max_d FROM mkt)) AS valid FROM acc a CROSS JOIN horizons hz),
+final_prices AS (SELECT fn.ticker, fn.exit_d, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=fn.ticker AND i.date<=fn.exit_d ORDER BY i.date DESC LIMIT 1) AS px FROM (SELECT DISTINCT ticker, exit_d FROM ax WHERE valid) fn),
+spy_finals AS (SELECT y.exit_d, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker='SPY' AND i.date<=y.exit_d ORDER BY i.date DESC LIMIT 1) AS px FROM (SELECT DISTINCT exit_d FROM ax WHERE valid) y),
+per AS (
+    SELECT ax.s, ax.start_d, ax.h,
+      100*(SUM(ax.sh*fp.px)/NULLIF(SUM(ax.inv),0)-1)     AS port_ret,
+      100*(SUM(ax.spy_sh*sf.px)/NULLIF(SUM(ax.inv),0)-1) AS spy_ret
+    FROM ax JOIN final_prices fp ON fp.ticker=ax.ticker AND fp.exit_d=ax.exit_d
+            JOIN spy_finals sf ON sf.exit_d=ax.exit_d
+    WHERE ax.valid GROUP BY ax.s, ax.start_d, ax.h)
+SELECT p.h AS horizon_months,
+       ROUND(AVG(p.port_ret)::numeric,2)             AS all_strategies_ret_pct,
+       ROUND(AVG(p.spy_ret)::numeric,2)              AS spy_ret_pct,
+       ROUND(AVG(p.port_ret - p.spy_ret)::numeric,2) AS beat_pct,
+       COUNT(*)                                      AS n_cells
+FROM per p GROUP BY p.h ORDER BY p.h;"
+
+# Live ledger basket = the earliest recorded BUY snapshot (inception, 2026-06-16),
+# equal-weighted, graded to the latest bar off the CURRENT series so a post-entry
+# split can't re-base it (same split-safe rule the Buy List ledger replay uses).
+FORECAST_LEDGER_SQL <- "
+WITH first_snap AS (
+    SELECT ticker, entry_date
+    FROM monitoring.prediction_ledger
+    WHERE prediction_date = (SELECT MIN(prediction_date) FROM monitoring.prediction_ledger)
+      AND global_action = 'BUY'
+),
+entry_now AS (
+    SELECT ic.ticker, ic.adj_close AS entry_px
+    FROM cdm.ingest_combined ic
+    JOIN first_snap k ON k.ticker = ic.ticker AND k.entry_date = ic.date
+),
+now_px AS (
+    SELECT DISTINCT ON (ticker) ticker, adj_close AS px_now
+    FROM cdm.ingest_combined
+    WHERE ticker IN (SELECT ticker FROM first_snap)
+      AND date >= (SELECT MIN(entry_date) FROM first_snap) - INTERVAL '10 days'
+    ORDER BY ticker, date DESC
+),
+spy AS (
+    SELECT
+      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY'
+         AND date = (SELECT MIN(entry_date) FROM first_snap)) AS spy_entry,
+      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY'
+         ORDER BY date DESC LIMIT 1) AS spy_now
+)
+SELECT
+  COUNT(*) AS n_names,
+  ROUND((AVG((n.px_now/NULLIF(e.entry_px,0))-1)*100)::numeric, 2) AS basket_ret_pct,
+  ROUND(((SELECT spy_now FROM spy)/(SELECT spy_entry FROM spy)-1)::numeric*100, 2) AS spy_ret_pct,
+  (SELECT MIN(entry_date) FROM first_snap)::text AS entry_d,
+  ROUND((( (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
+          - (SELECT MIN(entry_date) FROM first_snap) )/30.0)::numeric, 2) AS months_held
+FROM first_snap f
+JOIN entry_now e ON e.ticker = f.ticker
+JOIN now_px n ON n.ticker = f.ticker;"
+
+# Live all-strategy portfolio, REAL calendar monthly series. Buys the CURRENT
+# picks (latest cutoff) starting at __ANCHOR__ via the 6-strategy DCA, values the
+# accumulated shares at each month-end, averages the strategies, and returns the
+# same money's SPY leg beside it. __ANCHOR__ is replaced (gsub) with the lookback
+# start date in R. ~7s on prod. Latest cutoff (2024-12-31) is <= any anchor we
+# use, so buying its picks in the past is knowledge the model already had.
+FORECAST_LIVE_SQL <- "
+WITH params AS (SELECT DATE '__ANCHOR__' AS start_d),
+cutoffp AS (SELECT MAX(train_cutoff_date) AS cutoff FROM validation.walk_forward_top_picks, params p WHERE train_cutoff_date <= p.start_d),
+maxd AS (SELECT MAX(date) AS md FROM cdm.ingest_combined WHERE ticker='SPY'),
+picks AS (SELECT t.ticker FROM validation.walk_forward_top_picks t, cutoffp c WHERE t.train_cutoff_date = c.cutoff __IDFILTER__),
+mons AS (SELECT generate_series(0,11) AS m),
+spy_hist AS (SELECT date, adj_close, adj_close/lag(adj_close) OVER (ORDER BY date) - 1 AS ret,
+               CASE WHEN adj_close >= AVG(adj_close) OVER (ORDER BY date ROWS BETWEEN 199 PRECEDING AND CURRENT ROW) THEN 1 ELSE 0 END AS above200
+             FROM cdm.ingest_combined WHERE ticker='SPY'
+               AND date >= (SELECT start_d FROM params) - INTERVAL '400 days'
+               AND date <= (SELECT start_d FROM params) + INTERVAL '13 months'),
+spy_drops AS (SELECT date FROM (
+      SELECT s.date, ROW_NUMBER() OVER (ORDER BY s.ret ASC) AS rn
+      FROM spy_hist s, params p WHERE s.ret IS NOT NULL AND s.date BETWEEN p.start_d AND (p.start_d + INTERVAL '12 months')) z WHERE rn <= 10),
+month_regime AS (SELECT md.d, (SELECT s.above200 FROM spy_hist s WHERE s.date >= md.d ORDER BY s.date LIMIT 1) AS above
+      FROM (SELECT (p.start_d + (mo.m||' months')::interval)::date AS d FROM params p CROSS JOIN mons mo) md),
+sched AS (
+    SELECT 'A) MONTHLY'::text AS s, pk.ticker, (p.start_d + (mo.m||' months')::interval)::date AS d, 10.0 AS amt FROM picks pk CROSS JOIN mons mo, params p
+    UNION ALL SELECT 'B) SPY DIP', pk.ticker, (sd.date + 10)::date, 10.0 FROM picks pk CROSS JOIN spy_drops sd
+    UNION ALL SELECT 'C) LUMP', pk.ticker, p.start_d, 120.0 FROM picks pk, params p
+    UNION ALL SELECT 'D) FRONT 6MO', pk.ticker, (p.start_d + (mo.m||' months')::interval)::date, 20.0 FROM picks pk CROSS JOIN mons mo, params p WHERE mo.m < 6
+    UNION ALL SELECT 'E) QUARTERLY', pk.ticker, (p.start_d + (mo.m||' months')::interval)::date, 30.0 FROM picks pk CROSS JOIN mons mo, params p WHERE mo.m % 3 = 0
+    UNION ALL SELECT 'F) MON+200DMA', pk.ticker, (p.start_d + (mo.m||' months')::interval)::date, 10.0
+       FROM picks pk CROSS JOIN mons mo, params p
+       WHERE EXISTS (SELECT 1 FROM month_regime mr WHERE mr.d=(p.start_d + (mo.m||' months')::interval)::date AND mr.above=1)),
+buy_prices AS (SELECT bn.ticker, bn.d, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=bn.ticker AND i.date>=bn.d ORDER BY i.date LIMIT 1) AS px FROM (SELECT DISTINCT ticker, d FROM sched) bn),
+priced_buys AS (SELECT sc.s, sc.ticker, sc.d AS buy_d, sc.amt, sc.amt/NULLIF(bp.px,0) AS shares FROM sched sc JOIN buy_prices bp ON bp.ticker=sc.ticker AND bp.d=sc.d WHERE bp.px>0),
+vdates AS (SELECT generate_series(p.start_d, LEAST((p.start_d + INTERVAL '__HOLD__ months'), (SELECT md FROM maxd)), INTERVAL '1 month')::date AS d FROM params p),
+val_prices AS (SELECT k.ticker, k.vdate, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=k.ticker AND i.date<=k.vdate ORDER BY i.date DESC LIMIT 1) AS px
+      FROM (SELECT DISTINCT pb.ticker, vd.d AS vdate FROM priced_buys pb CROSS JOIN vdates vd) k),
+holdings AS (SELECT pb.s, pb.ticker, vd.d AS vdate, SUM(pb.shares) AS shares, SUM(pb.amt) AS invested
+      FROM priced_buys pb CROSS JOIN vdates vd WHERE pb.buy_d <= vd.d GROUP BY pb.s, pb.ticker, vd.d),
+valued AS (SELECT h.s, h.vdate, SUM(h.shares*vp.px) AS value, SUM(h.invested) AS invested
+      FROM holdings h JOIN val_prices vp ON vp.ticker=h.ticker AND vp.vdate=h.vdate GROUP BY h.s, h.vdate),
+per_strat AS (SELECT s, vdate, 100*(value/NULLIF(invested,0)-1) AS ret FROM valued),
+spy_base AS (SELECT adj_close AS px0 FROM cdm.ingest_combined, params p WHERE ticker='SPY' AND date>=p.start_d ORDER BY date LIMIT 1),
+spy_val AS (SELECT vd.d AS vdate, (SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY' AND date<=vd.d ORDER BY date DESC LIMIT 1) AS px FROM vdates vd)
+SELECT ps.vdate::text AS vdate,
+       ROUND(AVG(ps.ret)::numeric,2) AS portfolio_pct,
+       ROUND(((sv.px/(SELECT px0 FROM spy_base))-1)::numeric*100,2) AS spy_pct
+FROM per_strat ps JOIN spy_val sv ON sv.vdate=ps.vdate
+GROUP BY ps.vdate, sv.px ORDER BY ps.vdate;"
+
+# Live ledger vs SPY on the ledger's OWN clock: daily cumulative return of the
+# inception BUY basket (equal-weight, split-safe current-series entry) and the
+# same-day SPY, both rebased to 0 at 2026-06-15. Fast (~0.1s). This is the fair
+# out-of-sample view - the ledger is 6 weeks old and cannot share the 2-year
+# calendar axis with a portfolio that has compounded since 2024.
+FORECAST_LEDGER_SERIES_SQL <- "
+WITH first_snap AS (
+    SELECT ticker, entry_date FROM monitoring.prediction_ledger
+    WHERE prediction_date = (SELECT MIN(prediction_date) FROM monitoring.prediction_ledger)
+      AND global_action = 'BUY'
+),
+entry_now AS (SELECT ic.ticker, ic.adj_close AS entry_px
+    FROM cdm.ingest_combined ic JOIN first_snap k ON k.ticker=ic.ticker AND k.entry_date=ic.date),
+dates AS (SELECT DISTINCT date AS d FROM cdm.ingest_combined
+    WHERE date >= (SELECT MIN(entry_date) FROM first_snap)
+      AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY') AND ticker='SPY'),
+px AS (SELECT en.ticker, d.d, en.entry_px,
+        (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=en.ticker AND i.date<=d.d ORDER BY i.date DESC LIMIT 1) AS px
+       FROM entry_now en CROSS JOIN dates d),
+spy AS (SELECT d.d,
+        (SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY' AND date<=d.d ORDER BY date DESC LIMIT 1) AS px,
+        (SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY' AND date=(SELECT MIN(entry_date) FROM first_snap)) AS px0
+       FROM dates d)
+SELECT p.d::text AS d,
+       ROUND((AVG(p.px/NULLIF(p.entry_px,0)-1)*100)::numeric,2) AS ledger_pct,
+       ROUND(((s.px/s.px0)-1)::numeric*100,2) AS spy_pct
+FROM px p JOIN spy s ON s.d=p.d
+GROUP BY p.d, s.px, s.px0 ORDER BY p.d;"
+
+# Risk-adjustment series: the EQUAL-WEIGHT buy-and-hold basket value (=$1 -> avg
+# of price/entry over the picks) and SPY value, monthly, over the hold window.
+# Equal-weight-hold (not DCA) so month-over-month ratios are pure time-weighted
+# returns with no cash-flow distortion -> clean beta/alpha/vol regression in R.
+FORECAST_RISK_SQL <- "
+WITH params AS (SELECT DATE '__ANCHOR__' AS start_d),
+cutoffp AS (SELECT MAX(train_cutoff_date) AS cutoff FROM validation.walk_forward_top_picks, params p WHERE train_cutoff_date <= p.start_d),
+maxd AS (SELECT MAX(date) AS md FROM cdm.ingest_combined WHERE ticker='SPY'),
+enddate AS (SELECT LEAST((SELECT start_d FROM params) + INTERVAL '__HOLD__ months', (SELECT md FROM maxd)) AS ed),
+picks AS (SELECT t.ticker FROM validation.walk_forward_top_picks t, cutoffp c WHERE t.train_cutoff_date = c.cutoff __IDFILTER__),
+entry AS (SELECT pk.ticker, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=pk.ticker AND i.date>=(SELECT start_d FROM params) ORDER BY i.date LIMIT 1) AS e_px FROM picks pk),
+vdates AS (SELECT generate_series((SELECT start_d FROM params), (SELECT ed FROM enddate), INTERVAL '1 month')::date AS d),
+bv AS (SELECT v.d, e.ticker, e.e_px, (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=e.ticker AND i.date<=v.d ORDER BY i.date DESC LIMIT 1) AS px FROM vdates v CROSS JOIN entry e WHERE e.e_px>0),
+spy_e AS (SELECT adj_close AS px0 FROM cdm.ingest_combined, params p WHERE ticker='SPY' AND date>=p.start_d ORDER BY date LIMIT 1)
+SELECT v.d::text AS d,
+   AVG(bv.px/NULLIF(bv.e_px,0))::double precision AS basket_val,
+   ((SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY' AND date<=v.d ORDER BY date DESC LIMIT 1)/(SELECT px0 FROM spy_e))::double precision AS spy_val
+FROM vdates v JOIN bv ON bv.d=v.d GROUP BY v.d ORDER BY v.d;"
+
 # ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
@@ -593,11 +790,12 @@ ui <- navbarPage(
       mainPanel(div(class = "main-card",
         h4("Per-ticker scatter — analysis.ticker_cluster_segments × clustering.ticker_cluster_volatility_summary",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
-        tags$div(style = "margin-bottom: 0.75rem;",
+        tags$div(style = "margin-bottom: 0.35rem;",
           actionButton("clusterShowAll", "Show all", class = "btn-primary",
                        style = "margin-right: 0.5rem;"),
           actionButton("clusterHideAll", "Hide all", class = "btn-primary")
         ),
+        checkboxInput("clusterNumbers", "Show cluster numbers (one per cluster; hidden clusters drop their number)", value = TRUE),
         plotlyOutput("clusterPlot", height = "600px")
       ))
     )
@@ -828,6 +1026,50 @@ ui <- navbarPage(
         uiOutput("buyChartContainerBL"),
         tags$br(),
         DT::DTOutput("buyTableBL")
+      ))
+    )
+  ),
+
+  # ── Tab: Forecast (backtest growth curve vs live ledger) ──
+  tabPanel("Forecast",
+    sidebarLayout(
+      make_sidebar("FC", "Database Connection (Forecast)", tagList(
+        tags$label("As-of date (stand here in the past)", style = "color: #94a3b8; font-weight: 600;"),
+        tags$style(HTML(".shiny-split-layout > div { overflow: visible; }")),
+        splitLayout(cellWidths = c("30%", "38%", "32%"),
+          selectInput("asof_dayFC", NULL, choices = 1:31, selected = 1),
+          selectInput("asof_monthFC", NULL, choices = setNames(1:12, month.abb), selected = 1),
+          selectInput("asof_yearFC", NULL, choices = c("Connect first..." = ""), selected = "")),
+        actionButton("asofRecentFC", "12 months ago", class = "btn-primary",
+                     style = "margin-bottom: 0.5rem; padding:3px 10px; font-size:0.72rem;"),
+        selectInput("holdFC", "Hold length (model horizons)",
+                    choices = c("4 months" = "4", "7 months" = "7", "12 months" = "12",
+                                "20 months" = "20", "33 months" = "33", "To today" = "240"),
+                    selected = "12"),
+        tags$span(paste("How long you hold before measuring. These are the model's Fibonacci forecast",
+                        "horizons (same set as the Buy List's replay), capped at 33mo - holding to a",
+                        "horizon realizes that prediction. 'To today' holds past it, where the edge decays."),
+                  style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
+        checkboxGroupInput("idsFC", "Portfolio cluster ids (all on; uncheck to narrow)",
+                           choices = NULL, inline = TRUE),
+        div(style = "margin-top:-0.3rem; margin-bottom:0.5rem;",
+          actionButton("idsAllFC", "Select all", style = "padding:2px 10px; font-size:0.72rem; margin-right:0.35rem;"),
+          actionButton("idsNoneFC", "Deselect all", style = "padding:2px 10px; font-size:0.72rem;"),
+          tags$span("Connect to load ids.", style = "color:#64748b; font-size:0.7rem; margin-left:0.4rem;")),
+        tags$p(paste("Stand at any past date: it buys the picks known then (all-strategy",
+                     "DCA) and tracks them to today in REAL prices vs SPY, with the backtest",
+                     "as the expectation and the live ledger in its own panel below. Solid =",
+                     "realized, dotted = forward. First Generate ~6s, then under a second."),
+               style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;")
+      )),
+      mainPanel(div(class = "main-card",
+        uiOutput("forecastNoteFC"),
+        uiOutput("forecastRiskFC"),
+        plotlyOutput("forecastPlotFC", height = "560px"),
+        tags$br(),
+        plotlyOutput("forecastLedgerFC", height = "300px"),
+        tags$br(),
+        uiOutput("forecastTableFC")
       ))
     )
   )
@@ -1624,7 +1866,7 @@ server <- function(input, output, session) {
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
         SELECT s.ticker,
-               v.id,
+               v.id::int AS id,   -- cast bigint->int: integer64 breaks the per-id for-loop (subscript out of bounds)
                s.months_count,
                s.growth_pct_per_month
         FROM analysis.ticker_cluster_segments s
@@ -1643,9 +1885,6 @@ server <- function(input, output, session) {
     if (nrow(df) == 0) return(empty_plot("No data matched your filters."))
 
     df <- df[is.finite(df$months_count) & is.finite(df$growth_pct_per_month), ]
-    # Draw lower-priority ids first so id=1 ends up on top of the stack.
-    df <- df[order(-df$id), ]
-    df$id_factor <- factor(df$id)
     palette20 <- c("#ef4444","#f97316","#eab308","#84cc16","#22c55e","#10b981",
                    "#14b8a6","#06b6d4","#0ea5e9","#3b82f6","#6366f1","#8b5cf6",
                    "#a855f7","#d946ef","#ec4899","#f43f5e","#fbbf24","#a3e635",
@@ -1653,32 +1892,40 @@ server <- function(input, output, session) {
     id_levels <- sort(unique(df$id))
     color_map <- setNames(palette20[((seq_along(id_levels) - 1) %% length(palette20)) + 1],
                           as.character(id_levels))
-
-    # Clip y-axis using p0.5..p99.5 with a generous ceiling so high-growth
-    # clusters (id=1, 2) stay visible while penny-stock crashes (-50%) don't
-    # compress the bulk into y=0. Min ceiling 25 because the highest-growth
-    # cluster (id=1) typically has 14-50 tickers with growth 12-25%/mo, which
-    # the p99.5 of the bulk distribution (~8%) would clip out of view.
+    # Clip y-axis (p0.5..p99.5, min ceiling 25) so high-growth clusters stay
+    # visible while penny-stock crashes don't compress the bulk into y=0.
     y_lo <- min(-10, quantile(df$growth_pct_per_month, 0.005, na.rm = TRUE))
     y_hi <- max( 25, quantile(df$growth_pct_per_month, 0.995, na.rm = TRUE))
     x_hi <- quantile(df$months_count,         0.995, na.rm = TRUE)
+    show_nums <- is.null(input$clusterNumbers) || isTRUE(input$clusterNumbers)
 
-    p <- ggplot(df, aes(x = months_count, y = growth_pct_per_month, color = id_factor, text = ticker)) +
-      geom_point(size = 0.25, alpha = 0.7) +
-      scale_color_manual(values = color_map) +
-      coord_cartesian(xlim = c(0, x_hi), ylim = c(y_lo, y_hi), expand = FALSE) +
-      labs(x = "Tenure (months)", y = "Growth rate (%/mo)", color = "id") +
-      theme_minimal(base_size = 10) +
-      theme(
-        plot.background  = element_rect(fill = "#0b1220", color = NA),
-        panel.background = element_rect(fill = "#0b1220", color = NA),
-        panel.grid       = element_line(color = "#1e293b"),
-        text             = element_text(color = "#cbd5e1"),
-        strip.text       = element_text(color = "#f8fafc")
-      )
-
-    ggplotly(p, tooltip = "text") %>%
-      layout(paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)") %>%
+    # One markers trace + one centroid-text trace PER cluster, sharing a
+    # legendgroup so toggling a cluster (legend click / Show-Hide all) also
+    # drops its number. The number trace is only added when the checkbox is on.
+    fig <- plot_ly()
+    for (k in id_levels) {
+      sub <- df[df$id == k, ]
+      col <- color_map[[as.character(k)]]
+      fig <- add_trace(fig, x = sub$months_count, y = sub$growth_pct_per_month,
+        type = "scatter", mode = "markers", name = as.character(k), legendgroup = as.character(k),
+        marker = list(color = col, size = 3, opacity = 0.6),
+        text = sub$ticker, hovertemplate = paste0("%{text}<br>id ", k, "<extra></extra>"))
+      if (show_nums) {
+        fig <- add_trace(fig, x = median(sub$months_count, na.rm = TRUE),
+          y = median(sub$growth_pct_per_month, na.rm = TRUE),
+          type = "scatter", mode = "text", legendgroup = as.character(k), showlegend = FALSE,
+          text = as.character(k), hoverinfo = "skip",
+          textfont = list(color = "#f8fafc", size = 16))
+      }
+    }
+    dark_layout(fig,
+      xaxis = list(title = "Tenure (months)", range = c(0, x_hi), color = "#cbd5e1",
+                   gridcolor = "#1e293b", zeroline = FALSE),
+      yaxis = list(title = "Growth rate (%/mo)", range = c(y_lo, y_hi), color = "#cbd5e1",
+                   gridcolor = "#1e293b", zeroline = FALSE),
+      legend = list(font = list(color = "#e2e8f0"), title = list(text = "id"),
+                    groupclick = "togglegroup"),
+      margin = list(l = 55, r = 20, t = 15, b = 45)) %>%
       config(displayModeBar = FALSE)
   })
 
@@ -4421,6 +4668,399 @@ server <- function(input, output, session) {
               c("sparse_cluster", "sparse_ticker", "sparse_both"),
               c("#f59e0b", "#f59e0b", "#d97706")))
   }, server = FALSE)
+
+  # ── FORECAST: backtest growth curve + live ledger + projection ──
+  app_dataFC   <- reactiveVal(NULL)   # list(curve, live, ledger, ledseries, anchor, id_lbl)
+  avail_idsFC  <- reactiveVal(NULL)   # ids present in the current cutoff (checkbox choices)
+  status_msgFC <- reactiveVal("Ready")
+  # caches for the input-INDEPENDENT queries: backtest curve + ledger are the same
+  # every Generate, so fetch once per session. Only the live query re-runs.
+  fc_curve     <- reactiveVal(NULL)
+  fc_ledger    <- reactiveVal(NULL)
+  fc_ledseries <- reactiveVal(NULL)
+  output$statusMessageFC <- renderText({ status_msgFC() })
+  setup_env_switcher(input, session, "FC")
+
+  # The valid cluster ids depend on which cutoff the History-start resolves to
+  # (id 4 exists at the Dec-2024 cutoff but not at Jun-2024), so the checkboxes
+  # must track the anchor. Load the full (cutoff, id) map once on Connect, then
+  # repopulate the boxes locally whenever History-start changes.
+  cut_ids_mapFC <- reactiveVal(NULL)
+  # assemble the as-of date from the day/month/year dropdowns (mirror the Buy List)
+  asof_dateFC <- function() {
+    y <- suppressWarnings(as.integer(input$asof_yearFC))
+    m <- suppressWarnings(as.integer(input$asof_monthFC))
+    d <- suppressWarnings(as.integer(input$asof_dayFC))
+    if (is.na(y) || is.na(m) || is.na(d)) return(NULL)
+    safe_date <- function(s) tryCatch(as.Date(s), error = function(e) as.Date(NA))
+    dt <- safe_date(sprintf("%04d-%02d-%02d", y, m, d))
+    while (is.na(dt) && d > 28) { d <- d - 1; dt <- safe_date(sprintf("%04d-%02d-%02d", y, m, d)) }
+    dt
+  }
+  set_asof_FC <- function(date) {
+    updateSelectInput(session, "asof_yearFC",  selected = format(date, "%Y"))
+    updateSelectInput(session, "asof_monthFC", selected = as.integer(format(date, "%m")))
+    updateSelectInput(session, "asof_dayFC",   selected = as.integer(format(date, "%d")))
+  }
+  fc_ids_for <- function(anchor) {
+    m <- cut_ids_mapFC(); if (is.null(m) || nrow(m) == 0) return(integer(0))
+    elig <- m$cutoff[m$cutoff <= anchor]; if (length(elig) == 0) return(integer(0))
+    sort(as.integer(unique(m$id[m$cutoff == max(elig)])))
+  }
+  fc_refresh_ids <- function() {
+    a <- asof_dateFC(); if (is.null(a) || is.na(a)) return()
+    ids <- fc_ids_for(as.Date(a))
+    avail_idsFC(ids)
+    updateCheckboxGroupInput(session, "idsFC", choices = ids, selected = ids, inline = TRUE)
+  }
+
+  observeEvent(input$connect_btnFC, {
+    if (input$db_passFC == "") { status_msgFC("Error: Password is not set."); return() }
+    status_msgFC("Connecting...")
+    fc_curve(NULL); fc_ledger(NULL); fc_ledseries(NULL)  # invalidate caches on (re)connect
+    tryCatch({
+      con <- get_con(input, "FC")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      n <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM monitoring.prediction_ledger")$n[1]
+      cim <- dbGetQuery(con, "SELECT DISTINCT train_cutoff_date AS cutoff, id FROM validation.walk_forward_top_picks ORDER BY 1, 2")
+      cim$cutoff <- as.Date(cim$cutoff); cim$id <- as.integer(cim$id)
+      cut_ids_mapFC(cim)
+      yr_lo <- as.integer(format(min(cim$cutoff), "%Y")); yr_hi <- as.integer(format(Sys.Date(), "%Y"))
+      updateSelectInput(session, "asof_yearFC", choices = seq(yr_hi, yr_lo))
+      def <- Sys.Date() - 365                              # default: ~12 months ago
+      set_asof_FC(def)
+      ids0 <- fc_ids_for(def); avail_idsFC(ids0)           # refresh ids now, don't wait for the flush
+      updateCheckboxGroupInput(session, "idsFC", choices = ids0, selected = ids0, inline = TRUE)
+      status_msgFC(sprintf("Connected - %s ledger rows; ids as of %s: %s.",
+                           as.numeric(n), format(def, "%b %Y"), paste(ids0, collapse = ", ")))
+    }, error = function(e) { status_msgFC(paste("Error:", e$message)) })
+  })
+
+  observeEvent(input$idsAllFC, {
+    req(avail_idsFC())
+    updateCheckboxGroupInput(session, "idsFC", choices = avail_idsFC(),
+                             selected = avail_idsFC(), inline = TRUE)
+  })
+  observeEvent(input$idsNoneFC, {
+    req(avail_idsFC())
+    updateCheckboxGroupInput(session, "idsFC", choices = avail_idsFC(),
+                             selected = character(0), inline = TRUE)
+  })
+  # As-of date changed -> repopulate the id boxes for that cutoff's clusters
+  observeEvent(asof_dateFC(), {
+    if (!is.null(cut_ids_mapFC())) fc_refresh_ids()
+  }, ignoreInit = TRUE)
+  observeEvent(input$asofRecentFC, { set_asof_FC(Sys.Date() - 365) })
+
+  observeEvent(input$execute_FC, {
+    if (input$db_passFC == "") { status_msgFC("Error: Password is not set."); return() }
+    anchor <- asof_dateFC()
+    if (is.null(anchor) || is.na(anchor)) { status_msgFC("Pick an as-of date first."); return() }
+    status_msgFC(sprintf("Loading portfolio + SPY from %s to today...", format(anchor, "%b %Y")))
+    tryCatch({
+      con <- get_con(input, "FC")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      DBI::dbExecute(con, "SET statement_timeout = '120s'")
+      ids_sel <- as.integer(input$idsFC)
+      # empty OR every available id checked (the default) => no filter, "all ids"
+      all_on  <- length(ids_sel) == 0 || (!is.null(avail_idsFC()) && setequal(ids_sel, avail_idsFC()))
+      idfilter <- if (all_on) "" else sprintf("AND t.id IN (%s)", paste(sort(ids_sel), collapse = ","))
+      id_lbl   <- if (all_on) "all ids" else paste("ids", paste(sort(ids_sel), collapse = ","))
+      # curve + ledger are input-independent -> compute once per session, then cache
+      # (curve is always all-ids: a per-cutoff id can't be traced across the 12 vintages).
+      if (is.null(fc_curve())) fc_curve(coerce_numeric_cols(dbGetQuery(con, FORECAST_CURVE_SQL),
+                  c("horizon_months","all_strategies_ret_pct","spy_ret_pct","beat_pct","n_cells")))
+      curve <- fc_curve()
+      if (is.null(fc_ledger())) {
+        lg0 <- dbGetQuery(con, FORECAST_LEDGER_SQL)
+        for (cc in setdiff(names(lg0), "entry_d")) lg0[[cc]] <- as.numeric(lg0[[cc]])
+        fc_ledger(lg0) }
+      ledger <- fc_ledger()
+      if (is.null(fc_ledseries())) {
+        ls0 <- dbGetQuery(con, FORECAST_LEDGER_SERIES_SQL)
+        ls0$ledger_pct <- as.numeric(ls0$ledger_pct); ls0$spy_pct <- as.numeric(ls0$spy_pct)
+        fc_ledseries(ls0) }
+      ledseries <- fc_ledseries()
+      # live portfolio depends on anchor + id filter + hold length -> always re-run (~0.7s)
+      hold_v   <- if (is.null(input$holdFC)) "36" else input$holdFC
+      H        <- as.integer(hold_v); to_today <- (hold_v == "240")
+      market_max <- as.Date(dbGetQuery(con, "SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker='SPY'")$d[1])
+      # An as-of date past the latest price bar has no forward window to hold, so
+      # every downstream query comes back empty. Say THAT, don't blame the id filter.
+      if (!is.na(market_max) && anchor > market_max) { app_dataFC(NULL)
+        status_msgFC(sprintf("As-of date %s is past the latest price (%s) - no forward data to hold. Pick an earlier date (try '12 months ago').",
+          format(anchor, "%b %d, %Y"), format(market_max, "%b %d, %Y"))); return() }
+      live   <- dbGetQuery(con, gsub("__ANCHOR__", format(anchor, "%Y-%m-%d"),
+                  gsub("__HOLD__", as.character(H),
+                    gsub("__IDFILTER__", idfilter, FORECAST_LIVE_SQL, fixed = TRUE), fixed = TRUE), fixed = TRUE))
+      if (nrow(live) == 0) { app_dataFC(NULL)
+        status_msgFC(sprintf("No portfolio picks for %s in the cutoff at %s - clear the filter or choose other ids.",
+          id_lbl, format(anchor, "%b %Y"))); return() }
+      live$portfolio_pct <- as.numeric(live$portfolio_pct); live$spy_pct <- as.numeric(live$spy_pct)
+      # Grey benchmark = the SAME 6-strategy DCA backtest for THIS window but over
+      # ALL picks (no id filter), so the grey line tracks the selected period's
+      # market instead of the all-years average. With no filter it equals the
+      # portfolio, so reuse it; only pay for a second query when ids are narrowed.
+      if (all_on) {
+        bench <- data.frame(vdate = live$vdate, bench_pct = live$portfolio_pct, stringsAsFactors = FALSE)
+      } else {
+        b0 <- dbGetQuery(con, gsub("__ANCHOR__", format(anchor, "%Y-%m-%d"),
+                gsub("__HOLD__", as.character(H),
+                  gsub("__IDFILTER__", "", FORECAST_LIVE_SQL, fixed = TRUE), fixed = TRUE), fixed = TRUE))
+        bench <- data.frame(vdate = b0$vdate, bench_pct = as.numeric(b0$portfolio_pct), stringsAsFactors = FALSE)
+      }
+      # risk-adjustment: equal-weight held basket monthly series -> beta / alpha / vol / info-ratio
+      risk <- tryCatch({
+        rs0 <- dbGetQuery(con, gsub("__ANCHOR__", format(anchor, "%Y-%m-%d"),
+                 gsub("__HOLD__", as.character(H),
+                   gsub("__IDFILTER__", idfilter, FORECAST_RISK_SQL, fixed = TRUE), fixed = TRUE), fixed = TRUE))
+        bvv <- as.numeric(rs0$basket_val); svv <- as.numeric(rs0$spy_val)
+        if (length(bvv) >= 5) {
+          rb <- bvv[-1]/bvv[-length(bvv)] - 1; rsp <- svv[-1]/svv[-length(svv)] - 1
+          vsr <- var(rsp); beta <- if (isTRUE(vsr > 0)) cov(rb, rsp)/vsr else NA_real_
+          d_ <- rb - rsp
+          list(beta = beta, alpha_ann = (mean(rb) - beta*mean(rsp))*12*100,
+               ir = if (isTRUE(sd(d_) > 0)) mean(d_)/sd(d_)*sqrt(12) else NA_real_,
+               vol_pf = sd(rb)*sqrt(12)*100, vol_spy = sd(rsp)*sqrt(12)*100, n = length(rb))
+        } else NULL
+      }, error = function(e) NULL)
+      app_dataFC(list(curve = curve, live = live, bench = bench, all_on = all_on, ledger = ledger,
+                      ledseries = ledseries, anchor = anchor,
+                      id_lbl = id_lbl, hold_months = H, to_today = to_today, market_max = market_max, risk = risk))
+      win_lbl <- if (to_today) sprintf("%d mo to today", nrow(live) - 1) else sprintf("%dmo hold", H)
+      status_msgFC(sprintf("Loaded - %s from %s, %s; portfolio %+.1f%% vs SPY %+.1f%%.",
+        win_lbl, format(anchor, "%b %Y"), id_lbl, tail(live$portfolio_pct, 1), tail(live$spy_pct, 1)))
+    }, error = function(e) { app_dataFC(NULL); status_msgFC(paste("Error:", e$message)) })
+  })
+
+  output$forecastNoteFC <- renderUI({
+    d <- app_dataFC(); if (is.null(d)) return(NULL)
+    live <- d$live; cv <- d$curve; lg <- d$ledger
+    pend <- tail(live$portfolio_pct, 1); spend <- tail(live$spy_pct, 1)
+    beat_live <- pend - spend
+    beat12 <- cv$beat_pct[cv$horizon_months == 12][1]
+    H <- if (is.null(d$hold_months)) 36 else d$hold_months
+    win <- if (isTRUE(d$to_today)) sprintf("%d mo, held to today", nrow(live) - 1) else sprintf("%dmo hold", H)
+    tags$div(style = "color:#cbd5e1; font-size:0.82rem; margin-bottom:0.6rem; line-height:1.5;",
+      HTML(sprintf(paste0(
+        "<b>As of %s</b> (%s): the picks returned <b>%+.1f%%</b> vs SPY <b>%+.1f%%</b> = <b>%+.1fpp</b>. ",
+        "Typically +%.1fpp at 12mo (avg of all starts, not this window). &nbsp;|&nbsp; <b>Ledger</b> (live out-of-sample, since %s): ",
+        "<b>%+.1f%%</b> vs SPY <b>%+.1f%%</b> = <b>%+.1fpp</b>. A fixed hold makes as-of dates comparable; ",
+        "'to today' lets old dates run 8-13 years (delisting-freeze drags them)."),
+        format(d$anchor, "%b %Y"), win, pend, spend, beat_live, beat12,
+        lg$entry_d[1], lg$basket_ret_pct[1], lg$spy_ret_pct[1], lg$basket_ret_pct[1] - lg$spy_ret_pct[1])))
+  })
+
+  # Risk-adjusted stats: does the beat survive accounting for how much market
+  # risk (beta) and volatility the picks took? Computed on the equal-weight held
+  # basket over the hold window (see FORECAST_RISK_SQL).
+  output$forecastRiskFC <- renderUI({
+    d <- app_dataFC(); if (is.null(d) || is.null(d$risk)) return(NULL)
+    r <- d$risk
+    a_col <- if (isTRUE(r$alpha_ann > 0)) "#34d399" else "#f87171"
+    b_note <- if (isTRUE(r$beta < 1)) "less market risk than SPY" else "more market risk than SPY"
+    card <- function(label, val, col = "#e2e8f0", sub = "") tags$div(
+      style = "flex:1; min-width:118px; padding:8px 14px; background:rgba(148,163,184,0.06); border-radius:8px;",
+      tags$div(label, style = "color:#94a3b8; font-size:0.64rem; text-transform:uppercase; letter-spacing:0.04em;"),
+      tags$div(val, style = paste0("color:", col, "; font-size:1.15rem; font-weight:700; font-variant-numeric:tabular-nums;")),
+      if (nzchar(sub)) tags$div(sub, style = "color:#64748b; font-size:0.62rem;"))
+    verdict <- if (isTRUE(r$alpha_ann > 0) && isTRUE(r$beta <= 1.05))
+        "Positive alpha with beta near/below 1: the beat is NOT just market risk - it's real risk-adjusted edge over this window (still in-sample; not proof of future edge)."
+      else if (isTRUE(r$alpha_ann > 0))
+        "Positive alpha, but beta > 1: part of the raw beat is extra market risk; the alpha is the skill portion left after stripping beta."
+      else "Alpha <= 0: no risk-adjusted edge over this window - the raw beat (if any) was just market risk."
+    tags$div(
+      tags$div(style = "display:flex; gap:8px; flex-wrap:wrap; margin-bottom:0.4rem;",
+        card("Alpha (ann.)", sprintf("%+.1f%%", r$alpha_ann), a_col, "beat beyond beta"),
+        card("Beta vs SPY", sprintf("%.2f", r$beta), "#e2e8f0", b_note),
+        card("Info ratio", sprintf("%.2f", r$ir), if (isTRUE(r$ir > 0.5)) "#34d399" else "#e2e8f0", "excess / tracking risk"),
+        card("Vol picks / SPY", sprintf("%.0f%% / %.0f%%", r$vol_pf, r$vol_spy), "#e2e8f0", sprintf("%d monthly obs", r$n))),
+      tags$p(verdict, style = "color:#cbd5e1; font-size:0.75rem; margin-bottom:0.7rem;"))
+  })
+
+  output$forecastPlotFC <- renderPlotly({
+    req(app_dataFC())
+    d <- app_dataFC(); live <- d$live; cv <- d$curve; lg <- d$ledger; anchor <- d$anchor
+    if (is.null(live) || nrow(live) == 0) return(empty_plot("No data."))
+    pf_lbl <- if (is.null(d$id_lbl) || d$id_lbl == "all ids") "current picks" else d$id_lbl
+    live$vdate <- as.Date(live$vdate)
+    realized_end <- max(live$vdate)                          # last date with real prices in window
+    H  <- if (is.null(d$hold_months)) 36 else d$hold_months
+    to_today <- isTRUE(d$to_today)
+    mx <- if (is.null(d$market_max)) realized_end else as.Date(d$market_max)
+    add_m <- function(dt, m) { p <- as.POSIXlt(dt); p$mon <- p$mon + m; as.Date(p) }
+    exit_date  <- if (to_today) mx else add_m(anchor, H)     # intended sell date
+    project    <- exit_date > realized_end                   # hold extends past available data
+    show_today <- realized_end >= mx                          # window reached the present
+    right_edge <- add_m(max(exit_date, realized_end), 2)
+
+    # curve (all-years avg) is kept only to slope the forward projection and feed
+    # the 'typically' note; the grey LINE itself is now the all-picks backtest for
+    # THIS window (below), so it tracks the selected period's market.
+    hmon_full <- c(0, cv$horizon_months); yb_all <- c(0, cv$all_strategies_ret_pct); yb_spy <- c(0, cv$spy_ret_pct)
+    mfun_all <- function(m) approx(hmon_full, yb_all, xout = m, rule = 2)$y
+    mfun_spy <- function(m) approx(hmon_full, yb_spy, xout = m, rule = 2)$y
+    pend  <- tail(live$portfolio_pct, 1); spend <- tail(live$spy_pct, 1)
+
+    fig <- plot_ly()
+    # grey benchmark = all-picks backtest over THIS window. Drawn only when the
+    # portfolio is a narrowed subset; with all ids selected it would just overlap
+    # the green portfolio line (the portfolio already IS every pick).
+    if (!isTRUE(d$all_on) && !is.null(d$bench) && nrow(d$bench) > 0) {
+      bench <- d$bench; bench$vdate <- as.Date(bench$vdate)
+      fig <- add_trace(fig, x = bench$vdate, y = bench$bench_pct, type = "scatter", mode = "lines",
+        name = "All picks (this window)", line = list(color = "#94a3b8", width = 2, dash = "dot"),
+        hovertemplate = "all picks<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
+    }
+    fig <- add_trace(fig, x = live$vdate, y = live$spy_pct, type = "scatter", mode = "lines",
+      name = "SPY", legendgroup = "spy", line = list(color = "#3b82f6", width = 3),
+      hovertemplate = "SPY<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
+    fig <- add_trace(fig, x = live$vdate, y = live$portfolio_pct, type = "scatter", mode = "lines",
+      name = sprintf("Portfolio (%s)", pf_lbl), legendgroup = "pf", line = list(color = "#10b981", width = 3.5),
+      hovertemplate = "Portfolio<br>%{x|%b %Y}: %{y:.1f}%<extra></extra>")
+
+    shapes <- list(); ann <- list()
+    if (show_today) {
+      tdy <- format(realized_end, "%Y-%m-%d")
+      shapes[[length(shapes) + 1]] <- list(type = "line", x0 = tdy, x1 = tdy, yref = "paper", y0 = 0, y1 = 1,
+        line = list(color = "rgba(148,163,184,0.5)", width = 1, dash = "dot"))
+      ann[[length(ann) + 1]] <- list(x = tdy, y = 1, yref = "paper", text = "today", showarrow = FALSE,
+        font = list(color = "#94a3b8", size = 11), yanchor = "bottom")
+    }
+    if (project) {
+      # hold extends past available prices -> dotted projection realized_end -> exit along backtest slope
+      mo_r <- as.numeric(realized_end - anchor) / 30.44
+      p_proj <- pend  + (mfun_all(H) - mfun_all(mo_r)); s_proj <- spend + (mfun_spy(H) - mfun_spy(mo_r))
+      fig <- add_trace(fig, x = c(realized_end, exit_date), y = c(spend, s_proj), type = "scatter", mode = "lines",
+        legendgroup = "spy", showlegend = FALSE, line = list(color = "#3b82f6", width = 2, dash = "dot"),
+        hovertemplate = "SPY projected<br>%{y:.1f}%<extra></extra>")
+      fig <- add_trace(fig, x = c(realized_end, exit_date), y = c(pend, p_proj), type = "scatter", mode = "lines",
+        legendgroup = "pf", showlegend = FALSE, line = list(color = "#10b981", width = 2.5, dash = "dot"),
+        hovertemplate = "Portfolio projected<br>%{y:.1f}%<extra></extra>")
+      shapes[[length(shapes) + 1]] <- list(type = "rect", x0 = format(realized_end, "%Y-%m-%d"),
+        x1 = format(exit_date, "%Y-%m-%d"), yref = "paper", y0 = 0, y1 = 1,
+        fillcolor = "rgba(148,163,184,0.06)", line = list(width = 0))
+      # future (projected) endpoint labels: kept ('nice to see') but dimmed
+      fx <- format(exit_date, "%Y-%m-%d")
+      ann[[length(ann) + 1]] <- list(x = fx, y = p_proj, text = sprintf("%+.0f%%", p_proj),
+        showarrow = FALSE, xanchor = "left", xshift = 6, font = list(color = "rgba(16,185,129,0.5)", size = 11))
+      ann[[length(ann) + 1]] <- list(x = fx, y = s_proj, text = sprintf("%+.0f%%", s_proj),
+        showarrow = FALSE, xanchor = "left", xshift = 6, font = list(color = "rgba(59,130,246,0.5)", size = 11))
+    }
+    # PRESENT value labels: bold, at the last realized point - right where the solid
+    # line ends and any dashed projection begins. Placed just LEFT of 'today' when
+    # projecting (so they read before the dashed line), else just right of the end.
+    px  <- format(realized_end, "%Y-%m-%d")
+    pxa <- if (project) "right" else "left"; pxs <- if (project) -8 else 6
+    ann[[length(ann) + 1]] <- list(x = px, y = pend, text = sprintf("%+.0f%%", pend),
+      showarrow = FALSE, xanchor = pxa, xshift = pxs, font = list(color = "#10b981", size = 13))
+    ann[[length(ann) + 1]] <- list(x = px, y = spend, text = sprintf("%+.0f%%", spend),
+      showarrow = FALSE, xanchor = pxa, xshift = pxs, font = list(color = "#3b82f6", size = 13))
+
+    ttl <- if (to_today) "Actual portfolio vs SPY vs backtest (held to today)"
+           else sprintf("Actual portfolio vs SPY vs backtest (%dmo hold)", H)
+    dark_layout(fig,
+      title = list(text = ttl, font = list(color = "#f8fafc", size = 15), x = 0.5),
+      xaxis = list(title = "", color = "#cbd5e1", type = "date",
+                   range = c(format(anchor, "%Y-%m-%d"), format(right_edge, "%Y-%m-%d")),
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
+      yaxis = list(title = "Cumulative return (%)", color = "#cbd5e1",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
+                   zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%"),
+      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.14),
+      hovermode = "closest", shapes = shapes, annotations = ann,
+      margin = list(l = 60, r = 80, t = 50, b = 50))
+  })
+
+  # Ledger on its OWN clock (fair): both rebased to 0 at the June-2026 inception.
+  output$forecastLedgerFC <- renderPlotly({
+    req(app_dataFC())
+    d <- app_dataFC(); ls <- d$ledseries; cv <- d$curve
+    if (is.null(ls) || nrow(ls) == 0) return(empty_plot("No ledger data yet."))
+    ls$d <- as.Date(ls$d)
+    start <- min(ls$d); today <- max(ls$d)
+    lend <- tail(ls$ledger_pct, 1); send <- tail(ls$spy_pct, 1)
+    hmon <- c(0, cv$horizon_months); yb_all <- c(0, cv$all_strategies_ret_pct); yb_spy <- c(0, cv$spy_ret_pct)
+    mfun_all <- function(m) approx(hmon, yb_all, xout = m, rule = 2)$y
+    mfun_spy <- function(m) approx(hmon, yb_spy, xout = m, rule = 2)$y
+    add_m <- function(dt, m) { p <- as.POSIXlt(dt); p$mon <- p$mon + m; as.Date(p) }
+    fedge  <- add_m(start, 12)                         # ledger's own 12mo mark
+    mo_now <- as.numeric(today - start) / 30.44
+    mo_ed  <- as.numeric(fedge - start) / 30.44
+    l_proj <- lend + (mfun_all(mo_ed) - mfun_all(mo_now))
+    s_proj <- send + (mfun_spy(mo_ed) - mfun_spy(mo_now))
+
+    fig <- plot_ly()
+    fig <- add_trace(fig, x = ls$d, y = ls$spy_pct, type = "scatter", mode = "lines", name = "SPY",
+      legendgroup = "s", line = list(color = "#3b82f6", width = 2.5),
+      hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    fig <- add_trace(fig, x = c(today, fedge), y = c(send, s_proj), type = "scatter", mode = "lines",
+      legendgroup = "s", showlegend = FALSE, line = list(color = "#3b82f6", width = 2, dash = "dot"),
+      hovertemplate = "SPY projected<br>%{y:.1f}%<extra></extra>")
+    fig <- add_trace(fig, x = ls$d, y = ls$ledger_pct, type = "scatter", mode = "lines", name = "Ledger (BUY basket)",
+      legendgroup = "l", line = list(color = "#f59e0b", width = 3),
+      hovertemplate = "Ledger<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    fig <- add_trace(fig, x = c(today, fedge), y = c(lend, l_proj), type = "scatter", mode = "lines",
+      legendgroup = "l", showlegend = FALSE, line = list(color = "#f59e0b", width = 2, dash = "dot"),
+      hovertemplate = "Ledger projected<br>%{y:.1f}%<extra></extra>")
+    tdy <- format(today, "%Y-%m-%d")
+    dark_layout(fig,
+      title = list(text = "Live ledger vs SPY, own clock (out-of-sample, since Jun 2026)",
+                   font = list(color = "#f8fafc", size = 13), x = 0.5),
+      xaxis = list(title = "", color = "#cbd5e1", type = "date",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
+      yaxis = list(title = "Return since Jun 2026 (%)", color = "#cbd5e1",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
+                   zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%"),
+      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.2),
+      hovermode = "x unified",
+      shapes = list(list(type = "line", x0 = tdy, x1 = tdy, yref = "paper", y0 = 0, y1 = 1,
+                         line = list(color = "rgba(148,163,184,0.5)", width = 1, dash = "dot"))),
+      annotations = list(list(x = tdy, y = 1, yref = "paper", text = "today", showarrow = FALSE,
+                              font = list(color = "#94a3b8", size = 10), yanchor = "bottom")),
+      margin = list(l = 60, r = 30, t = 44, b = 40))
+  })
+
+  output$forecastTableFC <- renderUI({
+    req(app_dataFC())
+    d <- app_dataFC(); live <- d$live; cv <- d$curve; lg <- d$ledger
+    pend <- tail(live$portfolio_pct, 1); spend <- tail(live$spy_pct, 1)
+    beat12 <- cv$beat_pct[cv$horizon_months == 12][1]
+    exp12  <- cv$all_strategies_ret_pct[cv$horizon_months == 12][1]
+    H <- if (is.null(d$hold_months)) 36 else d$hold_months
+    since_anchor <- if (isTRUE(d$to_today)) sprintf("%s, to today", format(d$anchor, "%b %Y"))
+                    else sprintf("%s, %dmo hold", format(d$anchor, "%b %Y"), H)
+
+    th  <- "padding:6px 16px; text-align:right; color:#94a3b8; font-weight:600; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.03em; border-bottom:1px solid rgba(148,163,184,0.22);"
+    thl <- sub("text-align:right", "text-align:left", th, fixed = TRUE)
+    tdl <- "padding:5px 16px; text-align:left; font-variant-numeric:tabular-nums;"
+    tdr <- "padding:5px 16px; text-align:right; font-variant-numeric:tabular-nums;"
+    row <- function(nm, win, ret, vs, col) tags$tr(
+      tags$td(nm,  style = paste0(tdl, "color:", col, "; font-weight:600;")),
+      tags$td(win, style = paste0(tdl, "color:#94a3b8;")),
+      tags$td(ret, style = paste0(tdr, "color:#e2e8f0;")),
+      tags$td(vs,  style = paste0(tdr, "color:", col, ";")))
+    tags$div(style = "overflow-x:auto;",
+      tags$table(style = "border-collapse:collapse; width:100%; max-width:640px;",
+        tags$thead(tags$tr(
+          tags$th("Series", style = thl), tags$th("Window", style = thl),
+          tags$th("Return", style = th), tags$th("vs SPY", style = th))),
+        tags$tbody(
+          row("Portfolio (current picks)", since_anchor, sprintf("%+.1f%%", pend),
+              sprintf("%+.1fpp", pend - spend), "#34d399"),
+          row("SPY", since_anchor, sprintf("%+.1f%%", spend), "—", "#93c5fd"),
+          row("Ledger (live BUY gate)", sprintf("since %s", lg$entry_d[1]),
+              sprintf("%+.1f%%", lg$basket_ret_pct[1]),
+              sprintf("%+.1fpp", lg$basket_ret_pct[1] - lg$spy_ret_pct[1]), "#fbbf24"),
+          row("Typical (avg of all starts, 12mo)", "avg 2012-2024", sprintf("%+.1f%%", exp12),
+              sprintf("%+.1fpp", beat12), "#94a3b8"))),
+      tags$p(paste("Portfolio (green) = your picks (latest cutoff) run through the 6-strategy DCA in",
+                   "real prices; narrows with the id filter. Grey = the same backtest over ALL picks for",
+                   "the selected window, shown only when you've filtered (otherwise it equals the",
+                   "portfolio). Bold % marks today's level where the solid line ends; dotted lines carry",
+                   "it forward along the typical all-years slope."),
+             style = "color:#64748b; font-size:0.7rem; margin-top:0.5rem;"))
+  })
 }
 
 # Run the application
