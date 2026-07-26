@@ -38,6 +38,18 @@ Statistical forecasting and signal-generation tables that sit on top of the cano
 
 ## Interactive Analytics Dashboard
 
+### Forecast
+
+![Forecast: selections vs benchmark vs walk-forward backtest](tools/dashboard_forecast.jpg?v=1)
+
+Stand at any past as-of date and track the model's selections forward in real prices against the benchmark, with the walk-forward backtest as the expected path and a live out-of-sample log below. Alpha, beta, and information ratio summarize the selected window.
+
+### Predictions (Backtest Replay)
+
+![Predictions: per-pick realized excess vs benchmark](tools/dashboard_predictions.jpg?v=1)
+
+Replays every ranked pick as it stood at each walk-forward cutoff and shows how each did versus the benchmark over the following window, colored by whether it beat, lagged, or delisted. Tickers and company names are redacted.
+
 ![Dashboard](tools/alpha_forecast.jpg?v=2)
 
 Visualizes cohorts that share similar attributes across lag time horizons spanning up to 60 years.
