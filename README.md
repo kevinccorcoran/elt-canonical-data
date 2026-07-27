@@ -87,7 +87,7 @@ Supports:
 
 ### Forecast
 
-![Forecast: selections vs benchmark vs walk-forward backtest](tools/dashboard_forecast.jpg?v=1)
+![Forecast: selections vs benchmark vs walk-forward backtest](tools/dashboard_forecast.jpg?v=2)
 
 Stands at any past date and tracks the model's selections forward in real prices against the benchmark, with the walk-forward backtest as the expected path.
 
