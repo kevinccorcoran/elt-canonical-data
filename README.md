@@ -39,18 +39,18 @@ Unsupervised clustering, statistical scoring, and walk-forward validation tables
 
 ## Interactive Analytics Dashboard
 
-![Dashboard](tools/alpha_forecast.jpg?v=2)
+An interactive R/Shiny app for exploring the model end to end: data quality, clusters, rankings, walk-forward validation, and how past selections played out against a benchmark. Built with R + Shiny, Plotly, and PostgreSQL, packaged in Docker.
 
-Visualizes cohorts that share similar attributes across lag time horizons spanning up to 60 years.
+### Transition Range
 
-The dashboard is an interactive R/Shiny app for exploring the model's outputs against real outcomes. You can stand at any point in the past and see which groups the model ranked highest at that time, using only information available then, and how those selections actually performed over the following window against a benchmark. It also shows the current live selections and tracks a running log of past selections forward in real prices.
+![Transition Range](tools/alpha_forecast.jpg?v=2)
+
+Compares each group's past and future return distributions across lag horizons spanning up to 60 years.
 
 Supports:
 - Side-by-side comparison of past and future distributions across groups.
 - Filtering by group, time window, and environment.
 - Record counts per group to gauge reliability.
-
-Built with R + Shiny, Plotly, and PostgreSQL. Packaged in Docker.
 
 ### Clusters
 
