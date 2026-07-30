@@ -16,6 +16,11 @@ run_app() {
     if [ "$code" -ne 0 ]; then
       cp /opt/airflow/scripts/shiny.log /opt/airflow/scripts/shiny_crash_last.log 2>/dev/null
     fi
+    # durable, classified restart history (best-effort; must never break the loop)
+    python3 /opt/airflow/scripts/shiny_monitor.py record \
+      --kind supervisor --exit-code "$code" \
+      --logfile /opt/airflow/scripts/shiny.log \
+      --events /opt/airflow/scripts/shiny_events.log 2>/dev/null || true
     sleep 3
   done
 }
@@ -32,6 +37,10 @@ watchdog() {
       echo "[watchdog] 3838 unresponsive (${fails}/3)"
       if [ "$fails" -ge 3 ]; then
         echo "[watchdog] restarting app.R"
+        python3 /opt/airflow/scripts/shiny_monitor.py record \
+          --kind watchdog --note "3838 unresponsive x${fails}" \
+          --logfile /opt/airflow/scripts/shiny.log \
+          --events /opt/airflow/scripts/shiny_events.log 2>/dev/null || true
         for p in /proc/[0-9]*; do
           grep -qa "file=/opt/airflow/scripts/app.R" "$p/cmdline" 2>/dev/null \
             && kill -TERM "${p##*/}" 2>/dev/null
