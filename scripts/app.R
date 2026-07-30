@@ -627,7 +627,31 @@ FROM vdates v JOIN bv ON bv.d=v.d GROUP BY v.d ORDER BY v.d;"
 # ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
-  tags$head(tags$style(HTML(custom_css))),
+  tags$head(
+    tags$style(HTML(custom_css)),
+    # Auto-heal Shiny's grey disconnect overlay. Forced reconnect stays OFF
+    # (see server(), 2026-07-23: it replays sessions into the busy event loop
+    # and segfaults), so a dropped websocket otherwise sits grey until a manual
+    # reload. Instead: on a real drop, reload the tab after a short backoff, and
+    # reset the counter once we reconnect. Caps at MAX quick tries so a server
+    # that is genuinely down is not hammered (overlay is left for the user).
+    tags$script(HTML("
+      (function(){
+        var KEY = 'wf_reconnectTries', MAX = 5;
+        $(document).on('shiny:connected', function(){
+          try { sessionStorage.removeItem(KEY); } catch (e) {}
+        });
+        $(document).on('shiny:disconnected', function(){
+          var n = 0;
+          try { n = parseInt(sessionStorage.getItem(KEY) || '0', 10); } catch (e) {}
+          if (n >= MAX) return;               // likely down; stop reloading, leave overlay
+          try { sessionStorage.setItem(KEY, n + 1); } catch (e) {}
+          var delay = Math.min(1500 * Math.pow(1.6, n), 10000);
+          setTimeout(function(){ location.reload(); }, delay);
+        });
+      })();
+    "))
+  ),
 
   # ── Tab 1: Transition Range ──
   tabPanel("Transition Range",
