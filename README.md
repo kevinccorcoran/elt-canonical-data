@@ -127,6 +127,11 @@ Supports:
 - Added a live out-of-sample log, grading each published pick as prices arrive
 - Gated forecasts to the rank ranges with proven edge
 
+**Upcoming**
+- Build a decision board for today's keep-or-drop calls on active selections
+- Integrate qualstream for a qualitative read on each selection
+- Audit the design against a structured set of decision principles
+
 ---
 
 ## Documentation
