@@ -250,9 +250,9 @@ ui <- fluidPage(
       helpText("Connect to the database, then select filter values from the dropdowns."),
       
       h4("Database Connection"),
-      textInput("db_host", "Host", value = Sys.getenv("PROD_DB_HOST", "dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com")),
+      textInput("db_host", "Host", value = Sys.getenv("PROD_DB_HOST", "")),
       textInput("db_port", "Port", value = Sys.getenv("PROD_DB_PORT", "25060")),
-      textInput("db_user", "User", value = Sys.getenv("PROD_DB_USER", "doadmin")),
+      textInput("db_user", "User", value = Sys.getenv("PROD_DB_USER", "")),
       passwordInput("db_pass", "Password", value = Sys.getenv("PROD_DB_PASSWORD", "")),
       actionButton("connect_btn", "Connect & Load Filters", class = "btn-primary"),
       
@@ -288,7 +288,7 @@ get_con <- function(input) {
             port = as.integer(input$db_port),
             user = input$db_user,
             password = input$db_pass,
-            sslmode = "prefer")
+            sslmode = "require")
 }
 
 # Define server logic

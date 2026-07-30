@@ -18,6 +18,7 @@ Pick clusters without editing code via an Airflow Variable (Admin -> Variables):
 from __future__ import annotations
 
 import os
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -35,6 +36,13 @@ QUALSTREAM_ROOT = Path(
 # Clusters to grade weekly. Override in the Airflow UI (Admin -> Variables) without
 # touching code; passed straight to the runner's --cluster-ids.
 CLUSTER_IDS = Variable.get("QUAL_CLUSTER_IDS", default_var="1,4,7")
+# This value is interpolated into a shell command below, so constrain it to
+# digits and separators (comma/space). Rejects any shell metacharacters an
+# Airflow-UI editor might set. Fail loudly at parse time rather than inject.
+if not re.fullmatch(r"[0-9,\s]+", CLUSTER_IDS or ""):
+    raise ValueError(
+        f"QUAL_CLUSTER_IDS must be comma/space-separated integers, got: {CLUSTER_IDS!r}"
+    )
 
 default_args = {
     "owner": "airflow",

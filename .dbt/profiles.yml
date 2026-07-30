@@ -10,6 +10,7 @@ dbt_project:
       pass: "{{ env_var('DB_PASSWORD') }}"
       dbname: "{{ env_var('DB_DATABASE') }}"
       schema: cdm
+      # local loopback container (no TLS); prod enforces sslmode=require below
       sslmode: prefer
       keepalives_idle: 30
       keepalives_interval: 10
@@ -24,6 +25,7 @@ dbt_project:
       pass: "{{ env_var('DB_PASSWORD') }}"
       dbname: "{{ env_var('DB_DATABASE') }}"
       schema: cdm
+      # local loopback container (no TLS); prod enforces sslmode=require below
       sslmode: prefer
       keepalives_idle: 30
       keepalives_interval: 10
@@ -38,7 +40,7 @@ dbt_project:
       pass: "{{ env_var('DB_PASSWORD') }}"
       dbname: "prod"
       schema: cdm
-      sslmode: prefer
+      sslmode: require
       keepalives_idle: 30
       keepalives_interval: 10
       keepalives_count: 5

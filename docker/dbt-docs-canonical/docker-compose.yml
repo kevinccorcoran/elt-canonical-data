@@ -21,5 +21,6 @@ services:
       # manifest can't be overwritten by host-side `dbt docs generate`.
       - /app/dbt/src/app/target
     ports:
-      - "8890:8080"
+      # Loopback-only: unauthenticated dbt docs. Reach remotely via SSH tunnel.
+      - "127.0.0.1:8890:8080"
     entrypoint: ["bash", "/entrypoint.sh"]

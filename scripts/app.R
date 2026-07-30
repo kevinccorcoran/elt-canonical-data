@@ -1178,15 +1178,19 @@ get_con <- function(input, suffix) {
   transient <- "name resolution|translate host name|EAI_AGAIN|could not connect|server closed the connection|connection timed out"
   attempts  <- 3
   con <- NULL
+  # Enforce TLS for remote (managed) DBs; loopback dev/staging containers do not
+  # serve SSL, so fall back to 'prefer' only for local hosts.
+  host_val  <- input[[paste0("db_host", suffix)]]
+  ssl_mode  <- if (grepl("^(host\\.docker\\.internal|localhost|127\\.0\\.0\\.1)$", host_val)) "prefer" else "require"
   for (i in seq_len(attempts)) {
     con <- tryCatch(
       dbConnect(RPostgres::Postgres(),
         dbname   = db_string,
-        host     = input[[paste0("db_host", suffix)]],
+        host     = host_val,
         port     = as.integer(input[[paste0("db_port", suffix)]]),
         user     = input[[paste0("db_user", suffix)]],
         password = input[[paste0("db_pass", suffix)]],
-        sslmode  = "prefer",
+        sslmode  = ssl_mode,
         connect_timeout = 10
       ),
       error = function(e) {
@@ -1210,9 +1214,9 @@ setup_env_switcher <- function(input, session, suffix) {
     env <- input[[paste0("db_env", suffix)]]
     if (env == "Production") {
       updateTextInput(session, paste0("db_host", suffix),
-                      value = Sys.getenv("PROD_DB_HOST", "dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com"))
-      updateTextInput(session, paste0("db_port", suffix), value = "25060")
-      updateTextInput(session, paste0("db_user", suffix), value = "doadmin")
+                      value = Sys.getenv("PROD_DB_HOST", ""))
+      updateTextInput(session, paste0("db_port", suffix), value = Sys.getenv("PROD_DB_PORT", "25060"))
+      updateTextInput(session, paste0("db_user", suffix), value = Sys.getenv("PROD_DB_USER", ""))
       updateTextInput(session, paste0("db_pass", suffix), value = Sys.getenv("PROD_DB_PASSWORD", ""))
     } else {
       updateTextInput(session, paste0("db_host", suffix), value = "host.docker.internal")

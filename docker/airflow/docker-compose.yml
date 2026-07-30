@@ -52,7 +52,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5435:5432"
+      # Loopback-only: metadata DB must not be reachable off-host.
+      - "127.0.0.1:5435:5432"
     volumes:
       - ./airflow-postgres:/var/lib/postgresql/data
     healthcheck:
@@ -120,4 +121,5 @@ services:
       retries: 3
       start_period: 120s
     ports:
-      - "3838:3838"
+      # Loopback-only: unauthenticated dashboard. Reach remotely via SSH tunnel.
+      - "127.0.0.1:3838:3838"

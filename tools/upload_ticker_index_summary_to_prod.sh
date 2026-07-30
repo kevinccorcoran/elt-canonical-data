@@ -6,10 +6,11 @@ set -e
 echo "Uploading raw.ticker_index_summary to PROD..."
 
 DUMP_FILE=ticker_index_summary.dump
-# Prod connection details
-REMOTE_HOST=dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com
-REMOTE_PORT=25060
-REMOTE_USER=doadmin
+# Prod connection details — sourced from the environment, never hardcoded.
+# Export PROD_DB_HOST / PROD_DB_PORT / PROD_DB_USER first (see docs/security.md).
+REMOTE_HOST="${PROD_DB_HOST:?set PROD_DB_HOST}"
+REMOTE_PORT="${PROD_DB_PORT:?set PROD_DB_PORT}"
+REMOTE_USER="${PROD_DB_USER:?set PROD_DB_USER}"
 REMOTE_DB=prod
 REMOTE_CONN="host=$REMOTE_HOST port=$REMOTE_PORT user=$REMOTE_USER dbname=$REMOTE_DB sslmode=require"
 
@@ -35,7 +36,7 @@ psql "$REMOTE_CONN" -c "DROP TABLE IF EXISTS raw.ticker_index_summary CASCADE;"
 echo "Restoring table to remote..."
 PGSSLMODE=require pg_restore \
   --no-owner \
-  --role=doadmin \
+  --role=$REMOTE_USER \
   --host=$REMOTE_HOST \
   --port=$REMOTE_PORT \
   --username=$REMOTE_USER \
