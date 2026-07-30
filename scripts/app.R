@@ -1030,7 +1030,7 @@ ui <- navbarPage(
         conditionalPanel(
           condition = "output.blCtlMode == 'current' && input.bl_viewBL == 'buys'",
           checkboxInput("buys_shortlistBL",
-                        "Shortlist only - rank bins winning >= 55%",
+                        "Shortlist only - rank bins winning >= 55% (display filter, not the buy gate)",
                         value = TRUE),
           conditionalPanel(
             condition = "!input.buys_shortlistBL",
@@ -1053,7 +1053,23 @@ ui <- navbarPage(
                                   "Top 5% of each cluster"  = "p5",
                                   "Top 10% of each cluster" = "p10",
                                   "Top 20% of each cluster" = "p20"),
-                      selected = "all"))
+                      selected = "all")),
+        tags$div(
+          style = paste0("margin: 0.25rem 0 0.75rem; padding: 0.5rem 0.75rem; ",
+                         "background: rgba(255,255,255,0.03); ",
+                         "border-left: 2px solid #64748b; border-radius: 4px; ",
+                         "color: #94a3b8; font-size: 0.72rem; line-height: 1.5;"),
+          tags$details(
+            tags$summary("Glossary - the words on this tab"),
+            tags$div(
+              tags$div(HTML("<b>Walk-forward</b>: the backtest style here - train only on data before a cutoff, predict, then grade on what really happened after. No peeking ahead.")),
+              tags$div(HTML("<b>Rank bin / slot</b>: each cluster's ranked list cut into 20 slots of 5% (slot 1 = top 5%). A ticker inherits its slot's history, not its own.")),
+              tags$div(HTML("<b>Bin win rate</b>: of past walk-forward picks landing in this slot, the share that beat the benchmark. 50% = coin flip.")),
+              tags$div(HTML("<b>Graded / holdout obs</b>: past predictions old enough to score against real later prices; 'n' counts them. Under 100 = 'no evidence'.")),
+              tags$div(HTML("<b>Expectancy</b>: average return of past holdout trades, in pp per trade. Context only - the buy logic never reads it.")),
+              tags$div(HTML("<b>pp</b>: percentage points - the gap between two percentages (55% is 5 pp above 50%).")),
+              tags$div(HTML("<b>Serving rank vs pick rank</b>: serving rank = the model's position within the whole cluster today; pick rank = position inside the shown top-5% slice (r1 = best).")),
+              tags$div(HTML("<b>Credibility</b>: a 0-1 weight each evidence cell earns from sample size and consistency; the serving BUY votes are credibility-weighted.")))))
       ),
       # rendered UNDER Generate Chart via make_sidebar's post_widgets slot:
       # both are post-load refinements (reactive on the loaded data, no
@@ -3190,21 +3206,32 @@ server <- function(input, output, session) {
   # pre-ledger date) falls back to picks.
   output$blViewUI <- renderUI({
     mode <- bl_ctl_modeR()
-    ch <- if (mode == "wf")
-      c("Model's top picks (trust-gated)"  = "picks",
-        "Full ladder - every ranked ticker" = "ladder")
-    else if (mode == "ledger")
-      c("Model's top picks (trust-gated)"  = "picks",
-        "BUY list (recorded snapshot)"      = "buys",
-        "Full ladder - every ranked ticker" = "ladder")
+    hstyle <- paste0("display:block; color:#64748b; font-size:0.68rem; ",
+                     "font-weight:400; line-height:1.3; margin-top:0.1rem;")
+    lab <- function(title, help)
+      tagList(title, tags$span(help, style = hstyle))
+    picks_lab <- lab("Model's top picks (trust-gated)",
+                     "What the validated rule would hold as of this date.")
+    ladder_lab <- lab("Full ladder - every ranked ticker",
+                      "Every ranked name, long and short side - no gate applied.")
+    buys_lab <- if (mode == "ledger")
+      lab("BUY list (recorded snapshot)",
+          "The buy list the system actually recorded on this date.")
     else
-      c("Model's top picks (trust-gated)"  = "picks",
-        "Live signals (production gate)"   = "buys",
-        "Full ladder - every ranked ticker" = "ladder")
+      lab("Live signals (production gate)",
+          "The model's buy list for today.")
+    if (mode == "wf") {
+      cn <- list(picks_lab, ladder_lab)
+      cv <- c("picks", "ladder")
+    } else {
+      cn <- list(picks_lab, buys_lab, ladder_lab)
+      cv <- c("picks", "buys", "ladder")
+    }
     sel <- isolate(input$bl_viewBL)
-    if (is.null(sel) || !sel %in% ch) sel <- "picks"
+    if (is.null(sel) || !sel %in% cv) sel <- "picks"
     tagList(
-      radioButtons("bl_viewBL", "View", choices = ch, selected = sel),
+      radioButtons("bl_viewBL", "View",
+                   choiceNames = cn, choiceValues = cv, selected = sel),
       if (mode == "wf") tags$p(
         paste("Signals: unavailable before 2026-06-16 - no recorded gate",
               "exists and reconstructing it would use future information."),
@@ -3312,15 +3339,22 @@ server <- function(input, output, session) {
           h4("Model's top-ranked (live, as of today)", style = h_style),
           tags$div(class = "caveat-warning",
             tags$b(style = "color: #fbbf24;", "Read: "),
-            "the SAME rule the backtest validates, applied to today: the top ~5% ",
-            "by serving rank within each long cluster the live gate currently ",
-            "trades. This is what the model would pick right now. There is NO ",
-            "realized outcome yet (that arrives over the next 12 months through ",
-            "the ledger), so the bar is each pick's WALK-FORWARD rank-bin win ",
-            "rate centered at 50% (the priced evidence), not a price return. ",
-            "Green = the live gate also marks it BUY; grey = it sits in the top ",
-            "slice but the per-ticker gate holds off - that disagreement is the ",
-            "gate's extra density/coverage conditions at work, not an error."))
+            "What you see: the top ~5% of each long cluster the trust gate ",
+            "currently trades, in the model's own rank order - the picks the ",
+            "validated rule would hold today. No outcome exists yet; that ",
+            "arrives through the ledger.", tags$br(),
+            "Each bar: how tickers ranked in this same slot did in past ",
+            "walk-forward tests - the slot's win rate vs the benchmark, drawn ",
+            "as distance from 50% (coin flip). The label at the bar end is the ",
+            "actual win rate; 'no evidence' = under 100 graded past picks.",
+            tags$br(),
+            "Green = the serving system also says BUY today. Grey = in the top ",
+            "slice, but the ticker's own vote margin holds off. '!' = a BUY ",
+            "whose slot historically lost (hover for detail).", tags$br(),
+            "The BUY call itself comes from in-sample cell votes plus one ",
+            "cluster-level walk-forward health gate - it never reads these win ",
+            "rates. The chart cross-examines the picks against evidence the ",
+            "buy logic does not see."))
       } else if (uview == "ladder") {
         tagList(
           h4("Full ladder - every ranked series (live)", style = h_style),
@@ -3333,20 +3367,25 @@ server <- function(input, output, session) {
             "heads side by side."))
       } else {
         tagList(
-          h4("Live signals - validated payoff",
+          h4("Live signals - what the model marks BUY today",
              style = h_style),
           tags$div(class = "caveat-warning",
             tags$b(style = "color: #fbbf24;", "Read: "),
-            "tickers the model currently marks BUY. Order = win likelihood: each ",
-            "ticker's bin = its slot in the latest WALK-FORWARD ranking (20 bins ",
-            "of 5%; same ranking the bin win rates were measured on), and rows ",
-            "sort by their bin's realized win rate vs Benchmark (most winners on top; ",
-            "bars still show expectancy = mean holdout trade return). Tickers the ",
-            "walk-forward has no scored evidence for show 'no evidence' and sink ",
-            "below the graded BUYs. The Shortlist toggle keeps only rank bins ",
-            "winning >= 55% on >= 100 graded obs; untoggle it for every BUY plus ",
-            "the young-cluster watchlist (Regular/Sparse). Switches instantly, no ",
-            "re-Generate."))
+            "Every ticker the serving system marks BUY right now. That call ",
+            "comes from in-sample cell votes plus a cluster-level walk-forward ",
+            "health gate - not from anything drawn on this chart.", tags$br(),
+            "Order: rows sort by the past win rate of each ticker's rank slot ",
+            "(the cluster's ranking cut into 20 slots of 5%) - how often past ",
+            "picks in that slot beat the benchmark, best on top. Bars show ",
+            "expectancy: the average past holdout trade return in pp (green ",
+            "positive, red negative) - display-only evidence, never a buy ",
+            "input.", tags$br(),
+            "'no evidence' rows have no graded history for their slot and sink ",
+            "below the graded BUYs.", tags$br(),
+            "The Shortlist toggle (slots winning >= 55% on >= 100 graded ",
+            "picks) is a display filter for reading this page - the production ",
+            "gate does not use it. Untick it for every BUY plus the ",
+            "young-cluster watchlist. Switches instantly, no re-Generate."))
       }
     }
   })
@@ -3411,8 +3450,17 @@ server <- function(input, output, session) {
     lb <- ledger_boundsBL()
     ledger_start <- if (!is.null(lb)) as.Date(lb[1]) else as.Date("2026-06-16")
     sty <- "color:#64748b; font-size:0.7rem; margin:-0.4rem 0 0.75rem;"
-    if (d >= ledger_start)
-      return(tags$p("Live / ledger date - daily, not bundled.", style = sty))
+    if (d >= ledger_start) {
+      lead <- if (d == Sys.Date())
+        sprintf("Today (%s) = live data - its own daily record, nothing bundled.",
+                format(d, "%Y-%m-%d"))
+      else
+        sprintf("%s = recorded ledger day - its own daily record, nothing bundled.",
+                format(d, "%Y-%m-%d"))
+      return(tags$p(paste0(lead,
+        sprintf(" (Only pre-ledger dates bundle; the newest backtest cutoff %s covers all later pre-ledger dates.)",
+                format(max(cuts), "%Y-%m-%d"))), style = sty))
+    }
     elig <- cuts[cuts <= d]
     if (length(elig) == 0)
       return(tags$p(sprintf("Before the first cutoff (%s) - no backtest picks here.",
@@ -4237,24 +4285,59 @@ server <- function(input, output, session) {
       d$pick_rank <- as.integer(stats::ave(d$agg_rank, d$id, FUN = seq_along))
       set_sel_statsBL(d$bin_win_pct, "avg rank-bin win rate (%)")
       set_chart_rowsBL(nrow(d))
-      d$ylab <- sprintf("id%d r%d | %s", d$id, d$pick_rank, d$ticker)
-      d$edge <- ifelse(!is.na(d$bin_win_pct) & !is.na(d$bin_n) & d$bin_n >= 100,
-                       d$bin_win_pct - 50, 0)
-      is_buy <- d$global_action == "BUY"
-      d$hover <- sprintf(
-        "%s (id %d, pick r%d)<br>live action %s | serving rank %d<br>wf bin %s | bin win %s | expectancy %s",
-        d$ticker, d$id, d$pick_rank, d$global_action, d$agg_rank,
-        ifelse(is.na(d$rank_bin), "n/a", as.character(as.integer(d$rank_bin))),
-        ifelse(is.na(d$bin_win_pct) | is.na(d$bin_n) | d$bin_n < 100, "n/a",
-               sprintf("%.1f%%", d$bin_win_pct)),
-        ifelse(is.na(d$wtd_expectancy), "n/a", sprintf("%.3f", d$wtd_expectancy)))
+      is_buy   <- d$global_action == "BUY"
+      measured <- !is.na(d$bin_win_pct) & !is.na(d$bin_n) & d$bin_n >= 100
+      d$edge <- ifelse(measured, d$bin_win_pct - 50, 0)
+      # Disagreement badge: serving says BUY but the pick's own MEASURED
+      # walk-forward slot lost (win rate under 50 or negative mean return).
+      # The buy logic never reads these numbers - flag the tension, not hide it.
+      flagged <- is_buy & measured &
+        (d$bin_win_pct < 50 | (!is.na(d$bin_mean_ret) & d$bin_mean_ret < 0))
+      d$ylab <- sprintf("id%d r%d | %s%s", d$id, d$pick_rank, d$ticker,
+                        ifelse(flagged, " !", ""))
+      # Bar-end labels: print the ACTUAL win rate (the axis only shows the
+      # distance from 50), and give zero-length bars words - "no evidence"
+      # must not read as "exactly coin flip".
+      d$bar_lab <- ifelse(measured, sprintf("%.1f%%", d$bin_win_pct),
+                          "no evidence")
+      lab_col <- ifelse(flagged, "#dc2626",
+                 ifelse(measured, "#94a3b8", "#f59e0b"))
+      ord <- function(n) {               # 1 -> "1st", 2 -> "2nd", 11 -> "11th"
+        s <- rep("th", length(n))
+        i <- !(n %% 100 %in% 11:13) & (n %% 10) %in% 1:3
+        s[i] <- c("st", "nd", "rd")[n[i] %% 10]
+        paste0(n, s)
+      }
+      d$hover <- sprintf(paste0(
+        "%s - cluster %d, %s shown pick (serving rank %d)",
+        "<br>Live serving call: %s - decided by cell votes, not by this chart.",
+        "<br>%s",
+        "<br>Avg past trade return: %s.%s"),
+        d$ticker, d$id, ord(d$pick_rank), d$agg_rank, d$global_action,
+        ifelse(measured,
+               sprintf("Rank slot %d of 20: beat the benchmark %.1f%% of %d graded past picks.",
+                       as.integer(d$rank_bin), d$bin_win_pct, as.integer(d$bin_n)),
+        ifelse(is.na(d$rank_bin),
+               "Not scored in the latest walk-forward ranking - no evidence.",
+               sprintf("Rank slot %d of 20: only %s graded past picks - no evidence (needs 100).",
+                       as.integer(d$rank_bin),
+                       ifelse(is.na(d$bin_n), "0", as.character(as.integer(d$bin_n)))))),
+        ifelse(is.na(d$wtd_expectancy), "n/a",
+               sprintf("%+.3f pp per trade (display-only evidence)", d$wtd_expectancy)),
+        ifelse(flagged, paste0(
+          "<br>! BUY from serving votes; this pick's own walk-forward bin lost ",
+          "historically - the buy logic never reads this number."), ""))
       bar_col <- ifelse(is_buy, "#10b981", "#64748b")
-      chart_text <- sprintf(
-        "Model's top ~5%% of each trust-gated cluster: %d picks across %d clusters (bar = wf rank-bin win rate vs 50%%; green = live BUY, grey = gate holds)",
+      chart_text <- sprintf(paste0(
+        "Top ~5%% of each trust-gated cluster: %d picks / %d clusters ",
+        "(label = slot's past win rate; green = live BUY, grey = vote holds ",
+        "off, ! = BUY whose slot lost money)"),
         nrow(d), length(unique(d$id)))
       return(
         plot_ly(d, x = ~edge, y = ~ylab, type = "bar", orientation = "h",
                 marker = list(color = bar_col), customdata = ~hover,
+                text = ~bar_lab, textposition = "outside", cliponaxis = FALSE,
+                textfont = list(color = lab_col, size = 9),
                 hovertemplate = "%{customdata}<extra></extra>") %>%
           layout(
             paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
@@ -4264,14 +4347,14 @@ server <- function(input, output, session) {
               list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
                         line = list(color = "rgba(255,255,255,0.4)"))),
               rank_sep_shapes(d$id)),
-            xaxis = list(title = "Walk-forward rank-bin win rate over 50% (pp)",
+            xaxis = list(title = "Past win rate of the pick's rank slot, as points above/below 50% (coin flip)",
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
             yaxis = list(title = "", type = "category",
                          categoryorder = "array", categoryarray = rev(d$ylab),
                          range = c(-0.5, nrow(d) - 0.5),
                          tickfont = list(size = 9),
                          color = "#94a3b8", gridcolor = "rgba(255,255,255,0.05)"),
-            margin = list(l = 130, r = 30, b = 50, t = 40))
+            margin = list(l = 130, r = 55, b = 50, t = 40))
       )
     }
     # BUY and ladder reuse the existing renderer branches:
