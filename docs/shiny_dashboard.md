@@ -58,6 +58,45 @@ docker compose down
 
 ---
 
+## Monitoring the dashboard
+
+`shiny.log` is overwritten on every restart and `shiny_crash_last.log` keeps only
+the most recent crash, so `scripts/shiny_monitor.py` records a **durable, classified
+event** every time the supervisor restarts the app (and every time the watchdog
+kills a hang). History is appended to `scripts/shiny_events.log` (JSONL, host-mounted
+so it survives restarts and rebuilds; auto-rotated to the last 2000 events).
+
+**Health + restart summary (on demand):**
+```bash
+docker exec airflow-shiny python3 /opt/airflow/scripts/shiny_monitor.py status
+```
+Shows whether port 3838 is answering, restart counts by cause over the last 1h and
+24h, and the most recent events. Exits non-zero when the dashboard is down, so it
+doubles as a check. Add `--limit 30` for more history or `--json` for machine output.
+
+Because `scripts/` is host-mounted and 3838 is published, the same command runs
+from the droplet host too:
+```bash
+python3 ~/repos/elt-canonical-data/scripts/shiny_monitor.py status
+```
+
+**Causes it classifies** (by exit-code signal, corroborated by the log tail):
+
+| category | meaning | what to do |
+|---|---|---|
+| `segfault` | R died on SIGSEGV | httpuv#171; confirm PATCHED httpuv is baked into the image, not stock from CRAN |
+| `oom` / `killed` | SIGKILL, usually out-of-memory | reduce peak memory or add a `mem_limit` |
+| `sigterm` | SIGTERM (watchdog hang-kill or `docker stop`) | expected on a hang restart or shutdown |
+| `dns` | resolver blip (EAI_AGAIN) | pinned `dns:` resolvers in `docker-compose.yml` |
+| `db_timeout` | DB connect/statement timeout | transient; `get_con()` retries |
+| `clean` | exit 0 | normal restart (e.g. after an edit) |
+| `app_error` | non-zero exit, no known signature | read `shiny_crash_last.log` |
+
+Recording is wired into `shiny_entrypoint.sh` and is best-effort; it can never
+break the supervisor loop.
+
+---
+
 ## Troubleshooting: "could not translate host name … Temporary failure in name resolution"
 
 This is a **DNS** failure (`EAI_AGAIN`), not a dead database. The dashboard dials
