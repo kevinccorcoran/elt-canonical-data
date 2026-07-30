@@ -33,7 +33,7 @@ def _get_db_conn():
         user=os.getenv("DB_USER"),
         password=password,
         dbname=os.getenv("DB_DATABASE", "prod"),
-        sslmode=os.getenv("DB_SSLMODE", "prefer"),
+        sslmode=os.getenv("DB_SSLMODE", "require"),
         keepalives=1,
         keepalives_idle=30,
         keepalives_interval=10,

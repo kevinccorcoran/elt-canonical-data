@@ -2,8 +2,7 @@
 # Environment & secrets
 # =========================
 .env
-.env.local
-.env.production
+.env.*
 
 .envrc*
 
@@ -26,7 +25,9 @@ chunks_slim/
 # Local config overrides
 # =========================
 config/local.*
-src/datapipeline/config/env.py
+# NOTE: src/datapipeline/config/env.py is TRACKED application code (env-var
+# resolver, no secrets); do not ignore it. profiles.yml is likewise tracked and
+# fully env_var-templated. Real secrets live only in .env*/.envrc* (ignored above).
 
 # =========================
 # Airflow runtime artifacts
@@ -117,11 +118,6 @@ dbt/logs/
 # Project-specific config
 # =========================
 config/*.cfg
-
-# =========================
-# dbtT local config
-# =========================
-.dbt/profiles.yml
 
 # Postgres runtime data (must never be in Git)
 docker/airflow/airflow-postgres/

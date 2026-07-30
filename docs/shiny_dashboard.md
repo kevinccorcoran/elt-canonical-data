@@ -125,10 +125,10 @@ docker exec airflow-shiny cat /etc/resolv.conf
 
 # Does it resolve right now? Loop to catch the intermittent failure.
 docker exec airflow-shiny sh -c \
-  'for i in 1 2 3 4 5; do getent hosts dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com || echo FAIL; sleep 1; done'
+  'for i in 1 2 3 4 5; do getent hosts "$DB_HOST" || echo FAIL; sleep 1; done'
 
 # Compare against the droplet host itself:
-getent hosts dbaas-db-4718169-do-user-32264340-0.l.db.ondigitalocean.com
+getent hosts "$DB_HOST"
 ```
 If the host resolves fine but the container intermittently FAILs, the container
 resolver was the problem and the pinned `dns:` above fixes it.
