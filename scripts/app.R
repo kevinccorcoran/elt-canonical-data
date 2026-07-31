@@ -1017,30 +1017,32 @@ ui <- navbarPage(
   tabPanel("Predictions",
     sidebarLayout(
       make_sidebar("BL", "Database Connection (Buy List)", tagList(
-        tags$label("As-of date", style = "color: #94a3b8; font-weight: 600;"),
-        # splitLayout cells default to overflow:hidden, which clips the
-        # selectize option list (year dropdown showed one cut-off row)
-        tags$style(HTML(".shiny-split-layout > div { overflow: visible; }")),
-        splitLayout(
-          cellWidths = c("30%", "38%", "32%"),
-          selectInput("asof_dayBL", NULL, choices = 1:31, selected = 1),
-          selectInput("asof_monthBL", NULL,
-                      choices = setNames(1:12, month.abb), selected = 1),
-          selectInput("asof_yearBL", NULL,
-                      choices = c("Connect first..." = ""), selected = "")
-        ),
-        actionButton("todayBtnBL", "Set current date",
-                     class = "btn-primary", style = "margin-bottom: 0.75rem;"),
-        selectInput("wf_cutoffBL", "Jump to a backtest cutoff",
-                    choices = c("Connect first..." = "")),
+        radioButtons("date_modeBL", "As-of",
+          choiceNames = list(
+            tagList("Today (live)",
+              tags$span("The model as of right now.",
+                        style = "display:block; color:#64748b; font-size:0.68rem; font-weight:400; line-height:1.3; margin-top:0.1rem;")),
+            tagList("Recorded day",
+              tags$span("A recorded daily snapshot (since 2026-06-16).",
+                        style = "display:block; color:#64748b; font-size:0.68rem; font-weight:400; line-height:1.3; margin-top:0.1rem;")),
+            tagList("Backtest cutoff",
+              tags$span("A quarterly walk-forward state - identical for the whole quarter-bundle.",
+                        style = "display:block; color:#64748b; font-size:0.68rem; font-weight:400; line-height:1.3; margin-top:0.1rem;"))),
+          choiceValues = c("today", "ledger", "backtest"),
+          selected = "today"),
+        conditionalPanel(
+          condition = "input.date_modeBL == 'ledger'",
+          # bounds arrive from Connect via updateDateInput; until then the
+          # widget defaults to today and asof_dateBL() returns NULL (no bounds)
+          dateInput("ledger_dayBL", NULL, value = NULL, format = "yyyy-mm-dd")),
+        conditionalPanel(
+          condition = "input.date_modeBL == 'backtest'",
+          selectInput("wf_cutoffBL", "Quarterly cutoff",
+                      choices = c("Connect first..." = ""))),
         uiOutput("wf_resolvedBL"),
-        tags$p(paste("Latest date = live data; dates since 2026-06-16 replay the",
-                     "recorded ledger; earlier dates replay the walk-forward",
-                     "BACKTEST at the nearest quarterly cutoff. Same three views",
-                     "at every date: Model's top picks (trust-gated, the validated",
-                     "rule), BUY list (live today, recorded from 2026-06-16,",
-                     "unavailable earlier - no gate existed to record), and the",
-                     "full ladder of every ranked ticker (ids 13+ = short side)."),
+        tags$p(paste("Same three views at every date. The BUY list exists only",
+                     "where a gate was recorded: live today and daily snapshots",
+                     "since 2026-06-16; backtest dates show picks and ladder."),
                style = "color: #64748b; font-size: 0.7rem; margin-bottom: 0.75rem;"),
         # Unified 3-slot View (same menu at every date). Rendered server-side
         # so the BUY slot can grey out for pre-ledger dates: no recorded gate
@@ -3131,39 +3133,44 @@ server <- function(input, output, session) {
   output$statusMessageBL <- renderText({ status_msgBL() })
   setup_env_switcher(input, session, "BL")
 
-  # Build the as-of date from the three dropdowns; clamp day so e.g.
-  # Feb 31 resolves to Feb 28 instead of NA.
+  # As-of date from the three-mode control. Modes map 1:1 onto the resolver's
+  # existing ranges: today -> latest snapshot (>= b[2] => current), ledger ->
+  # a recorded day clamped into [b[1], b[2]-1], backtest -> the chosen cutoff
+  # itself (< b[1] => wf). NULL before Connect or while an input is unset,
+  # exactly like the old dropdown builder. switch() evaluates only the taken
+  # branch, so reactive deps stay scoped to the active mode - and the today
+  # branch reading ledger_boundsBL() is what fires the first post-Connect
+  # auto-generate (do not "optimize" it to Sys.Date()).
   asof_dateBL <- function() {
-    y <- suppressWarnings(as.integer(input$asof_yearBL))
-    m <- suppressWarnings(as.integer(input$asof_monthBL))
-    d <- suppressWarnings(as.integer(input$asof_dayBL))
-    if (is.na(y) || is.na(m) || is.na(d)) return(NULL)
-    # as.Date ERRORS (not NA) on impossible dates like Feb 31, so wrap it
-    safe_date <- function(s) tryCatch(as.Date(s), error = function(e) as.Date(NA))
-    dt <- safe_date(sprintf("%04d-%02d-%02d", y, m, d))
-    while (is.na(dt) && d > 28) {
-      d <- d - 1
-      dt <- safe_date(sprintf("%04d-%02d-%02d", y, m, d))
-    }
-    dt
-  }
-
-  set_asof_dropdowns <- function(session, date) {
-    updateSelectInput(session, "asof_yearBL",  selected = format(date, "%Y"))
-    updateSelectInput(session, "asof_monthBL", selected = as.integer(format(date, "%m")))
-    updateSelectInput(session, "asof_dayBL",   selected = as.integer(format(date, "%d")))
+    mode <- input$date_modeBL
+    if (is.null(mode)) return(NULL)
+    b <- ledger_boundsBL()
+    switch(mode,
+      today = if (is.null(b)) NULL else as.Date(b[2]),
+      ledger = {
+        d <- input$ledger_dayBL
+        if (is.null(b) || is.null(d) || length(d) != 1 || is.na(d)) NULL
+        else min(max(as.Date(d), as.Date(b[1])), as.Date(b[2]) - 1)
+      },
+      backtest = {
+        v <- input$wf_cutoffBL
+        if (is.null(v) || !nzchar(v)) NULL else as.Date(v)
+      },
+      NULL)
   }
 
   # A backtest date bundles: every date in [cutoff, next_cutoff) resolves to the
   # SAME cutoff (MAX cutoff <= date), so the picker offers one entry PER cutoff
   # instead of raw days that mostly no-op. Quarter label from the cutoff month.
   bl_qtr <- function(d) paste0("Q", (as.integer(format(d, "%m")) + 2) %/% 3, " ", format(d, "%Y"))
-  bl_cutoff_choices <- function(cuts) {
+  bl_cutoff_choices <- function(cuts, all_later = TRUE) {
     if (length(cuts) == 0) return(character(0))
     cuts <- sort(cuts, decreasing = TRUE)
     labs <- vapply(seq_along(cuts), function(i) {
       base <- sprintf("%s  (%s)", format(cuts[i], "%Y-%m-%d"), bl_qtr(cuts[i]))
-      if (i == 1) paste0(base, "  - and all later dates") else base
+      if (i > 1) base
+      else if (all_later) paste0(base, "  - and all later dates")
+      else paste0(base, "  (newest)")
     }, character(1))
     setNames(as.character(cuts), labs)
   }
@@ -3305,7 +3312,8 @@ server <- function(input, output, session) {
     h_style <- "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"
     if (is_picks) {
       tagList(
-        h4("Model's top-ranked (reconstructed)",
+        h4(sprintf("Model's top-ranked (backtest reconstruction - cutoff %s)",
+                   format(as.Date(df$train_cutoff_date[1]), "%Y-%m-%d")),
            style = h_style),
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
@@ -3329,7 +3337,11 @@ server <- function(input, output, session) {
           "scorecard: % positive = share of picks that beat the Benchmark."))
     } else if (mode == "wf") {
       tagList(
-        h4("Backtest replay", style = h_style),
+        h4(if (!is.null(df) && nrow(df) > 0 && "train_cutoff_date" %in% names(df))
+             sprintf("Backtest replay - cutoff %s",
+                     format(as.Date(df$train_cutoff_date[1]), "%Y-%m-%d"))
+           else "Backtest replay",
+           style = h_style),
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the PREDICTION as it stood at the nearest quarterly walk-forward ",
@@ -3349,7 +3361,11 @@ server <- function(input, output, session) {
           "only - the live BUY gates did not exist then."))
     } else if (mode == "ledger") {
       tagList(
-        h4("Live-log replay", style = h_style),
+        h4(if (!is.null(df) && nrow(df) > 0 && "prediction_date" %in% names(df))
+             sprintf("Live-log replay - snapshot %s",
+                     format(as.Date(df$prediction_date[1]), "%Y-%m-%d"))
+           else "Live-log replay",
+           style = h_style),
         tags$div(class = "caveat-warning",
           tags$b(style = "color: #fbbf24;", "Read: "),
           "the BUY calls the live system actually logged on the selected date, ",
@@ -3440,63 +3456,53 @@ server <- function(input, output, session) {
         ledger_boundsBL(c(bounds$min_d[1], bounds$max_d[1]))
         wf_minBL(wf_min)
         wf_cutoffsBL(wf_cuts)
-        updateSelectInput(session, "wf_cutoffBL",
-                          choices = c("Pick a cutoff..." = "", bl_cutoff_choices(wf_cuts)))
-        yr_lo <- as.integer(format(if (!is.na(wf_min)) wf_min else bounds$min_d[1], "%Y"))
-        yr_hi <- as.integer(format(bounds$max_d[1], "%Y"))
-        updateSelectInput(session, "asof_yearBL", choices = seq(yr_hi, yr_lo),
-                          selected = yr_hi)
-        set_asof_dropdowns(session, bounds$max_d[1])
+        # Backtest mode must stay in the wf era: a cutoff on/after ledger_min
+        # would resolve downstream as "ledger" and replay the ledger under a
+        # backtest label (first possible collision: a 2026-06-30 cutoff vs the
+        # 2026-06-16 ledger start).
+        bl_cuts <- wf_cuts[wf_cuts < as.Date(bounds$min_d[1])]
+        if (length(bl_cuts)) {
+          updateSelectInput(session, "wf_cutoffBL",
+                            choices = bl_cutoff_choices(bl_cuts, all_later = FALSE),
+                            selected = as.character(max(bl_cuts)))
+        } else {
+          updateSelectInput(session, "wf_cutoffBL",
+                            choices = c("No backtest cutoffs yet" = ""))
+        }
+        led_min <- as.Date(bounds$min_d[1])
+        led_max <- max(as.Date(bounds$max_d[1]) - 1, led_min)
+        updateDateInput(session, "ledger_dayBL",
+                        value = led_max, min = led_min, max = led_max)
+        # date_modeBL stays at its UI default 'today'. First load fires via
+        # ledger_boundsBL(...) set above: asof_dateBL()'s today branch reads
+        # the bounds, so the date-change observer sees NULL -> b[2] and bumps
+        # the generator exactly once - no explicit bump_genBL() here.
       }
       status_msgBL(sprintf("Connected. %d tickers currently BUY. Ledger %s to %s; walk-forward back to %s.",
                            as.numeric(n), bounds$min_d[1], bounds$max_d[1], wf_min))
     }, error = function(e) { status_msgBL(paste("Error:", e$message)) })
   })
 
-  observeEvent(input$todayBtnBL, {
-    b <- ledger_boundsBL()
-    if (is.null(b)) { status_msgBL("Connect first to load the date range."); return() }
-    set_asof_dropdowns(session, b[2])
-    status_msgBL(sprintf("As-of date set to latest snapshot (%s).", b[2]))
-  })
-
-  # Bundle picker -> set the date to the chosen cutoff (one-way; the readout
-  # below reflects where any manually-typed date lands). A date change already
-  # auto-reloads, so picking a cutoff loads that bundle immediately.
-  observeEvent(input$wf_cutoffBL, {
-    v <- input$wf_cutoffBL
-    if (is.null(v) || !nzchar(v)) return()
-    set_asof_dropdowns(session, as.Date(v))
-  }, ignoreInit = TRUE)
-
-  # Show where the current as-of date actually resolves: which backtest cutoff
-  # it bundles into (so 2025+ dates visibly collapse onto 2024-12-31), or that
-  # it is a live/ledger day where every date is distinct.
+  # One-line readout under the mode control: what the selection resolves to.
+  # The pre-first-cutoff branch is gone (the backtest picker only offers real
+  # cutoffs) and so is the "(no newer cutoff yet)" note (the newest choice is
+  # tagged "(newest)" in the dropdown itself).
   output$wf_resolvedBL <- renderUI({
-    d <- asof_dateBL(); cuts <- wf_cutoffsBL()
-    if (is.null(d) || is.na(d) || is.null(cuts) || length(cuts) == 0) return(NULL)
-    lb <- ledger_boundsBL()
-    ledger_start <- if (!is.null(lb)) as.Date(lb[1]) else as.Date("2026-06-16")
+    mode <- input$date_modeBL
+    d <- asof_dateBL()
+    if (is.null(mode) || is.null(d) || length(d) != 1 || is.na(d)) return(NULL)
     sty <- "color:#64748b; font-size:0.7rem; margin:-0.4rem 0 0.75rem;"
-    if (d >= ledger_start) {
-      lead <- if (d == Sys.Date())
-        sprintf("Today (%s) = live data - its own daily record, nothing bundled.",
-                format(d, "%Y-%m-%d"))
-      else
-        sprintf("%s = recorded ledger day - its own daily record, nothing bundled.",
-                format(d, "%Y-%m-%d"))
-      return(tags$p(paste0(lead,
-        sprintf(" (Only pre-ledger dates bundle; the newest backtest cutoff %s covers all later pre-ledger dates.)",
-                format(max(cuts), "%Y-%m-%d"))), style = sty))
-    }
-    elig <- cuts[cuts <= d]
-    if (length(elig) == 0)
-      return(tags$p(sprintf("Before the first cutoff (%s) - no backtest picks here.",
-                            format(min(cuts), "%Y-%m-%d")), style = sty))
-    rc <- max(elig)
-    note <- if (rc == max(cuts) && d > max(cuts)) " (no newer cutoff yet)" else ""
-    tags$p(sprintf("Resolves to backtest cutoff %s%s.", format(rc, "%Y-%m-%d"), note),
-           style = sty)
+    msg <- switch(mode,
+      today  = "Live data - the model as of right now.",
+      ledger = sprintf(paste("Snapshot for %s (weekend/holiday dates resolve",
+                             "to the latest snapshot on or before)."),
+                       format(d, "%Y-%m-%d")),
+      backtest = sprintf(paste("Backtest state at cutoff %s - the same for",
+                               "every date this bundle covers."),
+                         format(d, "%Y-%m-%d")),
+      NULL)
+    if (is.null(msg)) return(NULL)
+    tags$p(msg, style = sty)
   })
 
   # Buy List refresh trigger. Bumped by the Generate button AND by any as-of
@@ -3509,7 +3515,17 @@ server <- function(input, output, session) {
     gen_triggerBL(if (is.null(cur)) 1L else cur + 1L)
   }
   observeEvent(input$execute_BL, { bump_genBL() })
+  # observeEvent fires on eventExpr INVALIDATION, not value change: a clamp
+  # landing on the same date (e.g. a mode round-trip that resolves back to the
+  # same day, or an updateDateInput echo) would double-generate. Dedupe
+  # consecutive identical dates; distinct-mode dates can never collide
+  # (today = b[2], ledger <= b[2]-1, backtest < b[1]), so a today -> backtest
+  # -> today round trip still regenerates.
+  last_asof_genBL <- reactiveVal(NULL)
   observeEvent(asof_dateBL(), {
+    a <- asof_dateBL()
+    if (identical(a, last_asof_genBL())) return()
+    last_asof_genBL(a)
     if (!is.null(input$db_passBL) && nzchar(input$db_passBL) &&
         !is.null(ledger_boundsBL())) bump_genBL()
   }, ignoreInit = TRUE)
