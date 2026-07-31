@@ -5002,7 +5002,10 @@ server <- function(input, output, session) {
       return(tags$p(sprintf("Before the first cutoff (%s).", format(min(cuts), "%Y-%m-%d")), style = sty))
     rc <- max(elig)
     note <- if (rc == max(cuts) && a > max(cuts)) " (no newer cutoff yet)" else ""
-    tags$p(sprintf("Selections as of backtest cutoff %s%s.", format(rc, "%Y-%m-%d"), note), style = sty)
+    tags$p(sprintf(paste("Entry = your date (%s). Selections = the model's picks at the",
+                         "nearest quarterly cutoff %s%s - unchanged within a quarter, but you",
+                         "still enter at your date's real prices."),
+                   format(a, "%Y-%m-%d"), format(rc, "%Y-%m-%d"), note), style = sty)
   })
 
   observeEvent(input$execute_FC, {
