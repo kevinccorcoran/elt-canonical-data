@@ -41,13 +41,19 @@ docker exec airflow-shiny cat /opt/airflow/scripts/shiny.log
 ```
 
 **Restart the app (after editing `app.R`):**
-The supervisor relaunches automatically — just kill the running R process:
 ```bash
-docker exec airflow-shiny pkill -f "/opt/airflow/scripts/app.R"
-```
-Or restart the whole service:
-```bash
+cd ~/repos/elt-canonical-data/docker/airflow
 docker compose restart airflow-shiny
+```
+This restarts only the shiny service (not the shared Airflow infra) and also
+re-runs `shiny_entrypoint.sh`, picking up entrypoint changes.
+
+Kill-only alternative (supervisor relaunches the app in ~3s; entrypoint not
+re-read). Note the image has **no `pkill`** — `docker exec airflow-shiny pkill ...`
+fails with "executable file not found"; use the watchdog's `/proc` idiom:
+```bash
+docker exec airflow-shiny bash -c \
+  'for p in /proc/[0-9]*; do grep -qa "file=/opt/airflow/scripts/app.R" "$p/cmdline" 2>/dev/null && kill -TERM "${p##*/}"; done'
 ```
 
 **Shut everything down (end of day):**
