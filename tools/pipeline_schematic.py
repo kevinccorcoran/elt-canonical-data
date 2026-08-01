@@ -98,73 +98,72 @@ def arrow(ax, p0, p1, rad=0.0):
 def build(ax):
     ax.set_xlim(0, 16)
     ax.set_ylim(0, 9)
+    ax.set_aspect("equal")                # never distort funnels/circles
     ax.axis("off")
 
-    yT, yM, yB = 6.35, 4.5, 2.65          # three stream lanes
+    yT, yM, yB = 6.7, 4.7, 2.7            # three stream lanes (even 2.0 pitch)
 
     # ── Start ──
-    ax.add_patch(Ellipse((1.15, yM), 1.5, 1.0, facecolor=PAPER,
+    ax.add_patch(Ellipse((1.25, yM), 1.6, 1.05, facecolor=PAPER,
                          edgecolor=INK, linewidth=2, zorder=4))
-    ax.text(1.15, yM, "Start", ha="center", va="center",
+    ax.text(1.25, yM, "Start", ha="center", va="center",
             fontsize=12, fontweight="bold", color=INK, zorder=5)
 
     # ── Data Streams axis ──
-    ax.plot([2.75, 2.75], [1.5, 7.6], color=MUTED, lw=1.3,
-            ls=(0, (1, 4)), zorder=1)
-    ax.annotate("", xy=(2.75, 7.05), xytext=(2.75, 7.5),
+    ax.plot([2.9, 2.9], [1.9, 7.85], color=MUTED, lw=1.3, ls=(0, (1, 4)), zorder=1)
+    ax.annotate("", xy=(2.9, 7.35), xytext=(2.9, 7.8),
                 arrowprops=dict(arrowstyle="-|>", color=MUTED, lw=1.4))
-    ax.text(2.75, 7.9, "DATA STREAMS", ha="center", va="bottom",
+    ax.text(2.9, 8.15, "DATA STREAMS", ha="center", va="bottom",
             fontsize=11, color=INK, family="monospace")
     for y in (yT, yM, yB):
-        ax.add_patch(Circle((2.75, y), 0.11, color=INK, zorder=4))
+        ax.add_patch(Circle((2.9, y), 0.12, color=INK, zorder=4))
 
-    # ── Stage boxes ──
-    ax.add_patch(Rectangle((4.15, 1.15), 3.15, 6.7, facecolor="none",
+    # ── Stage 1: box + three per-stream funnels ──
+    fw, fh, x1 = 2.05, 1.5, 4.35
+    ax.add_patch(Rectangle((4.05, 1.6), 3.05, 6.2, facecolor="none",
                           edgecolor=BOX1, linewidth=2, zorder=1))
-    ax.add_patch(Rectangle((8.35, 1.7), 2.5, 5.6, facecolor="none",
-                          edgecolor=BOX2, linewidth=2, zorder=1))
-
-    # ── Stage 1 funnels ──
-    fw, fh, x1 = 2.1, 1.35, 4.55
     funnel(ax, x1, yT, fw, fh, FA)
     funnel(ax, x1, yM, fw, fh, FB)
     funnel(ax, x1, yB, fw, fh, FC)
 
-    # ── Stage 2 funnels (merged upper + lower) ──
-    yU, yL = 5.55, 3.15
-    fw2, x2 = 1.85, 8.6
-    funnel(ax, x2, yU, fw2, 1.3, FD)
-    funnel(ax, x2, yL, fw2, 1.3, FE)
+    # ── Stage 2: tighter box + two merged funnels (centred in the box) ──
+    yU, yL = 5.7, 3.7
+    fw2, fh2, x2 = 1.8, 1.4, 8.15
+    ax.add_patch(Rectangle((7.85, 2.55), 2.35, 4.3, facecolor="none",
+                          edgecolor=BOX2, linewidth=2, zorder=1))
+    funnel(ax, x2, yU, fw2, fh2, FD)
+    funnel(ax, x2, yL, fw2, fh2, FE)
 
-    # ── Pre-finish live gates ──
-    x3, pw = 11.55, 1.15
-    funnel(ax, x3, yT, pw, 0.85, PG)
-    funnel(ax, x3, yB, pw, 0.85, PG)
+    # ── Pre-finish live gates (small, aligned with the finish endpoints) ──
+    x3, pw, ph = 11.2, 1.1, 0.9
+    yTg, yBg = 6.3, 3.1
+    funnel(ax, x3, yTg, pw, ph, PG)
+    funnel(ax, x3, yBg, pw, ph, PG)
 
     # ── Finish · Live ──
-    ax.plot([14.1, 14.1], [1.2, 7.8], color=ACCENT, lw=3, zorder=2)
-    for y in (yT, yB):
-        ax.add_patch(Circle((14.1, y), 0.11, color=ACCENT, zorder=4))
-    ax.text(14.55, yM, "Finish · Live", rotation=90, ha="left",
+    xF = 13.7
+    ax.plot([xF, xF], [2.2, 7.2], color=ACCENT, lw=3, zorder=2)
+    for y in (yTg, yBg):
+        ax.add_patch(Circle((xF, y), 0.12, color=ACCENT, zorder=4))
+    ax.text(xF + 0.45, yM, "Finish · Live", rotation=90, ha="left",
             va="center", fontsize=12, color=ACCENT, family="monospace",
             fontweight="bold")
 
     # ── flow ──
-    arrow(ax, (1.9, yM), (2.64, yT), rad=-0.06)
-    arrow(ax, (1.9, yM), (2.64, yM))
-    arrow(ax, (1.9, yM), (2.64, yB), rad=0.06)
+    for y, r in ((yT, -0.06), (yM, 0.0), (yB, 0.06)):
+        arrow(ax, (2.05, yM), (2.78, y), rad=r)
     for y in (yT, yM, yB):
-        arrow(ax, (2.86, y), (x1 - 0.03, y))
+        arrow(ax, (3.02, y), (x1 - 0.03, y))
     # stage 1 tips -> stage 2 (top+mid merge into upper; bottom -> lower)
     arrow(ax, (x1 + fw, yT), (x2 - 0.03, yU), rad=-0.05)
     arrow(ax, (x1 + fw, yM), (x2 - 0.03, yU), rad=0.05)
     arrow(ax, (x1 + fw, yB), (x2 - 0.03, yL), rad=0.05)
     # stage 2 tips cross into two live endpoints (the X in the sketch)
-    arrow(ax, (x2 + fw2, yU), (x3 - 0.03, yB))
-    arrow(ax, (x2 + fw2, yL), (x3 - 0.03, yT))
+    arrow(ax, (x2 + fw2, yU), (x3 - 0.03, yBg))
+    arrow(ax, (x2 + fw2, yL), (x3 - 0.03, yTg))
     # live gates -> finish
-    arrow(ax, (x3 + pw, yT), (14.05, yT))
-    arrow(ax, (x3 + pw, yB), (14.05, yB))
+    arrow(ax, (x3 + pw, yTg), (xF - 0.05, yTg))
+    arrow(ax, (x3 + pw, yBg), (xF - 0.05, yBg))
 
     _role_circles(ax)
     _style_key(ax)
@@ -172,36 +171,38 @@ def build(ax):
 
 def _role_circles(ax):
     """Team-role key from the sketch: one circle per role, one split two-colour.
-    Colours only for now; role labels intentionally blank."""
-    r = 0.17
-    ax.text(2.55, 1.75, "TEAM", fontsize=9.5, color=MUTED, family="monospace")
-    solids = [(2.55, 1.35, GREEN), (3.55, 1.35, RED),
-              (2.55, 0.75, BLACK), (3.05, 0.75, AMBER), (3.55, 0.75, RED)]
-    for x, y, c in solids:
-        ax.add_patch(Circle((x, y), r, facecolor=c, edgecolor=INK,
-                           linewidth=0.8, zorder=4))
-    # the one split (two-colour) role circle
-    sx, sy = 3.05, 1.35
-    ax.add_patch(Wedge((sx, sy), r, 90, 270, facecolor=GREEN,
-                      edgecolor=INK, linewidth=0.8, zorder=4))
-    ax.add_patch(Wedge((sx, sy), r, 270, 450, facecolor=AMBER,
-                      edgecolor=INK, linewidth=0.8, zorder=4))
+    Colours only for now; role labels intentionally blank. Two aligned rows."""
+    r, dx = 0.19, 0.62
+    x0, yTop, yBot = 1.0, 1.15, 0.5
+    ax.text(x0 - 0.1, 1.75, "TEAM", fontsize=10, color=MUTED, family="monospace")
+    top = [(x0, GREEN), (x0 + dx, None), (x0 + 2 * dx, RED)]      # None = split
+    bot = [(x0, BLACK), (x0 + dx, AMBER), (x0 + 2 * dx, RED)]
+    for y, row in ((yTop, top), (yBot, bot)):
+        for x, c in row:
+            if c is None:                                        # split two-colour
+                ax.add_patch(Wedge((x, y), r, 90, 270, facecolor=GREEN,
+                                  edgecolor=INK, linewidth=0.8, zorder=4))
+                ax.add_patch(Wedge((x, y), r, 270, 450, facecolor=AMBER,
+                                  edgecolor=INK, linewidth=0.8, zorder=4))
+            else:
+                ax.add_patch(Circle((x, y), r, facecolor=c, edgecolor=INK,
+                                   linewidth=0.8, zorder=4))
 
 
 def _style_key(ax):
     """Small key for the pen styles (done / in progress / planned)."""
-    x0, y0 = 5.4, 0.95
+    x0, y0 = 5.1, 1.15
     samples = [("solid", "done"), ("hatch", "in progress"), ("dotted", "planned")]
     for i, (style, label) in enumerate(samples):
-        y = y0 - i * 0.42
-        rect = [(x0, y - 0.14), (x0 + 0.5, y - 0.14),
-                (x0 + 0.5, y + 0.14), (x0, y + 0.14)]
+        y = y0 - i * 0.5
+        rect = [(x0, y - 0.16), (x0 + 0.55, y - 0.16),
+                (x0 + 0.55, y + 0.16), (x0, y + 0.16)]
         _band(ax, rect, INK if style == "solid" else MUTED, style)
-        ax.text(x0 + 0.68, y, label, va="center", fontsize=9, color=INK)
+        ax.text(x0 + 0.75, y, label, va="center", fontsize=9.5, color=INK)
 
 
 def main():
-    fig, ax = plt.subplots(figsize=(15.5, 7.0), dpi=150)
+    fig, ax = plt.subplots(figsize=(13.3, 7.5), dpi=150)
     fig.patch.set_facecolor(PAPER)
     build(ax)
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
