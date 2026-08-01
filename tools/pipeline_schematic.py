@@ -211,7 +211,7 @@ def _team_roles(ax):
     for y, xs, row in ((-0.8, xs_top, top), (-1.35, xs_bot, bot)):
         for x, c in zip(xs, row):
             if c == "split":
-                _split_circle(ax, x, y, r, GREEN, AMBER)
+                _split_circle(ax, x, y, r, AMBER, RED)
             else:
                 ax.add_patch(Circle((x, y), r, facecolor=c, edgecolor=INK,
                                    linewidth=0.8, zorder=4))
@@ -237,7 +237,7 @@ def _team_roles(ax):
         ax.text(6.15, y, means, fontsize=8.2, color=INK, va="center")
         y -= 0.6
     ax.text(3.3, y + 0.03,
-            "Split circle = one person covering testing framework + QA/optimization.",
+            "Split circle = one person covering QA/optimization + model dev lead.",
             fontsize=8, color=MUTED, va="center", style="italic")
 
 
