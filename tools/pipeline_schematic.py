@@ -236,18 +236,18 @@ def _team_roles(ax):
         (BLACK, "Tech lead",
          "designs the dbt architecture for the client's architecture + business needs — future-proofing (hard) · dbt: deep"),
         (RED, "Model dev lead",
-         "initial model, imperfect but delivered · test dev · dbt: med–high (variables)"),
+         "goal: across the finish line as fast as possible — initial model, imperfect but delivered · test dev · dbt: med–high (variables)"),
         (AMBER, "Dev · QA & optimization",
-         "model done: query opt, splitting, index strategy · test dev · dbt: working"),
+         "ensures each model is optimized — logic + performance (query opt, splitting, index strategy) · test dev · dbt: working"),
         (GREEN, "Dev · testing & framework",
-         "proper testing at each model level (pytest/matrix-notify, Shiny) · dbt: small (can add validation in the dbt project)"),
+         "per-model testing: integration, refinement, deep-dive defect analysis (pytest/matrix-notify, Shiny) · dbt: small (adds dbt validation)"),
     ]
     y = -0.85
     for c, role, means in rows:
         ax.add_patch(Circle((3.05, y), 0.12, facecolor=c, edgecolor=INK,
                            linewidth=0.8, zorder=4))
         ax.text(3.3, y, role, fontsize=8.8, color=INK, va="center", fontweight="bold")
-        ax.text(6.15, y, means, fontsize=8.2, color=INK, va="center")
+        ax.text(6.15, y, means, fontsize=7.6, color=INK, va="center")
         y -= 0.6
     ax.text(3.3, y + 0.03,
             "Split circle = one person covering QA/optimization + model dev lead.",
