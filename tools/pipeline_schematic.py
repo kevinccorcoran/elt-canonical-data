@@ -160,9 +160,10 @@ def build(ax):
     arrow(ax, (x1 + fw, yT), (x2 - 0.03, yU), rad=-0.05)
     arrow(ax, (x1 + fw, yM), (x2 - 0.03, yU), rad=0.05)
     arrow(ax, (x1 + fw, yB), (x2 - 0.03, yL), rad=0.05)
-    # stage 2 tips cross into two live endpoints (the X in the sketch)
-    arrow(ax, (x2 + fw2, yU), (x3 - 0.03, yBg))
-    arrow(ax, (x2 + fw2, yL), (x3 - 0.03, yTg))
+    # stage 2 -> live gates: many-to-many (each model feeds each endpoint)
+    for ys in (yU, yL):
+        for yg in (yTg, yBg):
+            arrow(ax, (x2 + fw2, ys), (x3 - 0.03, yg))
     # live gates -> finish
     arrow(ax, (x3 + pw, yTg), (xF - 0.05, yTg))
     arrow(ax, (x3 + pw, yBg), (xF - 0.05, yBg))
@@ -200,10 +201,12 @@ def _deliverables(ax):
     gbox(4.05, 10.2, "Automated test suite  ·  pytest / matrix-notify")
     gbox(11.55, 14.6, "Quality dashboard · Shiny",
          "for all models · ~20 min – ½ day each")
+    # both deliverables operate at the model / table level (not the finish),
+    # so link them up to the models, not the live line
     top = gy0 + h
-    for x, ytop in ((5.4, 1.6), (9.0, 2.55)):          # suite validates the models
+    for x, ytop in ((5.4, 1.6), (9.0, 2.55)):          # test suite validates the models
         ax.plot([x, x], [top, ytop], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)
-    ax.plot([13.7, 13.05], [2.2, top], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)
+    ax.plot([9.6, 12.5], [2.55, top], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)  # dashboard reads models
 
 
 def _team_roles(ax):
