@@ -179,13 +179,17 @@ def _split_circle(ax, x, y, r, c1, c2):
 def _role_circles(ax):
     """The team: 7 member circles (one a green/orange split for a shared role),
     plus a colour -> role key."""
-    r, dx = 0.18, 0.46
-    ax.text(0.55, 1.95, "TEAM", fontsize=10, color=MUTED, family="monospace")
-    # 7 members: green x1, split x1, red x2, orange x2, black x1
-    top = [(0.7, GREEN), (0.7 + dx, "split"), (0.7 + 2 * dx, RED), (0.7 + 3 * dx, AMBER)]
-    bot = [(0.7, BLACK), (0.7 + dx, AMBER), (0.7 + 2 * dx, RED)]
-    for y, row in ((1.5, top), (0.95, bot)):
-        for x, c in row:
+    r, dx = 0.19, 0.52
+    ax.text(0.6, 1.98, "TEAM", fontsize=10, color=MUTED, family="monospace")
+    # grouped by role: dev pod on top, leads centred below
+    top = [GREEN, "split", AMBER, AMBER]          # testing · shared · QA/opt · QA/opt
+    bot = [BLACK, RED, RED]                        # tech lead · model dev leads
+    xs_top = [0.7 + i * dx for i in range(len(top))]
+    span = xs_top[-1] - xs_top[0]
+    xs_bot = [(xs_top[0] + span / 2) + (i - (len(bot) - 1) / 2) * dx
+              for i in range(len(bot))]
+    for y, xs, row in ((1.52, xs_top, top), (0.94, xs_bot, bot)):
+        for x, c in zip(xs, row):
             if c == "split":
                 _split_circle(ax, x, y, r, GREEN, AMBER)
             else:
