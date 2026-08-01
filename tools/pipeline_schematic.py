@@ -1,34 +1,33 @@
 """Conceptual pipeline schematic: data streams -> quality gates -> live.
 
-A faithful digital rendering of the hand sketch (distinct from
+A faithful digital reproduction of the hand sketch (distinct from
 pipeline_grouped.py, the concrete schema-by-schema pipeline):
 
     Start -> three parallel DATA STREAMS -> a STAGE-1 box of per-stream
     quality-gate funnels -> a STAGE-2 box where the streams merge -> two
     planned live gates that cross into a LIVE finish line at two endpoints.
 
-Drawn with matplotlib (not graphviz): the funnels need real right-pointing
-triangles with a green -> amber -> red gradient (raw volume screened to refined
-output), which graphviz cannot do (its gradients are two-stop and it mirrors
-oriented triangles inside clusters). matplotlib gives exact shape + 3-tone.
+The funnels are drawn exactly as sketched: NO gradient. Each is a wide-left ->
+pointed-right silhouette split into three discrete colour BANDS -- a green
+intake block, an orange narrowing middle, and a small red tip -- and each band's
+pen style encodes build progress:
 
-Encoding:
-    funnel        a quality gate: wide intake on the left, refined tip on the right
-    green->red    raw volume in, screened + refined out
-    solid outline built
-    dashed outline planned / in progress
+    solid fill      done
+    diagonal hatch  in progress
+    dotted outline  planned
 
-Output: tools/pipeline_schematic.(png|svg).
+The bottom-left circle cluster is the team-role key (one circle per role, one
+split into two colours). Role labels are intentionally left blank for now.
+
+Drawn with matplotlib. Output: tools/pipeline_schematic.(png|svg).
 """
 import os
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
-from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.patches import Ellipse, FancyArrowPatch, PathPatch, Rectangle
-from matplotlib.path import Path
+from matplotlib.patches import (Circle, Ellipse, FancyArrowPatch, Polygon,
+                                Rectangle, Wedge)
 
 # ── palette ──
 INK    = "#1b2130"
@@ -37,40 +36,63 @@ ACCENT = "#2f9e6b"           # "live"
 GREEN  = "#2f9e6b"
 AMBER  = "#e2871b"
 RED    = "#d6402a"
+BLACK  = "#1b2130"
 BOX1   = INK
 BOX2   = "#c0553a"           # stage-2 box drawn red in the sketch
 PAPER  = "#ffffff"
 
-GATE_CMAP = LinearSegmentedColormap.from_list("gate", [GREEN, AMBER, RED])
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# per-funnel section styles (green, orange, red) as read from the sketch
+FA = [(GREEN, "solid"),  (AMBER, "solid"),  (RED, "solid")]    # box1 top    (done)
+FB = [(GREEN, "hatch"),  (AMBER, "solid"),  (RED, "solid")]    # box1 mid
+FC = [(GREEN, "dotted"), (AMBER, "hatch"),  (RED, "solid")]    # box1 bottom
+FD = [(GREEN, "dotted"), (AMBER, "hatch"),  (RED, "hatch")]    # box2 upper
+FE = [(GREEN, "dotted"), (AMBER, "dotted"), (RED, "dotted")]   # box2 lower  (planned)
+PG = [(RED,   "dotted")]                                        # small live gates
 
-def funnel(ax, x_left, y_c, w, h, planned=False):
-    """Right-pointing gate: wide intake (left) narrowing to a refined tip."""
-    verts = [(x_left, y_c - h / 2), (x_left, y_c + h / 2), (x_left + w, y_c)]
-    clip = PathPatch(Path(verts + [verts[0]], closed=True),
-                     facecolor="none", edgecolor="none", zorder=2)
-    ax.add_patch(clip)
-    grad = np.linspace(0, 1, 256).reshape(1, -1)
-    im = ax.imshow(grad, extent=[x_left, x_left + w, y_c - h / 2, y_c + h / 2],
-                   origin="lower", aspect="auto", cmap=GATE_CMAP,
-                   alpha=0.42 if planned else 1.0, zorder=2)
-    im.set_clip_path(clip)
-    ax.add_patch(PathPatch(
-        Path(verts + [verts[0]], closed=True), facecolor="none",
-        edgecolor=MUTED if planned else INK, linewidth=2,
-        linestyle=(0, (5, 4)) if planned else "solid", zorder=3))
+
+def _band(ax, verts, color, style):
+    """One colour band of a funnel, drawn in its pen style (no gradient)."""
+    if style == "solid":
+        ax.add_patch(Polygon(verts, closed=True, facecolor=color,
+                             edgecolor=INK, linewidth=1.1, zorder=3))
+    elif style == "hatch":
+        ax.add_patch(Polygon(verts, closed=True, facecolor="white",
+                             edgecolor=color, linewidth=1.5, hatch="////",
+                             zorder=3))
+    elif style == "dotted":
+        ax.add_patch(Polygon(verts, closed=True, facecolor="none",
+                             edgecolor=color, linewidth=2,
+                             linestyle=(0, (1, 1.8)), zorder=3))
+
+
+def funnel(ax, x_left, y_c, w, h, spec):
+    """Banded quality-gate funnel: wide intake (left) -> refined tip (right).
+
+    spec is a list of (colour, style): 3 entries -> green/orange/red bands;
+    1 entry -> a plain single-colour triangle (the small live gates).
+    """
+    hh = h / 2
+    xr = x_left + w
+    if len(spec) == 1:
+        _band(ax, [(x_left, y_c - hh), (x_left, y_c + hh), (xr, y_c)],
+              spec[0][0], spec[0][1])
+        return
+    xg = x_left + 0.42 * w         # green rectangle ends
+    xo = x_left + 0.80 * w         # orange ends, red tip begins
+    ho = hh * (xr - xo) / (xr - xg)
+    green  = [(x_left, y_c - hh), (x_left, y_c + hh), (xg, y_c + hh), (xg, y_c - hh)]
+    orange = [(xg, y_c - hh), (xg, y_c + hh), (xo, y_c + ho), (xo, y_c - ho)]
+    red    = [(xo, y_c - ho), (xo, y_c + ho), (xr, y_c)]
+    for verts, (color, style) in zip((green, orange, red), spec):
+        _band(ax, verts, color, style)
 
 
 def arrow(ax, p0, p1, rad=0.0):
     ax.add_patch(FancyArrowPatch(
         p0, p1, arrowstyle="-|>", mutation_scale=13, lw=1.6, color=MUTED,
         shrinkA=2, shrinkB=3, connectionstyle=f"arc3,rad={rad}", zorder=1))
-
-
-def line(ax, p0, p1, color=MUTED, lw=1.6, ls="solid"):
-    ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color=color, lw=lw, ls=ls, zorder=1)
 
 
 def build(ax):
@@ -94,7 +116,7 @@ def build(ax):
     ax.text(2.75, 7.9, "DATA STREAMS", ha="center", va="bottom",
             fontsize=11, color=INK, family="monospace")
     for y in (yT, yM, yB):
-        ax.add_patch(plt.Circle((2.75, y), 0.11, color=INK, zorder=4))
+        ax.add_patch(Circle((2.75, y), 0.11, color=INK, zorder=4))
 
     # ── Stage boxes ──
     ax.add_patch(Rectangle((4.15, 1.15), 3.15, 6.7, facecolor="none",
@@ -102,27 +124,27 @@ def build(ax):
     ax.add_patch(Rectangle((8.35, 1.7), 2.5, 5.6, facecolor="none",
                           edgecolor=BOX2, linewidth=2, zorder=1))
 
-    # ── Stage 1 funnels (top/mid built, bottom planned) ──
+    # ── Stage 1 funnels ──
     fw, fh, x1 = 2.1, 1.35, 4.55
-    funnel(ax, x1, yT, fw, fh, planned=False)
-    funnel(ax, x1, yM, fw, fh, planned=False)
-    funnel(ax, x1, yB, fw, fh, planned=True)
+    funnel(ax, x1, yT, fw, fh, FA)
+    funnel(ax, x1, yM, fw, fh, FB)
+    funnel(ax, x1, yB, fw, fh, FC)
 
-    # ── Stage 2 funnels (merged upper + lower, both planned) ──
+    # ── Stage 2 funnels (merged upper + lower) ──
     yU, yL = 5.55, 3.15
     fw2, x2 = 1.85, 8.6
-    funnel(ax, x2, yU, fw2, 1.3, planned=True)
-    funnel(ax, x2, yL, fw2, 1.3, planned=True)
+    funnel(ax, x2, yU, fw2, 1.3, FD)
+    funnel(ax, x2, yL, fw2, 1.3, FE)
 
-    # ── Pre-finish live gates (planned) ──
+    # ── Pre-finish live gates ──
     x3, pw = 11.55, 1.15
-    funnel(ax, x3, yT, pw, 0.85, planned=True)
-    funnel(ax, x3, yB, pw, 0.85, planned=True)
+    funnel(ax, x3, yT, pw, 0.85, PG)
+    funnel(ax, x3, yB, pw, 0.85, PG)
 
     # ── Finish · Live ──
     ax.plot([14.1, 14.1], [1.2, 7.8], color=ACCENT, lw=3, zorder=2)
     for y in (yT, yB):
-        ax.add_patch(plt.Circle((14.1, y), 0.11, color=ACCENT, zorder=4))
+        ax.add_patch(Circle((14.1, y), 0.11, color=ACCENT, zorder=4))
     ax.text(14.55, yM, "Finish · Live", rotation=90, ha="left",
             va="center", fontsize=12, color=ACCENT, family="monospace",
             fontweight="bold")
@@ -138,32 +160,44 @@ def build(ax):
     arrow(ax, (x1 + fw, yM), (x2 - 0.03, yU), rad=0.05)
     arrow(ax, (x1 + fw, yB), (x2 - 0.03, yL), rad=0.05)
     # stage 2 tips cross into two live endpoints (the X in the sketch)
-    arrow(ax, (x2 + fw2, yU), (x3 - 0.03, yB), rad=0.0)
-    arrow(ax, (x2 + fw2, yL), (x3 - 0.03, yT), rad=0.0)
+    arrow(ax, (x2 + fw2, yU), (x3 - 0.03, yB))
+    arrow(ax, (x2 + fw2, yL), (x3 - 0.03, yT))
     # live gates -> finish
     arrow(ax, (x3 + pw, yT), (14.05, yT))
     arrow(ax, (x3 + pw, yB), (14.05, yB))
 
-    _legend(ax)
+    _role_circles(ax)
+    _style_key(ax)
 
 
-def _legend(ax):
-    x0, y0 = 0.35, 0.55
-    # gradient swatch
-    grad = np.linspace(0, 1, 256).reshape(1, -1)
-    ax.imshow(grad, extent=[x0, x0 + 0.9, y0 + 0.55, y0 + 0.85],
-              origin="lower", aspect="auto", cmap=GATE_CMAP, zorder=3)
-    ax.add_patch(Rectangle((x0, y0 + 0.55), 0.9, 0.3, facecolor="none",
-                          edgecolor=INK, lw=1, zorder=4))
-    ax.text(x0 + 1.05, y0 + 0.70, "quality gate: raw (green) → refined (red)",
-            va="center", fontsize=9.5, color=INK)
-    ax.text(x0, y0 + 0.20, "solid border", va="center", fontsize=9.5,
-            color=INK, fontweight="bold")
-    ax.text(x0 + 1.6, y0 + 0.20, "built", va="center", fontsize=9.5, color=MUTED)
-    ax.text(x0, y0 - 0.15, "dashed border", va="center", fontsize=9.5,
-            color=MUTED, fontweight="bold")
-    ax.text(x0 + 1.6, y0 - 0.15, "planned / in progress", va="center",
-            fontsize=9.5, color=MUTED)
+def _role_circles(ax):
+    """Team-role key from the sketch: one circle per role, one split two-colour.
+    Colours only for now; role labels intentionally blank."""
+    r = 0.17
+    ax.text(2.55, 1.75, "TEAM", fontsize=9.5, color=MUTED, family="monospace")
+    solids = [(2.55, 1.35, GREEN), (3.55, 1.35, RED),
+              (2.55, 0.75, BLACK), (3.05, 0.75, AMBER), (3.55, 0.75, RED)]
+    for x, y, c in solids:
+        ax.add_patch(Circle((x, y), r, facecolor=c, edgecolor=INK,
+                           linewidth=0.8, zorder=4))
+    # the one split (two-colour) role circle
+    sx, sy = 3.05, 1.35
+    ax.add_patch(Wedge((sx, sy), r, 90, 270, facecolor=GREEN,
+                      edgecolor=INK, linewidth=0.8, zorder=4))
+    ax.add_patch(Wedge((sx, sy), r, 270, 450, facecolor=AMBER,
+                      edgecolor=INK, linewidth=0.8, zorder=4))
+
+
+def _style_key(ax):
+    """Small key for the pen styles (done / in progress / planned)."""
+    x0, y0 = 5.4, 0.95
+    samples = [("solid", "done"), ("hatch", "in progress"), ("dotted", "planned")]
+    for i, (style, label) in enumerate(samples):
+        y = y0 - i * 0.42
+        rect = [(x0, y - 0.14), (x0 + 0.5, y - 0.14),
+                (x0 + 0.5, y + 0.14), (x0, y + 0.14)]
+        _band(ax, rect, INK if style == "solid" else MUTED, style)
+        ax.text(x0 + 0.68, y, label, va="center", fontsize=9, color=INK)
 
 
 def main():
