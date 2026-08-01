@@ -221,7 +221,7 @@ def _team_roles(ax):
             color=MUTED, family="monospace")
     rows = [
         (BLACK, "Tech lead",
-         "owns dbt strategy, used efficiently per client · hands-off code · dbt: deep"),
+         "designs the dbt architecture for the client's architecture + business needs — future-proofing (hard) · dbt: deep"),
         (RED, "Model dev lead",
          "initial model, imperfect but delivered · test dev · dbt: med–high (variables)"),
         (AMBER, "Dev · QA & optimization",
