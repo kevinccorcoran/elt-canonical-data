@@ -22,6 +22,7 @@ split into two colours). Role labels are intentionally left blank for now.
 Drawn with matplotlib. Output: tools/pipeline_schematic.(png|svg).
 """
 import os
+import textwrap
 
 import matplotlib
 matplotlib.use("Agg")
@@ -99,7 +100,7 @@ def arrow(ax, p0, p1, rad=0.0):
 
 def build(ax):
     ax.set_xlim(0, 16)
-    ax.set_ylim(-3.5, 9)
+    ax.set_ylim(-4.1, 9)
     ax.set_aspect("equal")                # never distort funnels/circles
     ax.axis("off")
 
@@ -120,8 +121,9 @@ def build(ax):
     for y in (yT, yM, yB):
         ax.add_patch(Circle((2.9, y), 0.12, color=INK, zorder=4))
 
-    # ── Tech lead owns the whole model pipeline: one big black box ──
-    ax.add_patch(Rectangle((3.85, 1.45), 9.2, 6.6, facecolor="none",
+    # ── Tech lead owns the model pipeline: one black box around the models ──
+    # (the live gates + finish sit outside, downstream of the dbt models)
+    ax.add_patch(Rectangle((3.85, 1.45), 6.75, 6.6, facecolor="none",
                           edgecolor=BOX1, linewidth=2.2, zorder=1))
     ax.text(3.98, 7.9, "TECH LEAD · dbt architecture", fontsize=9,
             color=INK, family="monospace", va="top")
@@ -204,9 +206,9 @@ def _deliverables(ax):
     gbox(11.55, 14.6, "Quality dashboard · Shiny",
          "for all models · ~20 min – ½ day each")
     # both deliverables operate at the model / table level; short green ticks
-    # up to the big model box (they validate / read the models, not the finish)
+    # up to the model box (they validate / read the models, not the finish)
     top = gy0 + h
-    for x in (5.4, 9.0, 12.0):
+    for x in (5.4, 8.7):
         ax.plot([x, x], [top, 1.4], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)
 
 
@@ -240,16 +242,19 @@ def _team_roles(ax):
         (AMBER, "Dev · QA & optimization",
          "ensures each model is optimized — logic + performance (query opt, splitting, index strategy) · test dev · dbt: working"),
         (GREEN, "Dev · testing & framework",
-         "per-model testing: integration, refinement, deep-dive defect analysis (pytest/matrix-notify, Shiny) · dbt: small (adds dbt validation)"),
+         "goal: every model auto-monitored for source-data, logic + pipeline issues · integration, refinement, deep-dive defect analysis · dbt: small (adds dbt validation)"),
     ]
-    y = -0.85
+    y = -0.72
     for c, role, means in rows:
-        ax.add_patch(Circle((3.05, y), 0.12, facecolor=c, edgecolor=INK,
+        wrapped = textwrap.fill(means, width=94)
+        nlines = wrapped.count("\n") + 1
+        yc = y - 0.11                         # first-line centre for swatch + role
+        ax.add_patch(Circle((3.05, yc), 0.12, facecolor=c, edgecolor=INK,
                            linewidth=0.8, zorder=4))
-        ax.text(3.3, y, role, fontsize=8.8, color=INK, va="center", fontweight="bold")
-        ax.text(6.15, y, means, fontsize=7.6, color=INK, va="center")
-        y -= 0.6
-    ax.text(3.3, y + 0.03,
+        ax.text(3.3, yc, role, fontsize=8.6, color=INK, va="center", fontweight="bold")
+        ax.text(6.15, y, wrapped, fontsize=7.6, color=INK, va="top", linespacing=1.5)
+        y -= 0.24 * nlines + 0.28
+    ax.text(3.3, y + 0.06,
             "Split circle = one person covering QA/optimization + model dev lead.",
             fontsize=8, color=MUTED, va="center", style="italic")
 
@@ -268,7 +273,7 @@ def _style_key(ax):
 
 
 def main():
-    fig, ax = plt.subplots(figsize=(12.8, 10.0), dpi=150)
+    fig, ax = plt.subplots(figsize=(12.8, 10.5), dpi=150)
     fig.patch.set_facecolor(PAPER)
     build(ax)
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
