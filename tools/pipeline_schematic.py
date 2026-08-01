@@ -169,36 +169,50 @@ def build(ax):
     _style_key(ax)
 
 
+def _split_circle(ax, x, y, r, c1, c2):
+    ax.add_patch(Wedge((x, y), r, 90, 270, facecolor=c1,
+                      edgecolor=INK, linewidth=0.8, zorder=4))
+    ax.add_patch(Wedge((x, y), r, 270, 450, facecolor=c2,
+                      edgecolor=INK, linewidth=0.8, zorder=4))
+
+
 def _role_circles(ax):
-    """Team-role key from the sketch: one circle per role, one split two-colour.
-    Colours only for now; role labels intentionally blank. Two aligned rows."""
-    r, dx = 0.19, 0.62
-    x0, yTop, yBot = 1.0, 1.15, 0.5
-    ax.text(x0 - 0.1, 1.75, "TEAM", fontsize=10, color=MUTED, family="monospace")
-    top = [(x0, GREEN), (x0 + dx, None), (x0 + 2 * dx, RED)]      # None = split
-    bot = [(x0, BLACK), (x0 + dx, AMBER), (x0 + 2 * dx, RED)]
-    for y, row in ((yTop, top), (yBot, bot)):
+    """The team: 7 member circles (one a green/orange split for a shared role),
+    plus a colour -> role key."""
+    r, dx = 0.18, 0.46
+    ax.text(0.55, 1.95, "TEAM", fontsize=10, color=MUTED, family="monospace")
+    # 7 members: green x1, split x1, red x2, orange x2, black x1
+    top = [(0.7, GREEN), (0.7 + dx, "split"), (0.7 + 2 * dx, RED), (0.7 + 3 * dx, AMBER)]
+    bot = [(0.7, BLACK), (0.7 + dx, AMBER), (0.7 + 2 * dx, RED)]
+    for y, row in ((1.5, top), (0.95, bot)):
         for x, c in row:
-            if c is None:                                        # split two-colour
-                ax.add_patch(Wedge((x, y), r, 90, 270, facecolor=GREEN,
-                                  edgecolor=INK, linewidth=0.8, zorder=4))
-                ax.add_patch(Wedge((x, y), r, 270, 450, facecolor=AMBER,
-                                  edgecolor=INK, linewidth=0.8, zorder=4))
+            if c == "split":
+                _split_circle(ax, x, y, r, GREEN, AMBER)
             else:
                 ax.add_patch(Circle((x, y), r, facecolor=c, edgecolor=INK,
                                    linewidth=0.8, zorder=4))
+    # colour -> role key
+    roles = [(RED,   "Model dev lead"),
+             (AMBER, "Dev · QA & model optimization"),
+             (GREEN, "Dev · testing & test framework (tests, viz, deep-dives)"),
+             (BLACK, "Tech lead")]
+    for i, (c, label) in enumerate(roles):
+        y = 1.55 - i * 0.42
+        ax.add_patch(Circle((3.05, y), 0.12, facecolor=c, edgecolor=INK,
+                           linewidth=0.8, zorder=4))
+        ax.text(3.3, y, label, va="center", fontsize=9, color=INK)
 
 
 def _style_key(ax):
-    """Small key for the pen styles (done / in progress / planned)."""
-    x0, y0 = 5.1, 1.15
+    """Pen-style key (done / in progress / planned), bottom-right."""
+    x0, y0 = 11.0, 1.4
     samples = [("solid", "done"), ("hatch", "in progress"), ("dotted", "planned")]
     for i, (style, label) in enumerate(samples):
-        y = y0 - i * 0.5
-        rect = [(x0, y - 0.16), (x0 + 0.55, y - 0.16),
-                (x0 + 0.55, y + 0.16), (x0, y + 0.16)]
+        y = y0 - i * 0.48
+        rect = [(x0, y - 0.15), (x0 + 0.55, y - 0.15),
+                (x0 + 0.55, y + 0.15), (x0, y + 0.15)]
         _band(ax, rect, INK if style == "solid" else MUTED, style)
-        ax.text(x0 + 0.75, y, label, va="center", fontsize=9.5, color=INK)
+        ax.text(x0 + 0.72, y, label, va="center", fontsize=9.5, color=INK)
 
 
 def main():
