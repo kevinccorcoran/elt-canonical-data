@@ -1,122 +1,179 @@
 """Conceptual pipeline schematic: data streams -> quality gates -> live.
 
-A hand-sketched, deliberately abstract view of the platform as a flow (distinct
-from pipeline_grouped.py, which is the concrete schema-by-schema pipeline):
+A faithful digital rendering of the hand sketch (distinct from
+pipeline_grouped.py, the concrete schema-by-schema pipeline):
 
-    Start -> three parallel DATA STREAMS -> per-stream quality-gate funnels
-    (raw volume in, refined output at the tip) -> the streams merge as they
-    mature -> planned gates -> a LIVE finish line crossed at two endpoints.
+    Start -> three parallel DATA STREAMS -> a STAGE-1 box of per-stream
+    quality-gate funnels -> a STAGE-2 box where the streams merge -> two
+    planned live gates that cross into a LIVE finish line at two endpoints.
 
-Funnel shape = a quality gate (wide intake on the left, refined tip on the
-right). The green->red gradient reads raw -> refined. graphviz linear gradients
-carry two stops only (and `striped` is unsupported on triangles), so the gate
-is green->red rather than the sketch's green/amber/red three-tone.
+Drawn with matplotlib (not graphviz): the funnels need real right-pointing
+triangles with a green -> amber -> red gradient (raw volume screened to refined
+output), which graphviz cannot do (its gradients are two-stop and it mirrors
+oriented triangles inside clusters). matplotlib gives exact shape + 3-tone.
 
-Border encodes maturity:
-    solid  = built
-    dashed = planned / in progress
+Encoding:
+    funnel        a quality gate: wide intake on the left, refined tip on the right
+    green->red    raw volume in, screened + refined out
+    solid outline built
+    dashed outline planned / in progress
 
-Renders with the `graphviz` package + the `dot` binary, same as
-pipeline_grouped.py. Output: tools/pipeline_schematic.(png|svg).
+Output: tools/pipeline_schematic.(png|svg).
 """
 import os
 
-import graphviz
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Ellipse, FancyArrowPatch, PathPatch, Rectangle
+from matplotlib.path import Path
 
-# ── palette (matches the README schematic / dashboard language) ──
-INK      = "#1b2130"
-MUTED    = "#6b7382"
-ACCENT   = "#2f9e6b"          # "live"
-FUNNEL   = "#2f9e6b:#d6402a"  # green (raw) -> red (refined); 2-stop gradient
-PAPER    = "#ffffff"
+# ── palette ──
+INK    = "#1b2130"
+MUTED  = "#8a93a3"
+ACCENT = "#2f9e6b"           # "live"
+GREEN  = "#2f9e6b"
+AMBER  = "#e2871b"
+RED    = "#d6402a"
+BOX1   = INK
+BOX2   = "#c0553a"           # stage-2 box drawn red in the sketch
+PAPER  = "#ffffff"
+
+GATE_CMAP = LinearSegmentedColormap.from_list("gate", [GREEN, AMBER, RED])
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def _funnel(g, name, planned=False, small=False):
-    """A right-pointing quality-gate funnel (wide intake -> refined tip)."""
-    g.node(
-        name, "",
-        shape="triangle", orientation="90",         # apex points right (east)
-        style="filled,dashed" if planned else "filled",
-        fillcolor=FUNNEL, gradientangle="0",
-        color=MUTED if planned else INK,
-        penwidth="2",
-        fixedsize="true",
-        width="1.05" if small else "1.5",
-        height="0.8" if small else "1.05",
-    )
+def funnel(ax, x_left, y_c, w, h, planned=False):
+    """Right-pointing gate: wide intake (left) narrowing to a refined tip."""
+    verts = [(x_left, y_c - h / 2), (x_left, y_c + h / 2), (x_left + w, y_c)]
+    clip = PathPatch(Path(verts + [verts[0]], closed=True),
+                     facecolor="none", edgecolor="none", zorder=2)
+    ax.add_patch(clip)
+    grad = np.linspace(0, 1, 256).reshape(1, -1)
+    im = ax.imshow(grad, extent=[x_left, x_left + w, y_c - h / 2, y_c + h / 2],
+                   origin="lower", aspect="auto", cmap=GATE_CMAP,
+                   alpha=0.42 if planned else 1.0, zorder=2)
+    im.set_clip_path(clip)
+    ax.add_patch(PathPatch(
+        Path(verts + [verts[0]], closed=True), facecolor="none",
+        edgecolor=MUTED if planned else INK, linewidth=2,
+        linestyle=(0, (5, 4)) if planned else "solid", zorder=3))
 
 
-def build() -> graphviz.Digraph:
-    g = graphviz.Digraph("pipeline_schematic", format="png")
-    g.attr(
-        rankdir="LR", bgcolor=PAPER, fontname="Helvetica",
-        nodesep="0.5", ranksep="0.85", pad="0.4",
-    )
-    g.attr("node", fontname="Helvetica", fontcolor=INK)
-    g.attr("edge", color=MUTED, penwidth="1.6", arrowsize="0.8")
+def arrow(ax, p0, p1, rad=0.0):
+    ax.add_patch(FancyArrowPatch(
+        p0, p1, arrowstyle="-|>", mutation_scale=13, lw=1.6, color=MUTED,
+        shrinkA=2, shrinkB=3, connectionstyle=f"arc3,rad={rad}", zorder=1))
 
-    # Start
-    g.node("start", "Start", shape="ellipse", style="filled", fillcolor=PAPER,
-           color=INK, penwidth="2", width="1.1", height="0.7", fixedsize="true")
 
-    # Data Streams: three entry nodes on a labelled axis
-    with g.subgraph(name="cluster_streams") as s:
-        s.attr(label="DATA STREAMS", labelloc="t", fontname="Helvetica",
-               fontcolor=INK, color=MUTED, style="dashed", penwidth="1.2")
-        for n in ("s1", "s2", "s3"):
-            s.node(n, "", shape="point", width="0.14", color=INK)
+def line(ax, p0, p1, color=MUTED, lw=1.6, ls="solid"):
+    ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color=color, lw=lw, ls=ls, zorder=1)
 
-    # Stage 1 funnels: top two built, bottom planned
-    _funnel(g, "fa", planned=False)
-    _funnel(g, "fb", planned=False)
-    _funnel(g, "fc", planned=True)
 
-    # Stage 2: merged upper + lower branch (both planned)
-    _funnel(g, "fd", planned=True)
-    _funnel(g, "fe", planned=True)
+def build(ax):
+    ax.set_xlim(0, 16)
+    ax.set_ylim(0, 9)
+    ax.axis("off")
 
-    # Pre-finish live gates (planned)
-    _funnel(g, "p1", planned=True, small=True)
-    _funnel(g, "p2", planned=True, small=True)
+    yT, yM, yB = 6.35, 4.5, 2.65          # three stream lanes
 
-    # Finish · Live
-    g.node("finish", "Finish\n·\nLive", shape="box", style="filled",
-           fillcolor=ACCENT, fontcolor="white", color=ACCENT,
-           width="1.05", height="2.6", fixedsize="true", fontname="Helvetica")
+    # ── Start ──
+    ax.add_patch(Ellipse((1.15, yM), 1.5, 1.0, facecolor=PAPER,
+                         edgecolor=INK, linewidth=2, zorder=4))
+    ax.text(1.15, yM, "Start", ha="center", va="center",
+            fontsize=12, fontweight="bold", color=INK, zorder=5)
+
+    # ── Data Streams axis ──
+    ax.plot([2.75, 2.75], [1.5, 7.6], color=MUTED, lw=1.3,
+            ls=(0, (1, 4)), zorder=1)
+    ax.annotate("", xy=(2.75, 7.05), xytext=(2.75, 7.5),
+                arrowprops=dict(arrowstyle="-|>", color=MUTED, lw=1.4))
+    ax.text(2.75, 7.9, "DATA STREAMS", ha="center", va="bottom",
+            fontsize=11, color=INK, family="monospace")
+    for y in (yT, yM, yB):
+        ax.add_patch(plt.Circle((2.75, y), 0.11, color=INK, zorder=4))
+
+    # ── Stage boxes ──
+    ax.add_patch(Rectangle((4.15, 1.15), 3.15, 6.7, facecolor="none",
+                          edgecolor=BOX1, linewidth=2, zorder=1))
+    ax.add_patch(Rectangle((8.35, 1.7), 2.5, 5.6, facecolor="none",
+                          edgecolor=BOX2, linewidth=2, zorder=1))
+
+    # ── Stage 1 funnels (top/mid built, bottom planned) ──
+    fw, fh, x1 = 2.1, 1.35, 4.55
+    funnel(ax, x1, yT, fw, fh, planned=False)
+    funnel(ax, x1, yM, fw, fh, planned=False)
+    funnel(ax, x1, yB, fw, fh, planned=True)
+
+    # ── Stage 2 funnels (merged upper + lower, both planned) ──
+    yU, yL = 5.55, 3.15
+    fw2, x2 = 1.85, 8.6
+    funnel(ax, x2, yU, fw2, 1.3, planned=True)
+    funnel(ax, x2, yL, fw2, 1.3, planned=True)
+
+    # ── Pre-finish live gates (planned) ──
+    x3, pw = 11.55, 1.15
+    funnel(ax, x3, yT, pw, 0.85, planned=True)
+    funnel(ax, x3, yB, pw, 0.85, planned=True)
+
+    # ── Finish · Live ──
+    ax.plot([14.1, 14.1], [1.2, 7.8], color=ACCENT, lw=3, zorder=2)
+    for y in (yT, yB):
+        ax.add_patch(plt.Circle((14.1, y), 0.11, color=ACCENT, zorder=4))
+    ax.text(14.55, yM, "Finish · Live", rotation=90, ha="left",
+            va="center", fontsize=12, color=ACCENT, family="monospace",
+            fontweight="bold")
 
     # ── flow ──
-    for n in ("s1", "s2", "s3"):
-        g.edge("start", n)
-    g.edge("s1", "fa"); g.edge("s2", "fb"); g.edge("s3", "fc")
-    g.edge("fa", "fd"); g.edge("fb", "fd")   # top two merge
-    g.edge("fc", "fe")                        # lower branch
-    g.edge("fd", "p1"); g.edge("fd", "p2")    # upper serves two endpoints
-    g.edge("fe", "p2")                        # lower joins the second
-    g.edge("p1", "finish"); g.edge("p2", "finish")
+    arrow(ax, (1.9, yM), (2.64, yT), rad=-0.06)
+    arrow(ax, (1.9, yM), (2.64, yM))
+    arrow(ax, (1.9, yM), (2.64, yB), rad=0.06)
+    for y in (yT, yM, yB):
+        arrow(ax, (2.86, y), (x1 - 0.03, y))
+    # stage 1 tips -> stage 2 (top+mid merge into upper; bottom -> lower)
+    arrow(ax, (x1 + fw, yT), (x2 - 0.03, yU), rad=-0.05)
+    arrow(ax, (x1 + fw, yM), (x2 - 0.03, yU), rad=0.05)
+    arrow(ax, (x1 + fw, yB), (x2 - 0.03, yL), rad=0.05)
+    # stage 2 tips cross into two live endpoints (the X in the sketch)
+    arrow(ax, (x2 + fw2, yU), (x3 - 0.03, yB), rad=0.0)
+    arrow(ax, (x2 + fw2, yL), (x3 - 0.03, yT), rad=0.0)
+    # live gates -> finish
+    arrow(ax, (x3 + pw, yT), (14.05, yT))
+    arrow(ax, (x3 + pw, yB), (14.05, yB))
 
-    # legend
-    with g.subgraph(name="cluster_legend") as lg:
-        lg.attr(label="", color=MUTED, style="dashed", penwidth="1")
-        lg.node("lg", shape="plaintext", fontname="Helvetica", label=f'''<
-          <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="4" CELLPADDING="3">
-            <TR><TD BGCOLOR="{ACCENT}" WIDTH="26"></TD>
-                <TD ALIGN="LEFT"><FONT COLOR="{INK}">quality gate: raw (green) &#8594; refined (red)</FONT></TD></TR>
-            <TR><TD ALIGN="LEFT"><FONT COLOR="{INK}">solid border</FONT></TD>
-                <TD ALIGN="LEFT"><FONT COLOR="{MUTED}">built</FONT></TD></TR>
-            <TR><TD ALIGN="LEFT"><FONT COLOR="{MUTED}">dashed border</FONT></TD>
-                <TD ALIGN="LEFT"><FONT COLOR="{MUTED}">planned / in progress</FONT></TD></TR>
-          </TABLE>>''')
-
-    return g
+    _legend(ax)
 
 
-def main() -> None:
-    g = build()
+def _legend(ax):
+    x0, y0 = 0.35, 0.55
+    # gradient swatch
+    grad = np.linspace(0, 1, 256).reshape(1, -1)
+    ax.imshow(grad, extent=[x0, x0 + 0.9, y0 + 0.55, y0 + 0.85],
+              origin="lower", aspect="auto", cmap=GATE_CMAP, zorder=3)
+    ax.add_patch(Rectangle((x0, y0 + 0.55), 0.9, 0.3, facecolor="none",
+                          edgecolor=INK, lw=1, zorder=4))
+    ax.text(x0 + 1.05, y0 + 0.70, "quality gate: raw (green) → refined (red)",
+            va="center", fontsize=9.5, color=INK)
+    ax.text(x0, y0 + 0.20, "solid border", va="center", fontsize=9.5,
+            color=INK, fontweight="bold")
+    ax.text(x0 + 1.6, y0 + 0.20, "built", va="center", fontsize=9.5, color=MUTED)
+    ax.text(x0, y0 - 0.15, "dashed border", va="center", fontsize=9.5,
+            color=MUTED, fontweight="bold")
+    ax.text(x0 + 1.6, y0 - 0.15, "planned / in progress", va="center",
+            fontsize=9.5, color=MUTED)
+
+
+def main():
+    fig, ax = plt.subplots(figsize=(15.5, 7.0), dpi=150)
+    fig.patch.set_facecolor(PAPER)
+    build(ax)
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
     base = os.path.join(HERE, "pipeline_schematic")
-    g.render(base, format="png", cleanup=True)
-    g.render(base, format="svg", cleanup=True)
+    fig.savefig(base + ".png", facecolor=PAPER, bbox_inches="tight", pad_inches=0.15)
+    fig.savefig(base + ".svg", facecolor=PAPER, bbox_inches="tight", pad_inches=0.15)
     print(f"wrote {base}.png and {base}.svg")
 
 
