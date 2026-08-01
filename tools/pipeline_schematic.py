@@ -120,19 +120,21 @@ def build(ax):
     for y in (yT, yM, yB):
         ax.add_patch(Circle((2.9, y), 0.12, color=INK, zorder=4))
 
-    # ── Stage 1: box + three per-stream funnels ──
+    # ── Tech lead owns the whole model pipeline: one big black box ──
+    ax.add_patch(Rectangle((3.85, 1.45), 9.2, 6.6, facecolor="none",
+                          edgecolor=BOX1, linewidth=2.2, zorder=1))
+    ax.text(3.98, 7.9, "TECH LEAD · dbt architecture", fontsize=9,
+            color=INK, family="monospace", va="top")
+
+    # ── Stage 1: three per-stream funnels ──
     fw, fh, x1 = 2.05, 1.5, 4.35
-    ax.add_patch(Rectangle((4.05, 1.6), 3.05, 6.2, facecolor="none",
-                          edgecolor=BOX1, linewidth=2, zorder=1))
     funnel(ax, x1, yT, fw, fh, FA)
     funnel(ax, x1, yM, fw, fh, FB)
     funnel(ax, x1, yB, fw, fh, FC)
 
-    # ── Stage 2: tighter box + two merged funnels (centred in the box) ──
+    # ── Stage 2: two merged funnels ──
     yU, yL = 5.7, 3.7
     fw2, fh2, x2 = 1.8, 1.4, 8.15
-    ax.add_patch(Rectangle((7.85, 2.55), 2.35, 4.3, facecolor="none",
-                          edgecolor=BOX2, linewidth=2, zorder=1))
     funnel(ax, x2, yU, fw2, fh2, FD)
     funnel(ax, x2, yL, fw2, fh2, FE)
 
@@ -201,12 +203,11 @@ def _deliverables(ax):
     gbox(4.05, 10.2, "Automated test suite  ·  pytest / matrix-notify")
     gbox(11.55, 14.6, "Quality dashboard · Shiny",
          "for all models · ~20 min – ½ day each")
-    # both deliverables operate at the model / table level (not the finish),
-    # so link them up to the models, not the live line
+    # both deliverables operate at the model / table level; short green ticks
+    # up to the big model box (they validate / read the models, not the finish)
     top = gy0 + h
-    for x, ytop in ((5.4, 1.6), (9.0, 2.55)):          # test suite validates the models
-        ax.plot([x, x], [top, ytop], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)
-    ax.plot([9.6, 12.5], [2.55, top], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)  # dashboard reads models
+    for x in (5.4, 9.0, 12.0):
+        ax.plot([x, x], [top, 1.4], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)
 
 
 def _team_roles(ax):
@@ -239,7 +240,7 @@ def _team_roles(ax):
         (AMBER, "Dev · QA & optimization",
          "model done: query opt, splitting, index strategy · test dev · dbt: working"),
         (GREEN, "Dev · testing & framework",
-         "proper testing at each model level (pytest/matrix-notify, Shiny) · dbt: none"),
+         "proper testing at each model level (pytest/matrix-notify, Shiny) · dbt: small (can add validation in the dbt project)"),
     ]
     y = -0.85
     for c, role, means in rows:
