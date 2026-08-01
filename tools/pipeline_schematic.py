@@ -184,13 +184,22 @@ def _deliverables(ax):
     pipeline: the automated test suite (validates the models) and the quality
     dashboard (reads the live output)."""
     gy0, h = 0.5, 0.78
-    def gbox(x0, x1, label):
+    def gbox(x0, x1, label, sub=None):
         ax.add_patch(Rectangle((x0, gy0), x1 - x0, h, facecolor=GREEN_L,
                               edgecolor=GREEN, linewidth=1.8, zorder=2))
-        ax.text((x0 + x1) / 2, gy0 + h / 2, label, ha="center", va="center",
-                color=GREEN_D, fontsize=9, fontweight="bold", zorder=3)
+        cx = (x0 + x1) / 2
+        cy = gy0 + h / 2
+        if sub:
+            ax.text(cx, cy + 0.14, label, ha="center", va="center",
+                    color=GREEN_D, fontsize=9, fontweight="bold", zorder=3)
+            ax.text(cx, cy - 0.16, sub, ha="center", va="center",
+                    color=GREEN_D, fontsize=7.4, zorder=3)
+        else:
+            ax.text(cx, cy, label, ha="center", va="center",
+                    color=GREEN_D, fontsize=9, fontweight="bold", zorder=3)
     gbox(4.05, 10.2, "Automated test suite  ·  pytest / matrix-notify")
-    gbox(11.55, 14.6, "Quality dashboard · Shiny")
+    gbox(11.55, 14.6, "Quality dashboard · Shiny",
+         "for all models · ~20 min – ½ day each")
     top = gy0 + h
     for x, ytop in ((5.4, 1.6), (9.0, 2.55)):          # suite validates the models
         ax.plot([x, x], [top, ytop], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)
