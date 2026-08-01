@@ -39,6 +39,8 @@ RED    = "#d6402a"
 BLACK  = "#1b2130"
 BOX1   = INK
 BOX2   = "#c0553a"           # stage-2 box drawn red in the sketch
+GREEN_L = "#e8f5ee"          # light fill for green deliverables
+GREEN_D = "#1f6b4a"
 PAPER  = "#ffffff"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -97,7 +99,7 @@ def arrow(ax, p0, p1, rad=0.0):
 
 def build(ax):
     ax.set_xlim(0, 16)
-    ax.set_ylim(0, 9)
+    ax.set_ylim(-3.5, 9)
     ax.set_aspect("equal")                # never distort funnels/circles
     ax.axis("off")
 
@@ -134,8 +136,8 @@ def build(ax):
     funnel(ax, x2, yU, fw2, fh2, FD)
     funnel(ax, x2, yL, fw2, fh2, FE)
 
-    # ── Pre-finish live gates (small, aligned with the finish endpoints) ──
-    x3, pw, ph = 11.2, 1.1, 0.9
+    # ── Pre-finish live gates: small red, ~size of a funnel's red tip ──
+    x3, pw, ph = 12.2, 0.5, 0.6
     yTg, yBg = 6.3, 3.1
     funnel(ax, x3, yTg, pw, ph, PG)
     funnel(ax, x3, yBg, pw, ph, PG)
@@ -165,7 +167,8 @@ def build(ax):
     arrow(ax, (x3 + pw, yTg), (xF - 0.05, yTg))
     arrow(ax, (x3 + pw, yBg), (xF - 0.05, yBg))
 
-    _role_circles(ax)
+    _deliverables(ax)
+    _team_roles(ax)
     _style_key(ax)
 
 
@@ -176,51 +179,83 @@ def _split_circle(ax, x, y, r, c1, c2):
                       edgecolor=INK, linewidth=0.8, zorder=4))
 
 
-def _role_circles(ax):
-    """The team: 7 member circles (one a green/orange split for a shared role),
-    plus a colour -> role key."""
-    r, dx = 0.19, 0.52
-    ax.text(0.6, 1.98, "TEAM", fontsize=10, color=MUTED, family="monospace")
-    # grouped by role: dev pod on top, leads centred below
-    top = [GREEN, "split", AMBER, AMBER]          # testing · shared · QA/opt · QA/opt
-    bot = [BLACK, RED, RED]                        # tech lead · model dev leads
-    xs_top = [0.7 + i * dx for i in range(len(top))]
+def _deliverables(ax):
+    """The testing & framework dev's two green deliverables, shown along the
+    pipeline: the automated test suite (validates the models) and the quality
+    dashboard (reads the live output)."""
+    gy0, h = 0.5, 0.78
+    def gbox(x0, x1, label):
+        ax.add_patch(Rectangle((x0, gy0), x1 - x0, h, facecolor=GREEN_L,
+                              edgecolor=GREEN, linewidth=1.8, zorder=2))
+        ax.text((x0 + x1) / 2, gy0 + h / 2, label, ha="center", va="center",
+                color=GREEN_D, fontsize=9, fontweight="bold", zorder=3)
+    gbox(4.05, 10.2, "Automated test suite  ·  pytest / matrix-notify")
+    gbox(11.55, 14.6, "Quality dashboard · Shiny")
+    top = gy0 + h
+    for x, ytop in ((5.4, 1.6), (9.0, 2.55)):          # suite validates the models
+        ax.plot([x, x], [top, ytop], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)
+    ax.plot([13.7, 13.05], [2.2, top], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)
+
+
+def _team_roles(ax):
+    """Team roster (7 circles, one split) + role key. Colour also encodes model
+    state: red = delivered but imperfect, orange = done, green = tested."""
+    ax.plot([0.4, 15.6], [0.2, 0.2], color="#e0e5eb", lw=1, zorder=0)   # divider
+    r, dx = 0.18, 0.5
+    ax.text(0.55, -0.25, "TEAM", fontsize=10, color=MUTED, family="monospace")
+    top = [GREEN, "split", AMBER, AMBER]
+    bot = [BLACK, RED, RED]
+    xs_top = [0.72 + i * dx for i in range(4)]
     span = xs_top[-1] - xs_top[0]
-    xs_bot = [(xs_top[0] + span / 2) + (i - (len(bot) - 1) / 2) * dx
-              for i in range(len(bot))]
-    for y, xs, row in ((1.52, xs_top, top), (0.94, xs_bot, bot)):
+    xs_bot = [(xs_top[0] + span / 2) + (i - 1) * dx for i in range(3)]
+    for y, xs, row in ((-0.8, xs_top, top), (-1.35, xs_bot, bot)):
         for x, c in zip(xs, row):
             if c == "split":
                 _split_circle(ax, x, y, r, GREEN, AMBER)
             else:
                 ax.add_patch(Circle((x, y), r, facecolor=c, edgecolor=INK,
                                    linewidth=0.8, zorder=4))
-    # colour -> role key
-    roles = [(RED,   "Model dev lead"),
-             (AMBER, "Dev · QA & model optimization"),
-             (GREEN, "Dev · testing & test framework (tests, viz, deep-dives)"),
-             (BLACK, "Tech lead")]
-    for i, (c, label) in enumerate(roles):
-        y = 1.55 - i * 0.42
+    # role · meaning key
+    ax.text(3.2, -0.25, "ROLE", fontsize=8.5, color=MUTED, family="monospace")
+    ax.text(6.15, -0.25, "role · model state · dbt", fontsize=8.5,
+            color=MUTED, family="monospace")
+    rows = [
+        (BLACK, "Tech lead",
+         "owns dbt strategy, used efficiently per client · hands-off code · dbt: deep"),
+        (RED, "Model dev lead",
+         "initial model, imperfect but delivered · test dev · dbt: med–high (variables)"),
+        (AMBER, "Dev · QA & optimization",
+         "model done: query opt, splitting, index strategy · test dev · dbt: working"),
+        (GREEN, "Dev · testing & framework",
+         "proper testing at each model level (pytest/matrix-notify, Shiny) · dbt: none"),
+    ]
+    y = -0.85
+    for c, role, means in rows:
         ax.add_patch(Circle((3.05, y), 0.12, facecolor=c, edgecolor=INK,
                            linewidth=0.8, zorder=4))
-        ax.text(3.3, y, label, va="center", fontsize=9, color=INK)
+        ax.text(3.3, y, role, fontsize=8.8, color=INK, va="center", fontweight="bold")
+        ax.text(6.15, y, means, fontsize=8.2, color=INK, va="center")
+        y -= 0.6
+    ax.text(3.3, y + 0.03,
+            "Split circle = one person covering testing framework + QA/optimization.",
+            fontsize=8, color=MUTED, va="center", style="italic")
 
 
 def _style_key(ax):
-    """Pen-style key (done / in progress / planned), bottom-right."""
-    x0, y0 = 11.0, 1.4
+    """Pen-style key (done / in progress / planned), top-right."""
+    x0, y0 = 11.5, 8.45
+    ax.text(x0, y0 + 0.42, "BUILD", fontsize=8.5, color=MUTED, family="monospace")
     samples = [("solid", "done"), ("hatch", "in progress"), ("dotted", "planned")]
     for i, (style, label) in enumerate(samples):
         y = y0 - i * 0.48
-        rect = [(x0, y - 0.15), (x0 + 0.55, y - 0.15),
-                (x0 + 0.55, y + 0.15), (x0, y + 0.15)]
+        rect = [(x0, y - 0.15), (x0 + 0.5, y - 0.15),
+                (x0 + 0.5, y + 0.15), (x0, y + 0.15)]
         _band(ax, rect, INK if style == "solid" else MUTED, style)
-        ax.text(x0 + 0.72, y, label, va="center", fontsize=9.5, color=INK)
+        ax.text(x0 + 0.66, y, label, va="center", fontsize=9, color=INK)
 
 
 def main():
-    fig, ax = plt.subplots(figsize=(13.3, 7.5), dpi=150)
+    fig, ax = plt.subplots(figsize=(12.8, 10.0), dpi=150)
     fig.patch.set_facecolor(PAPER)
     build(ax)
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
