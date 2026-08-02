@@ -113,17 +113,6 @@ def build(ax):
             fontsize=10.5, color=MUTED, va="top")
     ax.plot([0.3, 15.7], [9.02, 9.02], color="#d9dee6", lw=1.1)
 
-    # ── model-band legend: what the funnel colours mean ──
-    ax.text(0.3, 8.72, "MODEL BANDS", fontsize=9, color=MUTED,
-            family="monospace", va="center")
-    for color, label, x in ((RED, "actual model", 2.55),
-                            (AMBER, "model optimization", 5.35),
-                            (GREEN, "model testing", 9.05)):
-        ax.add_patch(Polygon([(x, 8.72 - 0.15), (x, 8.72 + 0.15), (x + 0.3, 8.72)],
-                           closed=True, facecolor=color, edgecolor=INK,
-                           linewidth=0.8, zorder=4))
-        ax.text(x + 0.45, 8.72, label, fontsize=9, color=INK, va="center")
-
     yT, yM, yB = 6.7, 4.7, 2.7            # three stream lanes (even 2.0 pitch)
 
     # ── Start ──
@@ -282,17 +271,28 @@ def _team_roles(ax):
 
 
 def _style_key(ax):
-    """Pen-style key (done / in progress / planned) as a bottom strip."""
-    y = -4.2
-    ax.text(0.55, y, "BUILD", fontsize=9.5, color=MUTED, family="monospace",
+    """Bottom legend row: MODEL BANDS (colour) next to BUILD (fill)."""
+    y = -4.3
+    # MODEL BANDS — colour = which band of the model
+    ax.text(0.55, y, "MODEL BANDS", fontsize=9, color=MUTED,
+            family="monospace", va="center")
+    for color, label, x in ((RED, "actual model", 2.35),
+                            (AMBER, "optimization", 4.35),
+                            (GREEN, "testing", 6.55)):
+        ax.add_patch(Polygon([(x, y - 0.13), (x, y + 0.13), (x + 0.26, y)],
+                           closed=True, facecolor=color, edgecolor=INK,
+                           linewidth=0.8, zorder=4))
+        ax.text(x + 0.36, y, label, fontsize=8.8, color=INK, va="center")
+    # BUILD — fill = build state
+    ax.text(8.25, y, "BUILD", fontsize=9, color=MUTED, family="monospace",
             va="center")
-    for style, label, x in (("solid", "done", 2.0),
-                            ("hatch", "in progress", 4.1),
-                            ("dotted", "planned", 6.9)):
-        rect = [(x, y - 0.14), (x + 0.5, y - 0.14),
-                (x + 0.5, y + 0.14), (x, y + 0.14)]
+    for style, label, x in (("solid", "done", 9.5),
+                            ("hatch", "in progress", 11.25),
+                            ("dotted", "planned", 13.75)):
+        rect = [(x, y - 0.14), (x + 0.45, y - 0.14),
+                (x + 0.45, y + 0.14), (x, y + 0.14)]
         _band(ax, rect, INK if style == "solid" else MUTED, style)
-        ax.text(x + 0.62, y, label, va="center", fontsize=9, color=INK)
+        ax.text(x + 0.57, y, label, va="center", fontsize=8.8, color=INK)
 
 
 def main():
