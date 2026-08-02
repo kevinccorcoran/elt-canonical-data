@@ -113,6 +113,17 @@ def build(ax):
             fontsize=10.5, color=MUTED, va="top")
     ax.plot([0.3, 15.7], [9.02, 9.02], color="#d9dee6", lw=1.1)
 
+    # ── model-band legend: what the funnel colours mean ──
+    ax.text(0.3, 8.72, "MODEL BANDS", fontsize=9, color=MUTED,
+            family="monospace", va="center")
+    for color, label, x in ((RED, "actual model", 2.55),
+                            (AMBER, "model optimization", 5.35),
+                            (GREEN, "model testing", 9.05)):
+        ax.add_patch(Polygon([(x, 8.72 - 0.15), (x, 8.72 + 0.15), (x + 0.3, 8.72)],
+                           closed=True, facecolor=color, edgecolor=INK,
+                           linewidth=0.8, zorder=4))
+        ax.text(x + 0.45, 8.72, label, fontsize=9, color=INK, va="center")
+
     yT, yM, yB = 6.7, 4.7, 2.7            # three stream lanes (even 2.0 pitch)
 
     # ── Start ──
@@ -134,7 +145,7 @@ def build(ax):
     ax.add_patch(Rectangle((3.5, 0.3), 11.15, 8.1, facecolor="none",
                           edgecolor=CONTAINER, linewidth=1.6,
                           linestyle=(0, (6, 3)), zorder=0))
-    ax.text(14.5, 8.28, "DOCKER CONTAINER · Airflow · dbt · Shiny", fontsize=9,
+    ax.text(14.5, 8.28, "DOCKER CONTAINER · orchestrator · dbt · Shiny", fontsize=9,
             color=CONTAINER, family="monospace", va="top", ha="right")
 
     # ── Tech lead owns the whole model pipeline: one big black box ──
@@ -203,27 +214,18 @@ def _deliverables(ax):
     """The testing & framework dev's two green deliverables, shown along the
     pipeline: the automated test suite (validates the models) and the quality
     dashboard (reads the live output)."""
-    gy0, h = 0.5, 0.78
-    def gbox(x0, x1, label, sub=None):
-        ax.add_patch(Rectangle((x0, gy0), x1 - x0, h, facecolor=GREEN_L,
+    gy0, h, w = 0.4, 1.0, 2.5             # squarer deliverable boxes
+    def gbox(cx, label):
+        ax.add_patch(Rectangle((cx - w / 2, gy0), w, h, facecolor=GREEN_L,
                               edgecolor=GREEN, linewidth=1.8, zorder=2))
-        cx = (x0 + x1) / 2
-        cy = gy0 + h / 2
-        if sub:
-            ax.text(cx, cy + 0.14, label, ha="center", va="center",
-                    color=GREEN_D, fontsize=9, fontweight="bold", zorder=3)
-            ax.text(cx, cy - 0.16, sub, ha="center", va="center",
-                    color=GREEN_D, fontsize=7.4, zorder=3)
-        else:
-            ax.text(cx, cy, label, ha="center", va="center",
-                    color=GREEN_D, fontsize=9, fontweight="bold", zorder=3)
-    gbox(4.05, 10.2, "Automated test suite  ·  pytest / matrix-notify")
-    gbox(11.55, 14.6, "Quality dashboard · Shiny")
-    # both deliverables operate at the model / table level; short green ticks
-    # up to the model box (they validate / read the models, not the finish)
-    top = gy0 + h
-    for x in (5.4, 8.7):
-        ax.plot([x, x], [top, 1.4], color=GREEN, ls=(0, (1, 2.2)), lw=1.3, zorder=1)
+        ax.text(cx, gy0 + h / 2, label, ha="center", va="center", color=GREEN_D,
+                fontsize=8.6, fontweight="bold", zorder=3, linespacing=1.5)
+    gbox(6.9, "Automated test suite\npytest · matrix-notify")
+    gbox(13.0, "Quality dashboard\nShiny")
+    # short green ticks up to the models (they validate / read the models)
+    for cx in (6.9, 13.0):
+        ax.plot([cx, cx], [gy0 + h, 1.45], color=GREEN, ls=(0, (1, 2.2)),
+                lw=1.3, zorder=1)
 
 
 def _team_roles(ax):
@@ -246,7 +248,7 @@ def _team_roles(ax):
                                    linewidth=0.8, zorder=4))
     # role · meaning key
     ax.text(3.2, -0.25, "ROLE", fontsize=8.5, color=MUTED, family="monospace")
-    ax.text(6.15, -0.25, "role · model state · dbt", fontsize=8.5,
+    ax.text(6.15, -0.25, "role · responsibilities · dbt", fontsize=8.5,
             color=MUTED, family="monospace")
     rows = [
         (BLACK, "Tech lead",
