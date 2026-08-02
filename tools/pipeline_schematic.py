@@ -42,6 +42,7 @@ BOX1   = INK
 BOX2   = "#c0553a"           # stage-2 box drawn red in the sketch
 GREEN_L = "#e8f5ee"          # light fill for green deliverables
 GREEN_D = "#1f6b4a"
+CONTAINER = "#3f6d8c"        # steel blue: the Docker container layer
 PAPER  = "#ffffff"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -100,7 +101,7 @@ def arrow(ax, p0, p1, rad=0.0):
 
 def build(ax):
     ax.set_xlim(0, 16)
-    ax.set_ylim(-4.1, 10.2)
+    ax.set_ylim(-4.7, 10.2)
     ax.set_aspect("equal")                # never distort funnels/circles
     ax.axis("off")
 
@@ -132,9 +133,15 @@ def build(ax):
     for y in (yT, yM, yB):
         ax.add_patch(Circle((2.9, y), 0.12, color=INK, zorder=4))
 
-    # ── Tech lead owns the model pipeline: one black box around the models ──
-    # (the live gates + finish sit outside, downstream of the dbt models)
-    ax.add_patch(Rectangle((3.85, 1.45), 6.75, 6.6, facecolor="none",
+    # ── Docker container: the whole pipeline + deliverables run containerized ──
+    ax.add_patch(Rectangle((3.5, 0.3), 11.15, 8.1, facecolor="none",
+                          edgecolor=CONTAINER, linewidth=1.6,
+                          linestyle=(0, (6, 3)), zorder=0))
+    ax.text(14.5, 8.28, "DOCKER CONTAINER · Airflow · dbt · Shiny", fontsize=9,
+            color=CONTAINER, family="monospace", va="top", ha="right")
+
+    # ── Tech lead owns the whole model pipeline: one big black box ──
+    ax.add_patch(Rectangle((3.85, 1.45), 9.2, 6.6, facecolor="none",
                           edgecolor=BOX1, linewidth=2.2, zorder=1))
     ax.text(3.98, 7.9, "TECH LEAD · dbt architecture", fontsize=9,
             color=INK, family="monospace", va="top")
@@ -271,20 +278,21 @@ def _team_roles(ax):
 
 
 def _style_key(ax):
-    """Pen-style key (done / in progress / planned), top-right."""
-    x0, y0 = 11.5, 8.45
-    ax.text(x0, y0 + 0.42, "BUILD", fontsize=8.5, color=MUTED, family="monospace")
-    samples = [("solid", "done"), ("hatch", "in progress"), ("dotted", "planned")]
-    for i, (style, label) in enumerate(samples):
-        y = y0 - i * 0.48
-        rect = [(x0, y - 0.15), (x0 + 0.5, y - 0.15),
-                (x0 + 0.5, y + 0.15), (x0, y + 0.15)]
+    """Pen-style key (done / in progress / planned) as a bottom strip."""
+    y = -4.2
+    ax.text(0.55, y, "BUILD", fontsize=9.5, color=MUTED, family="monospace",
+            va="center")
+    for style, label, x in (("solid", "done", 2.0),
+                            ("hatch", "in progress", 4.1),
+                            ("dotted", "planned", 6.9)):
+        rect = [(x, y - 0.14), (x + 0.5, y - 0.14),
+                (x + 0.5, y + 0.14), (x, y + 0.14)]
         _band(ax, rect, INK if style == "solid" else MUTED, style)
-        ax.text(x0 + 0.66, y, label, va="center", fontsize=9, color=INK)
+        ax.text(x + 0.62, y, label, va="center", fontsize=9, color=INK)
 
 
 def main():
-    fig, ax = plt.subplots(figsize=(12.4, 11.1), dpi=150)
+    fig, ax = plt.subplots(figsize=(11.9, 11.1), dpi=150)
     fig.patch.set_facecolor(PAPER)
     build(ax)
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
