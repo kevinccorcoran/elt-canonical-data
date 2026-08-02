@@ -1165,6 +1165,37 @@ ui <- navbarPage(
         uiOutput("forecastTableFC")
       ))
     )
+  ),
+
+  # ── Tab: Lifecycle (signal state matrix: buy / hold / sell over snapshots) ──
+  tabPanel("Lifecycle",
+    sidebarLayout(
+      make_sidebar("LC", "Database Connection (Lifecycle)", tagList(
+        selectInput("holdLC", "Hold length (model horizons)",
+                    choices = c("4 months" = "4", "7 months" = "7", "12 months" = "12",
+                                "20 months" = "20", "33 months" = "33"),
+                    selected = "12"),
+        tags$span(paste("How long a signaled name is held before its prediction counts as",
+                        "realized. A held name flips to sell when the recorded gate flips",
+                        "to SELL, when this horizon fully elapses (matured), or when the",
+                        "series is delisted."),
+                  style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
+        selectInput("nsnapLC", "Snapshots shown",
+                    choices = c("All" = "all", "Last 10" = "10", "Last 20" = "20",
+                                "Last 40" = "40"),
+                    selected = "all"),
+        tags$p(paste("One row per series ever signaled buy; one column per recorded daily",
+                     "snapshot (since 2026-06-16). buy = new entry that day, hold = still",
+                     "maturing (includes gate wash-outs to SKIP), sell = exit (gate flip,",
+                     "matured, or delisted) - sticky until a fresh re-entry. States are",
+                     "computed over the FULL record even when fewer snapshots are shown."),
+               style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;")
+      )),
+      mainPanel(div(class = "main-card",
+        uiOutput("chipsLC"),
+        DT::DTOutput("matrixLC")
+      ))
+    )
   )
 )
 
@@ -5353,6 +5384,206 @@ server <- function(input, output, session) {
                    "it forward along the typical all-years slope."),
              style = "color:#64748b; font-size:0.7rem; margin-top:0.5rem;"))
   })
+
+  # ── LIFECYCLE: buy / hold / sell state matrix over ledger snapshots ──
+  # Rows = every series ever signaled BUY in monitoring.prediction_ledger;
+  # columns = the recorded daily snapshots. Cell state machine (per ticker,
+  # walked in date order over the FULL record):
+  #   ledger BUY with no open position -> "buy" (entry starts the maturity clock)
+  #   open position, no trigger        -> "hold" (covers continuing-BUY and SKIP
+  #                                        wash-outs: the ledger only records
+  #                                        BUY/SELL, absence = washed out)
+  #   triggers -> "sell", first match wins: ledger SELL row ("gate flipped"),
+  #     delisted on/before the date ("delisted"), horizon elapsed ("matured")
+  #   sold stays "sell" (sticky, like the sketch) until a fresh BUY re-entry.
+  # Raw pulls are cached in app_dataLC; the state machine re-derives live on
+  # horizon/snapshot-count changes without re-querying.
+  app_dataLC   <- reactiveVal(NULL)
+  status_msgLC <- reactiveVal("Ready")
+  output$statusMessageLC <- renderText({ status_msgLC() })
+  setup_env_switcher(input, session, "LC")
+
+  observeEvent(input$connect_btnLC, {
+    if (input$db_passLC == "") { status_msgLC("Error: Password is not set."); return() }
+    status_msgLC("Connecting...")
+    tryCatch({
+      con <- get_con(input, "LC")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      b <- dbGetQuery(con, "
+        SELECT COUNT(*) AS n, COUNT(DISTINCT prediction_date) AS d,
+               MIN(prediction_date) AS lo, MAX(prediction_date) AS hi
+        FROM monitoring.prediction_ledger")
+      status_msgLC(sprintf("Connected - %s recorded calls across %d snapshots (%s to %s).",
+                           as.numeric(b$n[1]), as.integer(b$d[1]), b$lo[1], b$hi[1]))
+    }, error = function(e) { status_msgLC(paste("Error:", e$message)) })
+  })
+
+  observeEvent(input$execute_LC, {
+    if (input$db_passLC == "") { status_msgLC("Error: Password is not set."); return() }
+    status_msgLC("Loading the signal record...")
+    tryCatch({
+      con <- get_con(input, "LC")
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      led <- dbGetQuery(con, "
+        SELECT prediction_date::text AS d, ticker, global_action
+        FROM monitoring.prediction_ledger
+        ORDER BY ticker, prediction_date")
+      if (nrow(led) == 0) { status_msgLC("No recorded snapshots yet."); return() }
+      gate <- dbGetQuery(con, "
+        SELECT DISTINCT ticker, global_action AS gate_today
+        FROM serving.return_cluster_ticker_global_action_current")
+      # split-safe grading per ledger row (both price legs from the CURRENT
+      # series); we join it on the ENTRY row of each position in the derive step
+      scored <- tryCatch(dbGetQuery(con, "
+        SELECT prediction_date::text AS d, ticker,
+               ROUND(ticker_return::numeric, 1)  AS ret_pct,
+               ROUND(excess_vs_spy::numeric, 1)  AS excess_pct,
+               days_held
+        FROM monitoring.prediction_ledger_scored
+        WHERE global_action = 'BUY'"), error = function(e) NULL)
+      # raw.ticker_metadata holds ONLY delisted names -> presence = delisted
+      meta <- tryCatch(dbGetQuery(con, "
+        SELECT ticker, name AS company_name, delisting_category,
+               delisted_utc::date::text AS delisted_date
+        FROM raw.ticker_metadata"), error = function(e) NULL)
+      app_dataLC(list(led = led, gate = gate, scored = scored, meta = meta))
+      status_msgLC(sprintf("Loaded - %d series across %d snapshots.",
+                           length(unique(led$ticker[led$global_action == "BUY"])),
+                           length(unique(led$d))))
+    }, error = function(e) { status_msgLC(paste("Error:", e$message)) })
+  })
+
+  # State machine + summary, re-derived live on horizon / snapshot changes
+  derivedLC <- reactive({
+    d <- app_dataLC(); req(d)
+    hz <- suppressWarnings(as.integer(input$holdLC)); if (is.na(hz)) hz <- 12L
+    led <- d$led
+    dates <- sort(unique(led$d))
+    tickers <- sort(unique(led$ticker[led$global_action == "BUY"]))
+    if (length(tickers) == 0) return(NULL)
+    act  <- setNames(led$global_action, paste(led$ticker, led$d))
+    dl   <- if (!is.null(d$meta) && nrow(d$meta) > 0)
+              setNames(suppressWarnings(as.Date(d$meta$delisted_date)), d$meta$ticker)
+            else setNames(as.Date(character(0)), character(0))
+    M <- matrix("", nrow = length(tickers), ncol = length(dates),
+                dimnames = list(tickers, dates))
+    entry_of <- setNames(rep(NA_character_, length(tickers)), tickers)
+    reason_of <- setNames(rep("", length(tickers)), tickers)
+    for (t in tickers) {
+      open <- FALSE; sold <- FALSE; entry_d <- NA_character_; mat_d <- as.Date(NA)
+      dl_d <- if (t %in% names(dl)) dl[[t]] else as.Date(NA)
+      for (j in seq_along(dates)) {
+        D <- dates[j]; a <- act[paste(t, D)]
+        if (!open && !sold) {                       # flat: wait for an entry
+          if (!is.na(a) && a == "BUY") {
+            open <- TRUE; entry_d <- D
+            mat_d <- seq(as.Date(D), by = paste(hz, "months"), length.out = 2)[2]
+            M[t, j] <- "buy"; reason_of[[t]] <- "new signal"
+          }
+        } else if (open && !sold) {                 # held: check exit triggers
+          if (!is.na(a) && a == "SELL") {
+            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"; reason_of[[t]] <- "gate flipped"
+          } else if (!is.na(dl_d) && dl_d <= as.Date(D)) {
+            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"; reason_of[[t]] <- "delisted"
+          } else if (as.Date(D) >= mat_d) {
+            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"; reason_of[[t]] <- "matured"
+          } else {
+            M[t, j] <- "hold"
+            reason_of[[t]] <- if (!is.na(a) && a == "BUY") "signal continuing" else "maturing"
+          }
+        } else {                                    # sold: sticky until re-entry
+          if (!is.na(a) && a == "BUY") {
+            open <- TRUE; sold <- FALSE; entry_d <- D
+            mat_d <- seq(as.Date(D), by = paste(hz, "months"), length.out = 2)[2]
+            M[t, j] <- "buy"; reason_of[[t]] <- "re-entry"
+          } else M[t, j] <- "sell"
+        }
+      }
+      entry_of[[t]] <- entry_d
+    }
+    list(M = M, dates = dates, tickers = tickers,
+         entry_of = entry_of, reason_of = reason_of, hz = hz)
+  })
+
+  output$chipsLC <- renderUI({
+    dv <- derivedLC(); if (is.null(dv)) return(NULL)
+    fin <- dv$M[, ncol(dv$M)]
+    chip <- function(lab, n, col) span(
+      style = sprintf("background:%s22; color:%s; border:1px solid %s55; border-radius:6px; padding:4px 12px; margin-right:8px; font-weight:600;", col, col, col),
+      sprintf("%d %s", n, lab))
+    n_mat <- sum(fin == "sell" & dv$reason_of == "matured")
+    div(style = "margin-bottom:0.75rem;",
+      chip("buy",  sum(fin == "buy"),  "#10b981"),
+      chip("hold", sum(fin == "hold"), "#eab308"),
+      chip("sell", sum(fin == "sell"), "#dc2626"),
+      span(sprintf("of the sells, %d matured (horizon %dmo). Latest snapshot %s.",
+                   n_mat, dv$hz, dv$dates[length(dv$dates)]),
+           style = "color:#64748b; font-size:0.75rem;"))
+  })
+
+  output$matrixLC <- DT::renderDT({
+    dv <- derivedLC()
+    if (is.null(dv)) return(DT::datatable(
+      data.frame(Note = "Connect and Generate to load the signal record."),
+      rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
+    d <- app_dataLC()
+    show_d <- dv$dates
+    nsnap <- input$nsnapLC
+    if (!is.null(nsnap) && nsnap != "all")
+      show_d <- tail(dv$dates, suppressWarnings(as.integer(nsnap)))
+    hdr <- format(as.Date(show_d), "%b %d")
+    mat <- dv$M[, match(show_d, dv$dates), drop = FALSE]
+    # summary columns: entry + split-safe grading of the ENTRY row + gate today
+    gate_v <- setNames(d$gate$gate_today, d$gate$ticker)
+    sc_key <- if (!is.null(d$scored)) paste(d$scored$ticker, d$scored$d) else character(0)
+    sc_ret <- setNames(if (!is.null(d$scored)) as.numeric(d$scored$ret_pct)    else numeric(0), sc_key)
+    sc_exc <- setNames(if (!is.null(d$scored)) as.numeric(d$scored$excess_pct) else numeric(0), sc_key)
+    ek <- paste(dv$tickers, dv$entry_of)
+    held  <- ifelse(is.na(dv$entry_of), NA,
+                    as.integer(Sys.Date() - as.Date(dv$entry_of)))
+    hz_days <- round(dv$hz * 30.44)
+    fin <- dv$M[, ncol(dv$M)]
+    df <- data.frame(Ticker = dv$tickers, stringsAsFactors = FALSE, check.names = FALSE)
+    for (k in seq_along(hdr)) df[[hdr[k]]] <- unname(mat[, k])
+    df$Entry        <- ifelse(is.na(dv$entry_of), "", dv$entry_of)
+    df$`Held (d)`   <- held
+    df$`% horizon`  <- ifelse(is.na(held), NA, pmin(100L, as.integer(round(100 * held / hz_days))))
+    df$`Ret %`      <- ifelse(ek %in% names(sc_ret), sprintf("%+.1f", sc_ret[ek]), "")
+    df$`vs Benchmark %` <- ifelse(ek %in% names(sc_exc), sprintf("%+.1f", sc_exc[ek]), "")
+    df$`Gate today` <- ifelse(dv$tickers %in% names(gate_v), gate_v[dv$tickers], "-")
+    df$Reason       <- unname(dv$reason_of)
+    # delist coloring on the Ticker column (same pattern as the ledger table)
+    df$delisted <- if (!is.null(d$meta)) df$Ticker %in% d$meta$ticker else FALSE
+    if (!is.null(d$meta) && nrow(d$meta) > 0) {
+      mi <- match(df$Ticker, d$meta$ticker)
+      df$delisting_category <- d$meta$delisting_category[mi]
+      df$company_name       <- d$meta$company_name[mi]
+      df$delisted_date      <- d$meta$delisted_date[mi]
+    }
+    df <- delist_enrich(df)
+    df$del_class[!df$delisted] <- ""
+    keep <- c("Ticker", hdr, "Entry", "Held (d)", "% horizon", "Ret %",
+              "vs Benchmark %", "Gate today", "Reason", "del_class")
+    df <- df[order(factor(fin, levels = c("buy", "hold", "sell")), df$Ticker), keep]
+    n_dates <- length(hdr)
+    DT::datatable(
+      df, selection = "none", rownames = FALSE, class = "compact",
+      extensions = "Buttons",
+      options = list(
+        pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
+        dom = "Bftip", buttons = c("copy", "csv"),
+        scrollX = TRUE, ordering = FALSE,
+        columnDefs = list(
+          list(className = "dt-right", targets = (n_dates + 1):(n_dates + 5)),
+          list(visible = FALSE, targets = n_dates + 8))
+      )
+    ) %>%
+      DT::formatStyle(hdr, fontWeight = "600",
+        color = DT::styleEqual(c("buy", "hold", "sell"),
+                               c("#10b981", "#eab308", "#dc2626"))) %>%
+      DT::formatStyle("Ticker", valueColumns = "del_class",
+        color = DT::styleEqual(names(DELIST_CLASSES), unname(DELIST_CLASSES)))
+  }, server = FALSE)
 }
 
 # Run the application
