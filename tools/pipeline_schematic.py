@@ -100,9 +100,20 @@ def arrow(ax, p0, p1, rad=0.0):
 
 def build(ax):
     ax.set_xlim(0, 16)
-    ax.set_ylim(-4.1, 9)
+    ax.set_ylim(-4.1, 10.2)
     ax.set_aspect("equal")                # never distort funnels/circles
     ax.axis("off")
+
+    # ── title ──
+    ax.text(0.3, 10.0, "Team Architecture", fontsize=21, fontweight="bold",
+            color=INK, va="top")
+    ax.text(0.3, 9.35, "A proposed analytics-engineering delivery team, mapped to the "
+            "dbt model pipeline — from raw data streams to production.",
+            fontsize=10.5, color=MUTED, va="top")
+    ax.plot([0.3, 15.7], [9.02, 9.02], color="#d9dee6", lw=1.1)
+    ax.text(0.3, 8.72, "Each funnel = a data model  ·  band colour = owning role  ·  "
+            "band fill = build state  ·  black box = the tech lead's dbt architecture",
+            fontsize=9, color=MUTED, va="center")
 
     yT, yM, yB = 6.7, 4.7, 2.7            # three stream lanes (even 2.0 pitch)
 
@@ -273,7 +284,7 @@ def _style_key(ax):
 
 
 def main():
-    fig, ax = plt.subplots(figsize=(12.8, 10.5), dpi=150)
+    fig, ax = plt.subplots(figsize=(12.4, 11.1), dpi=150)
     fig.patch.set_facecolor(PAPER)
     build(ax)
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
