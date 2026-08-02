@@ -214,16 +214,22 @@ def _deliverables(ax):
     """The testing & framework dev's two green deliverables, shown along the
     pipeline: the automated test suite (validates the models) and the quality
     dashboard (reads the live output)."""
-    gy0, h, w = 0.4, 1.0, 2.5             # squarer deliverable boxes
-    def gbox(cx, label):
+    # Two deliverables built by the testing & framework dev, under the models
+    # they act on. Each box: title + what it does + tool.
+    gy0, h, w = 0.3, 1.0, 3.1
+    def gbox(cx, title, does, tool):
         ax.add_patch(Rectangle((cx - w / 2, gy0), w, h, facecolor=GREEN_L,
                               edgecolor=GREEN, linewidth=1.8, zorder=2))
-        ax.text(cx, gy0 + h / 2, label, ha="center", va="center", color=GREEN_D,
-                fontsize=8.6, fontweight="bold", zorder=3, linespacing=1.5)
-    gbox(6.9, "Automated test suite\npytest · matrix-notify")
-    gbox(13.0, "Quality dashboard\nShiny")
-    # short green ticks up to the models (they validate / read the models)
-    for cx in (6.9, 13.0):
+        cy = gy0 + h / 2
+        ax.text(cx, cy + 0.27, title, ha="center", va="center", color=GREEN_D,
+                fontsize=9, fontweight="bold", zorder=3)
+        ax.text(cx, cy - 0.01, does, ha="center", va="center", color=GREEN_D,
+                fontsize=8.2, zorder=3)
+        ax.text(cx, cy - 0.28, tool, ha="center", va="center", color=GREEN,
+                fontsize=7.4, style="italic", zorder=3)
+    gbox(6.0, "Automated test suite", "tests every model", "pytest · matrix-notify")
+    gbox(10.2, "Quality dashboard", "monitors all models", "Shiny")
+    for cx in (6.0, 10.2):                       # ticks up to the models
         ax.plot([cx, cx], [gy0 + h, 1.45], color=GREEN, ls=(0, (1, 2.2)),
                 lw=1.3, zorder=1)
 
@@ -254,9 +260,9 @@ def _team_roles(ax):
         (BLACK, "Tech lead",
          "designs the dbt architecture for the client's architecture + business needs — future-proofing (hard) · dbt: deep"),
         (RED, "Model dev lead",
-         "goal: across the finish line as fast as possible — initial model, imperfect but delivered · test dev · dbt: med–high (variables)"),
+         "goal: across the finish line as fast as possible — initial model, imperfect but delivered · dbt: med–high (variables)"),
         (AMBER, "Dev · QA & optimization",
-         "ensures each model is optimized — logic + performance (query opt, splitting, index strategy) · test dev · dbt: working"),
+         "ensures each model is optimized — logic + performance (query opt, splitting, index strategy) · dbt: working"),
         (GREEN, "Dev · testing & framework",
          "goal: every model auto-monitored for source-data, logic + pipeline issues · integration, refinement, deep-dive defect analysis · dbt: small (adds dbt validation)"),
     ]
