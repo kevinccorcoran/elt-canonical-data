@@ -121,24 +121,23 @@ def build(ax):
     ax.text(1.25, yM, "Start", ha="center", va="center",
             fontsize=12, fontweight="bold", color=INK, zorder=5)
 
-    # ── Data Streams axis ──
-    ax.plot([2.9, 2.9], [1.9, 7.85], color=MUTED, lw=1.3, ls=(0, (1, 4)), zorder=1)
-    ax.annotate("", xy=(2.9, 7.35), xytext=(2.9, 7.8),
-                arrowprops=dict(arrowstyle="-|>", color=MUTED, lw=1.4))
-    ax.text(2.9, 8.15, "DATA STREAMS", ha="center", va="bottom",
+    # ── Data Streams axis (spans just the three stream nodes) ──
+    ax.plot([2.9, 2.9], [yB - 0.45, yT + 0.45], color=MUTED, lw=1.3,
+            ls=(0, (1, 4)), zorder=1)
+    ax.text(2.9, yT + 0.62, "DATA STREAMS", ha="center", va="bottom",
             fontsize=11, color=INK, family="monospace")
     for y in (yT, yM, yB):
         ax.add_patch(Circle((2.9, y), 0.12, color=INK, zorder=4))
 
     # ── Docker container: the whole pipeline + deliverables run containerized ──
-    ax.add_patch(Rectangle((3.5, 0.3), 11.15, 8.1, facecolor="none",
+    ax.add_patch(Rectangle((3.5, 0.3), 10.6, 8.1, facecolor="none",
                           edgecolor=CONTAINER, linewidth=1.6,
                           linestyle=(0, (6, 3)), zorder=0))
-    ax.text(14.5, 8.28, "DOCKER CONTAINER · orchestrator · dbt · Shiny", fontsize=9,
+    ax.text(13.95, 8.28, "DOCKER CONTAINER · orchestrator · dbt · Shiny", fontsize=9,
             color=CONTAINER, family="monospace", va="top", ha="right")
 
     # ── Tech lead owns the whole model pipeline: one big black box ──
-    ax.add_patch(Rectangle((3.85, 1.45), 9.2, 6.6, facecolor="none",
+    ax.add_patch(Rectangle((3.85, 1.45), 8.75, 6.6, facecolor="none",
                           edgecolor=BOX1, linewidth=2.2, zorder=1))
     ax.text(3.98, 7.9, "TECH LEAD · dbt architecture", fontsize=9,
             color=INK, family="monospace", va="top")
@@ -151,18 +150,27 @@ def build(ax):
 
     # ── Stage 2: two merged funnels ──
     yU, yL = 5.7, 3.7
-    fw2, fh2, x2 = 1.8, 1.4, 8.15
+    fw2, fh2, x2 = 1.8, 1.4, 8.9
     funnel(ax, x2, yU, fw2, fh2, FD)
     funnel(ax, x2, yL, fw2, fh2, FE)
 
+    # stage captions: make the 1 -> 2 progression explicit (quiet, muted)
+    ax.text(5.4, 1.68, "1 · per-stream models", fontsize=8, color=MUTED,
+            ha="center", va="center", family="monospace")
+    ax.text(9.8, 2.62, "2 · consolidated models", fontsize=8, color=MUTED,
+            ha="center", va="center", family="monospace")
+
     # ── Pre-finish live gates: small red, ~size of a funnel's red tip ──
-    x3, pw, ph = 12.2, 0.5, 0.6
+    x3, pw, ph = 11.6, 0.5, 0.6
     yTg, yBg = 6.3, 3.1
     funnel(ax, x3, yTg, pw, ph, PG)
     funnel(ax, x3, yBg, pw, ph, PG)
+    ax.text(x3 + pw / 2 + 0.35, (yTg + yBg) / 2, "release\ngates", fontsize=8,
+            color=MUTED, ha="center", va="center", family="monospace",
+            linespacing=1.4)
 
     # ── Finish · Live ──
-    xF = 13.7
+    xF = 13.4
     ax.plot([xF, xF], [2.2, 7.2], color=ACCENT, lw=3, zorder=2)
     for y in (yTg, yBg):
         ax.add_patch(Circle((xF, y), 0.12, color=ACCENT, zorder=4))
@@ -205,7 +213,7 @@ def _deliverables(ax):
     dashboard (reads the live output)."""
     # Two deliverables built by the testing & framework dev, under the models
     # they act on. Each box: title + what it does + tool.
-    gy0, h, w = 0.3, 1.0, 3.1
+    gy0, h, w = 0.45, 0.85, 3.1
     def gbox(cx, title, does, tool):
         ax.add_patch(Rectangle((cx - w / 2, gy0), w, h, facecolor=GREEN_L,
                               edgecolor=GREEN, linewidth=1.8, zorder=2))
@@ -243,11 +251,11 @@ def _team_roles(ax):
                                    linewidth=0.8, zorder=4))
     # role · meaning key
     ax.text(3.2, -0.25, "ROLE", fontsize=8.5, color=MUTED, family="monospace")
-    ax.text(6.15, -0.25, "role · responsibilities · dbt", fontsize=8.5,
+    ax.text(6.15, -0.25, "responsibilities · dbt level", fontsize=8.5,
             color=MUTED, family="monospace")
     rows = [
         (BLACK, "Tech lead",
-         "designs the dbt architecture for the client's architecture + business needs — future-proofing (hard) · dbt: deep"),
+         "designs the dbt architecture for the client's architecture + business needs — future-proofing, the hard part · dbt: deep"),
         (RED, "Model dev lead",
          "goal: across the finish line as fast as possible — initial model, imperfect but delivered · dbt: med–high (variables)"),
         (AMBER, "Dev · QA & optimization",
