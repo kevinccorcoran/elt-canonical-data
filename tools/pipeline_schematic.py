@@ -112,9 +112,6 @@ def build(ax):
             "dbt model pipeline — from raw data streams to production.",
             fontsize=10.5, color=MUTED, va="top")
     ax.plot([0.3, 15.7], [9.02, 9.02], color="#d9dee6", lw=1.1)
-    ax.text(0.3, 8.72, "Each funnel = a data model  ·  band colour = owning role  ·  "
-            "band fill = build state  ·  black box = the tech lead's dbt architecture",
-            fontsize=9, color=MUTED, va="center")
 
     yT, yM, yB = 6.7, 4.7, 2.7            # three stream lanes (even 2.0 pitch)
 
@@ -221,8 +218,7 @@ def _deliverables(ax):
             ax.text(cx, cy, label, ha="center", va="center",
                     color=GREEN_D, fontsize=9, fontweight="bold", zorder=3)
     gbox(4.05, 10.2, "Automated test suite  ·  pytest / matrix-notify")
-    gbox(11.55, 14.6, "Quality dashboard · Shiny",
-         "for all models · ~20 min – ½ day each")
+    gbox(11.55, 14.6, "Quality dashboard · Shiny")
     # both deliverables operate at the model / table level; short green ticks
     # up to the model box (they validate / read the models, not the finish)
     top = gy0 + h
