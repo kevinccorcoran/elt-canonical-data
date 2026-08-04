@@ -1180,23 +1180,20 @@ ui <- navbarPage(
                         "to SELL, when this horizon fully elapses (matured), or when the",
                         "series is delisted."),
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
-        tags$p(paste("A lifecycle timeline of the model's calls. x = months since the",
-                     "name's entry (0 to the hold length); lanes = its state now.",
-                     "buy = the gate says buy today, hold = former buy washed out to",
-                     "SKIP but still maturing, sell = exit (gate flip, matured, or",
-                     "delisted), frozen at the age it exited. Dots march right as",
-                     "positions age and mature at the vertical line. Recording began",
-                     "2026-06-16, so everything sits young/left for now."),
+        tags$p(paste("A decision board of the model's calls, by company name.",
+                     "sell = exit now (gate flipped, matured, or delisted).",
+                     "buy = the gate endorses the name today (fresh entries marked new).",
+                     "hold = former buy washed out to SKIP but still inside the hold",
+                     "window. Recorded exits stay exits; maturity is checked against",
+                     "today. Recording began 2026-06-16."),
                style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;")
       )),
       mainPanel(div(class = "main-card",
-        uiOutput("chipsLC"),
-        plotlyOutput("timelineLC", height = "560px"),
+        uiOutput("boardLC"),
         tags$hr(style = "border-color:#1e293b; margin:1.1rem 0 0.8rem;"),
         tags$div(style = "color:#94a3b8; font-size:0.8rem; margin-bottom:0.5rem;",
-                 paste("Every company by current state. Filter State to buy / hold / sell",
-                       "to read each group; buy = model says buy now, hold = former buy still",
-                       "maturing, sell = former buy the data now says to exit.")),
+                 paste("Same companies with detail: entry, days held, % of horizon, why.",
+                       "Filter the State column or search; the CSV button exports the lot.")),
         DT::DTOutput("tableLC")
       ))
     )
@@ -5501,107 +5498,74 @@ server <- function(input, output, session) {
       }
       entry_of[[t]] <- entry_d
     }
+    # current-decision bucket (the board's truth): recorded exits stay sell;
+    # otherwise delisted/matured as of TODAY, else today's serving gate decides:
+    # BUY -> buy (fresh entries marked), SELL -> sell (flip pending tonight's
+    # record), SKIP or absent -> hold
+    gate_now <- setNames(as.character(d$gate$gate_today), d$gate$ticker)
+    fin <- M[, ncol(M)]
+    state_now <- setNames(rep("hold", length(tickers)), tickers)
+    why_now   <- setNames(rep("washed out to SKIP", length(tickers)), tickers)
+    for (t in tickers) {
+      if (fin[[t]] == "sell") { state_now[[t]] <- "sell"; why_now[[t]] <- reason_of[[t]]; next }
+      e <- as.Date(entry_of[[t]])
+      dl_d <- if (t %in% names(dl)) dl[[t]] else as.Date(NA)
+      mat_d <- seq(e, by = paste(hz, "months"), length.out = 2)[2]
+      g <- if (t %in% names(gate_now)) gate_now[[t]] else NA_character_
+      if (!is.na(dl_d) && dl_d <= Sys.Date()) {
+        state_now[[t]] <- "sell"; why_now[[t]] <- "delisted"
+      } else if (Sys.Date() >= mat_d) {
+        state_now[[t]] <- "sell"; why_now[[t]] <- "matured"
+      } else if (!is.na(g) && g == "SELL") {
+        state_now[[t]] <- "sell"; why_now[[t]] <- "gate flipped (today)"
+      } else if (!is.na(g) && g == "BUY") {
+        state_now[[t]] <- "buy"
+        why_now[[t]] <- if (as.numeric(Sys.Date() - e) <= 7) "new entry" else "signal live"
+      }
+    }
     list(M = M, dates = dates, tickers = tickers,
-         entry_of = entry_of, exit_of = exit_of, reason_of = reason_of, hz = hz)
+         entry_of = entry_of, exit_of = exit_of, reason_of = reason_of, hz = hz,
+         state_now = state_now, why_now = why_now)
   })
 
-  output$chipsLC <- renderUI({
-    dv <- derivedLC(); if (is.null(dv)) return(NULL)
-    fin <- dv$M[, ncol(dv$M)]
-    chip <- function(lab, n, col) span(
-      style = sprintf("background:%s22; color:%s; border:1px solid %s55; border-radius:6px; padding:4px 12px; margin-right:8px; font-weight:600;", col, col, col),
-      sprintf("%d %s", n, lab))
-    n_mat <- sum(fin == "sell" & dv$reason_of == "matured")
-    div(style = "margin-bottom:0.75rem;",
-      chip("buy",  sum(fin == "buy"),  "#10b981"),
-      chip("hold", sum(fin == "hold"), "#eab308"),
-      chip("sell", sum(fin == "sell"), "#dc2626"),
-      span(sprintf("of the sells, %d matured (horizon %dmo). Latest snapshot %s.",
-                   n_mat, dv$hz, dv$dates[length(dv$dates)]),
-           style = "color:#64748b; font-size:0.75rem;"))
-  })
-
-  # Lifecycle timeline: x = months since entry (0..horizon), lanes = state now
-  # (buy top, hold middle, sell bottom). One dot per company; sells freeze at
-  # the age they exited. Same-day entry cohorts stack in tidy vertical columns
-  # (deterministic, alphabetical). Dots march right as positions age; the
-  # dashed line at the horizon is where holds mature into sells.
-  output$timelineLC <- renderPlotly({
-    dv <- derivedLC()
-    if (is.null(dv)) return(empty_plot("Connect and Generate to load the signal record."))
+  # The decision board: three name sections ordered by action (exit list first,
+  # then today's endorsed buys, then the maturing holds). Every ticker is
+  # readable directly; the table below adds detail, filters, and CSV.
+  output$boardLC <- renderUI({
+    dv <- derivedLC(); if (is.null(dv)) return(div(
+      style = "color:#64748b; padding:1rem; font-size:0.85rem;",
+      "Connect and Generate to load the signal record."))
     d <- app_dataLC()
-    fin <- dv$M[, ncol(dv$M)]
-    ok  <- !is.na(dv$entry_of)
-    tk  <- dv$tickers[ok]; fin <- unname(fin[ok])
-    if (length(tk) == 0) return(empty_plot("No signal record yet."))
-    entry <- as.Date(dv$entry_of[ok])
-    exitd <- suppressWarnings(as.Date(dv$exit_of[ok]))
-    hz    <- dv$hz
-    # age in months; exited names freeze at their exit age
-    age <- ifelse(fin == "sell" & !is.na(exitd),
-                  as.numeric(exitd - entry), as.numeric(Sys.Date() - entry)) / 30.44
-    lane_of <- c(sell = 1, hold = 2, buy = 3)
-    ybase   <- unname(lane_of[fin])
-
-    # deterministic cohort stacking: per (lane, entry date) fill a vertical
-    # column of up to 25 dots, then start the next sub-column a hair right
-    grp <- paste(fin, format(entry))
-    xj <- age; yj <- numeric(length(tk))
-    for (g in unique(grp)) {
-      idx <- which(grp == g); idx <- idx[order(tk[idx])]
-      n <- length(idx); lev <- min(n, 25L); k <- seq_len(n) - 1L
-      yj[idx] <- ybase[idx] - 0.4 + (k %% lev + 0.5) * (0.8 / lev)
-      xj[idx] <- age[idx] + (k %/% lev) * 0.035
-    }
-
     del_ticks <- if (!is.null(d$meta)) d$meta$ticker else character(0)
-    gate_v   <- setNames(as.character(d$gate$gate_today), d$gate$ticker)
-    is_del   <- tk %in% del_ticks
-    gate_of  <- ifelse(tk %in% names(gate_v), gate_v[tk], "-")
-    reason_o <- unname(dv$reason_of[ok])
-    pct      <- pmin(100L, as.integer(round(100 * age / hz)))
-    htxt <- sprintf("<b>%s</b>%s<br>%s | entered %s<br>age %.1f mo (%d%% of %dmo)<br>gate today: %s%s",
-                    tk, ifelse(is_del, " (delisted)", ""), fin,
-                    format(entry, "%b %d, %Y"), age, pct, hz, gate_of,
-                    ifelse(nzchar(reason_o), paste0("<br>", reason_o), ""))
+    st <- dv$state_now; why <- dv$why_now
     col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
-
-    fig <- plot_ly()
-    for (st in c("buy", "hold", "sell")) {
-      idx <- which(fin == st)
-      if (!length(idx)) next
-      fig <- add_trace(fig, x = xj[idx], y = yj[idx],
-        type = "scatter", mode = "markers",
-        marker = list(color = col_of[[st]], size = 5,
-                      symbol = ifelse(is_del[idx], "square-open", "square"),
-                      line = list(color = ifelse(is_del[idx], col_of[[st]], "#0b1220"),
-                                  width = ifelse(is_del[idx], 1.2, 0.4)),
-                      opacity = 0.9),
-        text = htxt[idx], hovertemplate = "%{text}<extra></extra>")
+    chipf <- function(t, colr, note = "", strike = FALSE) span(
+      style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
+                             " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
+                             " margin:2px; font-size:0.78rem; font-weight:600;%s"),
+                      colr, colr, colr,
+                      if (strike) " text-decoration:line-through; opacity:0.7;" else ""),
+      if (nzchar(note)) sprintf("%s · %s", t, note) else t)
+    section <- function(title, colr, ticks, notes, max_h = NA) {
+      div(style = "margin-bottom:1rem;",
+        div(style = sprintf("color:%s; font-weight:700; margin-bottom:0.35rem;", colr),
+            sprintf("%s (%d)", title, length(ticks))),
+        div(style = if (!is.na(max_h))
+              sprintf("display:flex; flex-wrap:wrap; max-height:%dpx; overflow-y:auto;", max_h)
+            else "display:flex; flex-wrap:wrap;",
+          mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks),
+                 ticks, notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)))
     }
-    shapes <- list(
-      list(type = "line", x0 = 0, x1 = hz + 1, y0 = 1.5, y1 = 1.5,
-           line = list(color = "#1e293b", width = 1), layer = "below"),
-      list(type = "line", x0 = 0, x1 = hz + 1, y0 = 2.5, y1 = 2.5,
-           line = list(color = "#1e293b", width = 1), layer = "below"),
-      list(type = "line", x0 = hz, x1 = hz, y0 = 0.5, y1 = 3.5,
-           line = list(color = "#64748b", width = 1, dash = "dash")))
-    ann <- list(list(x = hz, y = 3.5, text = sprintf("matures (%dmo)", hz),
-                     showarrow = FALSE, xanchor = "right", yanchor = "bottom",
-                     font = list(color = "#64748b", size = 11)))
-    dark_layout(fig,
-      xaxis = list(title = "months since entry", range = c(-0.4, hz + 1),
-                   dtick = 3, color = "#cbd5e1", zeroline = FALSE,
-                   gridcolor = "#151f2e"),
-      yaxis = list(tickvals = c(1, 2, 3),
-                   ticktext = c(sprintf("sell (%d)", sum(fin == "sell")),
-                                sprintf("hold (%d)", sum(fin == "hold")),
-                                sprintf("buy (%d)", sum(fin == "buy"))),
-                   range = c(0.45, 3.62), color = "#cbd5e1", zeroline = FALSE,
-                   showgrid = FALSE, fixedrange = TRUE),
-      shapes = shapes, annotations = ann, showlegend = FALSE,
-      margin = list(l = 85, r = 30, t = 20, b = 55)) %>%
-      config(displayModeBar = FALSE)
+    sells <- sort(names(st)[st == "sell"])
+    buys  <- sort(names(st)[st == "buy"])
+    holds <- sort(names(st)[st == "hold"])
+    tagList(
+      section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
+      section("buy - signal live today", col_of[["buy"]], buys,
+              ifelse(unname(why[buys]) == "new entry", "new", "")),
+      section("hold - former buys, maturing", col_of[["hold"]], holds,
+              rep("", length(holds)), max_h = 280)
+    )
   })
 
   # The decision board: every ever-bought company with its CURRENT state.
@@ -5614,19 +5578,18 @@ server <- function(input, output, session) {
       data.frame(Note = "Connect and Generate to load the signal record."),
       rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
     d <- app_dataLC()
-    fin <- dv$M[, ncol(dv$M)]
     gate_v <- setNames(as.character(d$gate$gate_today), d$gate$ticker)
     held <- ifelse(is.na(dv$entry_of), NA,
                    as.integer(Sys.Date() - as.Date(dv$entry_of)))
     hz_days <- round(dv$hz * 30.44)
     df <- data.frame(
       Ticker = dv$tickers,
-      State  = unname(fin),
+      State  = unname(dv$state_now),
       Entry  = ifelse(is.na(dv$entry_of), "", dv$entry_of),
       `Held (d)` = held,
       `% of horizon` = ifelse(is.na(held), NA,
                               pmin(100L, as.integer(round(100 * held / hz_days)))),
-      Why    = unname(dv$reason_of),
+      Why    = unname(dv$why_now),
       `Gate today` = ifelse(dv$tickers %in% names(gate_v), gate_v[dv$tickers], "-"),
       stringsAsFactors = FALSE, check.names = FALSE)
     # delist coloring on the Ticker column (same pattern as the ledger table)
@@ -5641,7 +5604,7 @@ server <- function(input, output, session) {
     df$del_class[!df$delisted] <- ""
     keep <- c("Ticker", "State", "Entry", "Held (d)", "% of horizon", "Why",
               "Gate today", "del_class")
-    df <- df[order(factor(df$State, levels = c("buy", "hold", "sell")), df$Ticker), keep]
+    df <- df[order(factor(df$State, levels = c("sell", "buy", "hold")), df$Ticker), keep]
     DT::datatable(
       df, selection = "none", rownames = FALSE, class = "compact",
       extensions = "Buttons", filter = "top",
