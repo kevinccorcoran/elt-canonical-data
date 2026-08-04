@@ -1172,30 +1172,26 @@ ui <- navbarPage(
     sidebarLayout(
       make_sidebar("LC", "Database Connection (Lifecycle)", tagList(
         selectInput("holdLC", "Hold length (model horizons)",
-                    choices = c("4 months" = "4", "7 months" = "7", "12 months" = "12",
+                    choices = c("1 month" = "1", "2 months" = "2", "4 months" = "4",
+                                "7 months" = "7", "12 months" = "12",
                                 "20 months" = "20", "33 months" = "33"),
-                    selected = "33"),
-        tags$span(paste("How long a signaled name is held before its prediction counts as",
-                        "realized. A held name flips to sell when the recorded gate flips",
-                        "to SELL, when this horizon fully elapses (matured), or when the",
-                        "series is delisted."),
-                  style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
-        selectInput("recwinLC", "Hold recency window",
-                    choices = c("1 month" = "1", "2 months" = "2", "3 months" = "3"),
-                    selected = "1"),
-        tags$span(paste("Slices the hold list by how lately the gate wanted each name.",
-                        "warming = re-endorsed within this window (could return to buy),",
-                        "best rank slots first. cooling = last wanted 1 to 2 windows ago,",
-                        "going quiet. dormant = benched, no recent signal."),
+                    selected = "12"),
+        tags$span(paste("Pick horizon AND hold duration: the board replays the model's",
+                        "hz-month strategy. Entries come from the model's own record:",
+                        "quarterly walk-forward top slots (proven bins only, win rate",
+                        ">= 55% on >= 100 graded picks) plus the daily live ledger.",
+                        "A held name flips to sell when the recorded gate flips to SELL,",
+                        "when this horizon fully elapses (matured), or when the series",
+                        "is delisted."),
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
         tags$p(paste("A decision board of the model's calls, by company name.",
-                     "sell = exit now (gate flipped, matured, or delisted).",
-                     "buy = the gate endorses the name today, split by the Shortlist",
-                     "rule: rank slots with a realized win rate >= 55% on >= 100 graded",
-                     "picks come first (win rate on the chip); the unproven rest of the",
-                     "gate follows, dimmed. hold = former buy washed out to SKIP but",
-                     "still inside the hold window. Recorded exits stay exits; maturity",
-                     "is checked against today. Recording began 2026-06-16."),
+                     "sell = exit now (gate flipped, matured lately, or delisted).",
+                     "buy = proven rank slot the gate endorses today (win rate on the",
+                     "chip). hold = an open position the model is no longer pushing;",
+                     "the chip shows entry date and % of the hold horizon elapsed.",
+                     "closed = matured more than a month ago, collapsed to a count",
+                     "(full detail in the table). Unproven gate names live in the",
+                     "table only, flagged."),
                style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;"),
         uiOutput("idFilterLC")
       )),
@@ -5412,6 +5408,11 @@ server <- function(input, output, session) {
   # horizon/snapshot-count changes without re-querying.
   app_dataLC   <- reactiveVal(NULL)
   status_msgLC <- reactiveVal("Ready")
+  # whether the id checkboxes have delivered a value since the last Generate:
+  # distinguishes "not rendered yet" (NULL -> show all) from a real
+  # deselect-all (NULL -> show nothing)
+  ids_seenLC   <- reactiveVal(FALSE)
+  observeEvent(input$idsLC, ids_seenLC(TRUE), ignoreNULL = TRUE)
   output$statusMessageLC <- renderText({ status_msgLC() })
   setup_env_switcher(input, session, "LC")
 
@@ -5449,56 +5450,128 @@ server <- function(input, output, session) {
         SELECT ticker, name AS company_name, delisting_category,
                delisted_utc::date::text AS delisted_date
         FROM raw.ticker_metadata"), error = function(e) NULL)
-      # shortlist evidence: the ticker's walk-forward rank bin and that bin's
-      # realized win rate - the SAME rule as the Shortlist tab (>= 55% win on
-      # >= 100 graded observations). Used to tier the buy section.
+      # shortlist evidence PER HORIZON: the ticker's walk-forward rank bin at
+      # the latest cutoff and that bin's realized win rate - the SAME rule as
+      # the Shortlist tab (>= 55% win on >= 100 graded observations). One row
+      # per (ticker, fut_lag); DISTINCT ON keeps the best-evidence bin when a
+      # ticker sits in two clusters.
       sl <- tryCatch(dbGetQuery(con, "
+        WITH mx AS (
+            SELECT fut_lag, MAX(train_cutoff_date) AS cut
+            FROM validation.walk_forward_ticker_rank
+            WHERE fut_lag IN (1,2,4,7,12,20,33)
+            GROUP BY fut_lag
+        ), wfbin AS (
+            SELECT r.fut_lag, m.id AS eid, r.ticker,
+                   NTILE(20) OVER (PARTITION BY r.fut_lag, m.id
+                     ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                   )::int AS wf_bin
+            FROM validation.walk_forward_ticker_rank r
+            JOIN mx ON mx.fut_lag = r.fut_lag AND mx.cut = r.train_cutoff_date
+            JOIN validation.walk_forward_cluster_id_map m
+              ON m.train_cutoff_date = r.train_cutoff_date
+             AND m.cluster_id       = r.cluster_id
+            WHERE r.ticker_score IS NOT NULL AND r.ticker_score <> 0
+        )
+        SELECT DISTINCT ON (w.ticker, w.fut_lag) w.ticker, w.fut_lag,
+               ROUND(ps.hit_rate::numeric * 100, 1) AS bin_win_pct,
+               ps.n_obs::int AS bin_n
+        FROM wfbin w
+        LEFT JOIN validation.walk_forward_pctile_summary ps
+          ON ps.id = w.eid AND ps.fut_lag = w.fut_lag AND ps.pctile_bin = w.wf_bin
+        ORDER BY w.ticker, w.fut_lag, ps.hit_rate DESC NULLS LAST"),
+        error = function(e) NULL)
+      # the model's own historical entry record: at each quarterly walk-forward
+      # cutoff inside the longest hold window, the top vingtile per LONG id
+      # (wf_bin = 1, eid <= 12) whose bin evidence passes the Shortlist rule.
+      # All 7 horizons load at once; derivedLC filters fut_lag == hz so the
+      # hold-length selector re-derives without re-querying.
+      coh <- tryCatch(dbGetQuery(con, "
         WITH wfbin AS (
-            SELECT m.id AS eid, r.ticker,
-                   NTILE(20) OVER (PARTITION BY m.id
+            SELECT r.train_cutoff_date, r.fut_lag, m.id AS eid, r.ticker,
+                   NTILE(20) OVER (PARTITION BY r.train_cutoff_date, r.fut_lag, m.id
                      ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
                    )::int AS wf_bin
             FROM validation.walk_forward_ticker_rank r
             JOIN validation.walk_forward_cluster_id_map m
               ON m.train_cutoff_date = r.train_cutoff_date
              AND m.cluster_id       = r.cluster_id
-            WHERE r.fut_lag = 12
+            WHERE r.fut_lag IN (1,2,4,7,12,20,33)
               AND r.ticker_score IS NOT NULL AND r.ticker_score <> 0
-              AND r.train_cutoff_date = (SELECT MAX(train_cutoff_date)
-                    FROM validation.walk_forward_ticker_rank WHERE fut_lag = 12)
+              AND r.train_cutoff_date >= (CURRENT_DATE - INTERVAL '33 months')::date
         )
-        SELECT DISTINCT ON (w.ticker) w.ticker,
+        SELECT w.train_cutoff_date::text AS d, w.fut_lag, w.ticker, w.eid AS id,
                ROUND(ps.hit_rate::numeric * 100, 1) AS bin_win_pct,
                ps.n_obs::int AS bin_n
         FROM wfbin w
-        LEFT JOIN validation.walk_forward_pctile_summary ps
-          ON ps.id = w.eid AND ps.fut_lag = 12 AND ps.pctile_bin = w.wf_bin
-        ORDER BY w.ticker, ps.hit_rate DESC NULLS LAST"),
+        JOIN validation.walk_forward_pctile_summary ps
+          ON ps.id = w.eid AND ps.fut_lag = w.fut_lag AND ps.pctile_bin = w.wf_bin
+        WHERE w.wf_bin = 1 AND w.eid <= 12
+          AND ps.hit_rate >= 0.55 AND ps.n_obs >= 100
+          -- the WF ranking covers the full universe incl. delisted names (the
+          -- survivorship fix); a buyable cohort must drop names already dead
+          -- at the cutoff
+          AND NOT EXISTS (SELECT 1 FROM raw.ticker_metadata tm
+                          WHERE tm.ticker = w.ticker
+                            AND tm.delisted_utc::date <= w.train_cutoff_date)"),
         error = function(e) NULL)
-      app_dataLC(list(led = led, gate = gate, meta = meta, sl = sl))
-      status_msgLC(sprintf("Loaded - %d series across %d snapshots.",
-                           length(unique(led$ticker[led$global_action == "BUY"])),
-                           length(unique(led$d))))
+      ids_seenLC(FALSE)   # id checkboxes re-render fresh with the new universe
+      app_dataLC(list(led = led, gate = gate, meta = meta, sl = sl, coh = coh))
+      status_msgLC(sprintf(
+        "Loaded - %d proven cohort picks across %d quarterly cutoffs + %d live series across %d snapshots.",
+        if (is.null(coh)) 0L else nrow(coh),
+        if (is.null(coh)) 0L else length(unique(coh$d)),
+        length(unique(led$ticker[led$global_action == "BUY"])),
+        length(unique(led$d))))
     }, error = function(e) { status_msgLC(paste("Error:", e$message)) })
   })
 
-  # State machine + summary, re-derived live on horizon / snapshot changes
+  # State machine + summary, re-derived live on horizon changes without
+  # re-querying. The snapshot stream at horizon hz is the model's own record:
+  # quarterly walk-forward cohort picks (fut_lag == hz) followed by the daily
+  # live ledger. The walk is unchanged; only the inputs got deeper.
   derivedLC <- reactive({
     d <- app_dataLC(); req(d)
     hz <- suppressWarnings(as.integer(input$holdLC)); if (is.na(hz)) hz <- 12L
     led <- d$led
-    dates <- sort(unique(led$d))
-    tickers <- sort(unique(led$ticker[led$global_action == "BUY"]))
+    ch  <- if (!is.null(d$coh) && nrow(d$coh) > 0)
+             d$coh[d$coh$fut_lag == hz, , drop = FALSE]
+           else NULL
+    coh_dates <- if (!is.null(ch) && nrow(ch) > 0) sort(unique(ch$d)) else character(0)
+    dates <- sort(unique(c(coh_dates, led$d)))
+    tickers <- sort(unique(c(led$ticker[led$global_action == "BUY"],
+                             if (!is.null(ch)) ch$ticker else character(0))))
     if (length(tickers) == 0) return(NULL)
-    act  <- setNames(led$global_action, paste(led$ticker, led$d))
+    # ledger actions first; cohort picks add a BUY at their cutoff date unless
+    # the ledger already recorded that (ticker, date) - the recorded call wins.
+    act <- setNames(led$global_action, paste(led$ticker, led$d))
+    if (!is.null(ch) && nrow(ch) > 0) {
+      ck <- paste(ch$ticker, ch$d)
+      ck <- ck[!(ck %in% names(act))]
+      if (length(ck)) act <- c(act, setNames(rep("BUY", length(ck)), ck))
+    }
     dl   <- if (!is.null(d$meta) && nrow(d$meta) > 0)
               setNames(suppressWarnings(as.Date(d$meta$delisted_date)), d$meta$ticker)
             else setNames(as.Date(character(0)), character(0))
+    # proven-at-hz evidence (today's rank bin at the latest cutoff, this lag):
+    # the Shortlist rule that gates the board's buy section
+    slh <- if (!is.null(d$sl) && nrow(d$sl) > 0 && "fut_lag" %in% names(d$sl))
+             d$sl[d$sl$fut_lag == hz, , drop = FALSE]
+           else NULL
+    prov_of <- if (!is.null(slh) && nrow(slh) > 0)
+                 setNames(!is.na(slh$bin_win_pct) & slh$bin_win_pct >= 55 &
+                          !is.na(slh$bin_n)       & slh$bin_n >= 100, slh$ticker)
+               else setNames(logical(0), character(0))
+    wpct <- if (!is.null(slh) && nrow(slh) > 0)
+              setNames(as.numeric(slh$bin_win_pct), slh$ticker) else numeric(0)
+    provf <- function(t) t %in% names(prov_of) && isTRUE(prov_of[[t]])
     M <- matrix("", nrow = length(tickers), ncol = length(dates),
                 dimnames = list(tickers, dates))
     entry_of <- setNames(rep(NA_character_, length(tickers)), tickers)
     exit_of  <- setNames(rep(NA_character_, length(tickers)), tickers)
     reason_of <- setNames(rep("", length(tickers)), tickers)
+    src_of  <- setNames(rep(NA_character_, length(tickers)), tickers)
+    mat_of  <- setNames(rep(as.Date(NA), length(tickers)), tickers)
     for (t in tickers) {
       open <- FALSE; sold <- FALSE; entry_d <- NA_character_; mat_d <- as.Date(NA)
       dl_d <- if (t %in% names(dl)) dl[[t]] else as.Date(NA)
@@ -5509,17 +5582,18 @@ server <- function(input, output, session) {
             open <- TRUE; entry_d <- D
             mat_d <- seq(as.Date(D), by = paste(hz, "months"), length.out = 2)[2]
             M[t, j] <- "buy"; reason_of[[t]] <- "new signal"
+            src_of[[t]] <- if (D %in% coh_dates) "cohort" else "ledger"
           }
         } else if (open && !sold) {                 # held: check exit triggers
           if (!is.na(a) && a == "SELL") {
             sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
             reason_of[[t]] <- "gate flipped"; exit_of[[t]] <- D
-          } else if (!is.na(dl_d) && dl_d <= as.Date(D)) {
+          } else if ((!is.na(dl_d) && dl_d <= as.Date(D)) || as.Date(D) >= mat_d) {
+            # both can have elapsed between sparse snapshots: earlier event wins
             sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
-            reason_of[[t]] <- "delisted"; exit_of[[t]] <- D
-          } else if (as.Date(D) >= mat_d) {
-            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
-            reason_of[[t]] <- "matured"; exit_of[[t]] <- D
+            reason_of[[t]] <- if (!is.na(dl_d) && dl_d <= as.Date(D) && dl_d <= mat_d)
+              "delisted" else "matured"
+            exit_of[[t]] <- D
           } else if (!is.na(a) && a == "BUY") {
             M[t, j] <- "buy"; reason_of[[t]] <- "signal continuing"   # gate still says BUY
           } else {
@@ -5530,39 +5604,72 @@ server <- function(input, output, session) {
             open <- TRUE; sold <- FALSE; entry_d <- D
             mat_d <- seq(as.Date(D), by = paste(hz, "months"), length.out = 2)[2]
             M[t, j] <- "buy"; reason_of[[t]] <- "re-entry"; exit_of[[t]] <- NA_character_
+            src_of[[t]] <- if (D %in% coh_dates) "cohort" else "ledger"
           } else M[t, j] <- "sell"
         }
       }
       entry_of[[t]] <- entry_d
+      mat_of[[t]]   <- mat_d
     }
-    # current-decision bucket (the board's truth): recorded exits stay sell;
-    # otherwise delisted/matured as of TODAY, else today's serving gate decides:
-    # BUY -> buy (fresh entries marked), SELL -> sell (flip pending tonight's
-    # record), SKIP or absent -> hold
+    # current-decision bucket (the board's truth), 4 states as of TODAY:
+    #   sell   - action item: matured/delisted/gate-flipped within ~a month
+    #   buy    - proven rank slot the serving gate endorses today
+    #   hold   - open position the model is no longer pushing
+    #   closed - the exit is > 30 days old; history, not an action item
+    today <- Sys.Date()
     gate_now <- setNames(as.character(d$gate$gate_today), d$gate$ticker)
     fin <- M[, ncol(M)]
     state_now <- setNames(rep("hold", length(tickers)), tickers)
     why_now   <- setNames(rep("washed out to SKIP", length(tickers)), tickers)
     for (t in tickers) {
-      if (fin[[t]] == "sell") { state_now[[t]] <- "sell"; why_now[[t]] <- reason_of[[t]]; next }
       e <- as.Date(entry_of[[t]])
+      mat_d <- mat_of[[t]]
       dl_d <- if (t %in% names(dl)) dl[[t]] else as.Date(NA)
-      mat_d <- seq(e, by = paste(hz, "months"), length.out = 2)[2]
       g <- if (t %in% names(gate_now)) gate_now[[t]] else NA_character_
-      if (!is.na(dl_d) && dl_d <= Sys.Date()) {
-        state_now[[t]] <- "sell"; why_now[[t]] <- "delisted"
-      } else if (Sys.Date() >= mat_d) {
-        state_now[[t]] <- "sell"; why_now[[t]] <- "matured"
+      if (fin[[t]] == "sell") {                     # recorded exit in the walk
+        r <- reason_of[[t]]
+        # date the exit really happened: true maturity/delist date, not the
+        # (possibly much later) snapshot that first observed it
+        ref_d <- if (r == "matured") mat_d
+                 else if (r == "delisted" && !is.na(dl_d)) dl_d
+                 else suppressWarnings(as.Date(exit_of[[t]]))
+        stale <- !is.na(ref_d) && as.numeric(today - ref_d) > 30
+        state_now[[t]] <- if (stale) "closed" else "sell"
+        why_now[[t]]   <- if (is.na(ref_d)) r else sprintf("%s %s", r, format(ref_d))
+        next
+      }
+      if (!is.na(dl_d) && dl_d <= today) {          # open but delisted by now
+        state_now[[t]] <- if (as.numeric(today - dl_d) > 30) "closed" else "sell"
+        why_now[[t]]   <- sprintf("delisted %s", format(dl_d))
+      } else if (!is.na(mat_d) && today >= mat_d) { # open but horizon elapsed
+        state_now[[t]] <- if (as.numeric(today - mat_d) > 30) "closed" else "sell"
+        why_now[[t]]   <- sprintf("matured %s", format(mat_d))
       } else if (!is.na(g) && g == "SELL") {
         state_now[[t]] <- "sell"; why_now[[t]] <- "gate flipped (today)"
-      } else if (!is.na(g) && g == "BUY") {
+      } else if (!is.na(g) && g == "BUY" && provf(t)) {
         state_now[[t]] <- "buy"
-        why_now[[t]] <- if (as.numeric(Sys.Date() - e) <= 7) "new entry" else "signal live"
+        why_now[[t]] <- if (!is.na(e) && as.numeric(today - e) <= 7) "new entry"
+                        else sprintf("held since %s", entry_of[[t]])
+      } else {                                      # hold: open, model quiet
+        d2m <- if (is.na(mat_d)) NA_real_ else as.numeric(mat_d - today)
+        why_now[[t]] <- if (!is.na(d2m) && d2m <= 30)
+            sprintf("matures %s", format(mat_d))
+          else if (!is.na(g) && g == "BUY") "signal live (unproven slot)"
+          else "washed out to SKIP"
       }
     }
+    # board membership: cohort entries earned their slot at entry; ledger names
+    # must be proven at this horizon today. Everything else is table-only.
+    board_ok <- setNames(
+      vapply(tickers, function(t)
+        identical(src_of[[t]], "cohort") || provf(t), logical(1)),
+      tickers)
     list(M = M, dates = dates, tickers = tickers,
          entry_of = entry_of, exit_of = exit_of, reason_of = reason_of, hz = hz,
-         state_now = state_now, why_now = why_now)
+         state_now = state_now, why_now = why_now,
+         mat_of = mat_of, src_of = src_of, prov_of = prov_of, wpct = wpct,
+         board_ok = board_ok, coh_dates = coh_dates,
+         coh_n = if (is.null(ch)) 0L else nrow(ch))
   })
 
   # The decision board: three name sections ordered by action (exit list first,
@@ -5573,22 +5680,26 @@ server <- function(input, output, session) {
   # board and the table both read input$idsLC.
   output$idFilterLC <- renderUI({
     d <- app_dataLC(); if (is.null(d) || is.null(d$gate$id)) return(NULL)
-    ids <- sort(unique(stats::na.omit(as.integer(d$gate$id))))
+    ids <- sort(unique(stats::na.omit(c(
+      as.integer(d$gate$id),
+      if (!is.null(d$coh)) as.integer(d$coh$id)))))
     if (!length(ids)) return(NULL)
     div(style = "margin-bottom:0.6rem;",
       tags$label("Cluster id filter (all on; uncheck to narrow)",
                  style = paste0("color:#94a3b8; font-size:0.72rem; font-weight:600;",
                                 " display:block; margin-bottom:0.3rem;")),
       checkboxGroupInput("idsLC", NULL, choices = ids, selected = ids, inline = TRUE),
-      actionLink("idsAllLC", "Select all",
-                 style = "font-size:0.7rem; color:#38bdf8; margin-right:0.9rem;"),
-      actionLink("idsNoneLC", "Deselect all",
-                 style = "font-size:0.7rem; color:#38bdf8;"))
+      # buttons, not links: same control pair as the Predictions/Forecast tabs
+      actionButton("idsAllLC", "Select all",
+                   style = "padding:2px 10px; font-size:0.72rem; margin-right:0.35rem;"),
+      actionButton("idsNoneLC", "Deselect all",
+                   style = "padding:2px 10px; font-size:0.72rem;"))
   })
   observeEvent(input$idsAllLC, {
     d <- app_dataLC(); req(d)
+    # as.character: checkbox values are strings client-side; integers can miss
     updateCheckboxGroupInput(session, "idsLC",
-      selected = sort(unique(stats::na.omit(as.integer(d$gate$id)))))
+      selected = as.character(sort(unique(stats::na.omit(as.integer(d$gate$id))))))
   })
   observeEvent(input$idsNoneLC, {
     updateCheckboxGroupInput(session, "idsLC", selected = character(0))
@@ -5600,7 +5711,7 @@ server <- function(input, output, session) {
       "Connect and Generate to load the signal record."))
     d <- app_dataLC()
     del_ticks <- if (!is.null(d$meta)) d$meta$ticker else character(0)
-    st <- dv$state_now; why <- dv$why_now
+    st <- dv$state_now; why <- dv$why_now; hz <- dv$hz
     col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
     chipf <- function(t, colr, note = "", strike = FALSE) span(
       style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
@@ -5619,67 +5730,77 @@ server <- function(input, output, session) {
           mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks),
                  ticks, notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)))
     }
-    sells <- sort(names(st)[st == "sell"])
-    buys  <- sort(names(st)[st == "buy"])
-    holds <- sort(names(st)[st == "hold"])
+    note_line <- function(txt) div(
+      style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;", txt)
+    # board universe: cohort entries + proven-at-hz ledger names; the unproven
+    # rest of the gate lives in the table below, flagged
+    bt <- names(st)[dv$board_ok[names(st)]]
     # cluster-id filter: keep only selected ids; names with no current cluster
-    # (delisted, ~1%) always show. NULL selection (pre-render) keeps everything.
+    # (delisted, ~1%) always show. NULL before the checkboxes first render
+    # keeps everything; NULL after that is a real deselect-all -> empty board.
     id_of <- if (!is.null(d$gate$id))
                setNames(suppressWarnings(as.integer(d$gate$id)), d$gate$ticker)
              else setNames(integer(0), character(0))
+    if (!is.null(d$coh) && nrow(d$coh) > 0) {   # cohort id fills gate gaps
+      ex <- d$coh[!(d$coh$ticker %in% names(id_of)), c("ticker", "id")]
+      ex <- ex[!duplicated(ex$ticker), , drop = FALSE]
+      if (nrow(ex)) id_of <- c(id_of, setNames(as.integer(ex$id), ex$ticker))
+    }
     sel_id <- input$idsLC
-    keep_id <- function(v) if (is.null(sel_id)) v else
+    keep_id <- function(v) {
+      if (is.null(sel_id))
+        return(if (isTRUE(ids_seenLC())) v[FALSE] else v)
       v[is.na(id_of[v]) | id_of[v] %in% as.integer(sel_id)]
-    sells <- keep_id(sells); buys <- keep_id(buys); holds <- keep_id(holds)
-    # tier the buys by the Shortlist rule: proven rank slots first (win rate on
-    # the chip), the unproven tail dimmed below so it can't drown the signal
-    slv <- if (!is.null(d$sl) && nrow(d$sl) > 0)
-             setNames(as.numeric(d$sl$bin_win_pct), d$sl$ticker) else numeric(0)
-    sln <- if (!is.null(d$sl) && nrow(d$sl) > 0)
-             setNames(as.numeric(d$sl$bin_n), d$sl$ticker) else numeric(0)
-    wv <- unname(slv[buys]); nv <- unname(sln[buys])
-    core   <- buys[!is.na(wv) & wv >= 55 & !is.na(nv) & nv >= 100]
-    core   <- core[order(-slv[core], core)]
-    tail_b <- setdiff(buys, core)
-    # slice holds by how lately the gate wanted them (recency window in months)
-    rw_mo <- suppressWarnings(as.integer(input$recwinLC)); if (is.na(rw_mo)) rw_mo <- 1L
-    W <- rw_mo * 30.44
-    led <- d$led
-    lb  <- tapply(as.Date(led$d[led$global_action == "BUY"]),
-                  led$ticker[led$global_action == "BUY"], max)  # last BUY date/ticker
-    hd_days <- as.numeric(Sys.Date()) - as.numeric(lb[holds])   # days since last BUY
-    warming <- holds[!is.na(hd_days) & hd_days <= W]
-    cooling <- holds[!is.na(hd_days) & hd_days > W & hd_days <= 2 * W]
-    dormant <- holds[is.na(hd_days) | hd_days > 2 * W]
-    # warming ordered: winning rank slots first (win% on chip), then the rest
-    w_win <- warming[!is.na(slv[warming]) & slv[warming] >= 55 &
-                     !is.na(sln[warming]) & sln[warming] >= 100]
-    w_win <- w_win[order(-slv[w_win], w_win)]
-    w_ord <- c(w_win, sort(setdiff(warming, w_win)))
-    w_note <- ifelse(w_ord %in% w_win, sprintf("%.0f%%", slv[w_ord]), "")
-    amber <- col_of[["hold"]]
+    }
+    bt <- keep_id(bt)
+    sells  <- sort(bt[st[bt] == "sell"])
+    buys   <- bt[st[bt] == "buy"]
+    holds  <- bt[st[bt] == "hold"]
+    closed <- sort(bt[st[bt] == "closed"])
+    # buys ordered by the slot's realized win rate; holds by entry (oldest,
+    # i.e. furthest through its horizon, first)
+    wp <- dv$wpct
+    buys <- buys[order(-ifelse(is.na(wp[buys]), 0, wp[buys]), buys)]
+    b_note <- sprintf("%.0f%%", wp[buys])
+    b_note <- ifelse(why[buys] == "new entry", paste0(b_note, " · new"), b_note)
+    holds <- holds[order(dv$entry_of[holds], holds)]
+    hz_days <- round(hz * 30.44)
+    h_pct <- pmin(100L, as.integer(round(100 *
+               as.numeric(Sys.Date() - as.Date(dv$entry_of[holds])) / hz_days)))
+    h_note <- ifelse(grepl("^matures", why[holds]), unname(why[holds]),
+                     sprintf("%s · %d%%", dv$entry_of[holds], h_pct))
+    # honesty notes: where the record is thin, say so instead of implying signal
+    gap_lo <- if (length(dv$coh_dates)) max(dv$coh_dates) else NULL
+    led_lo <- min(d$led$d)
+    notes <- tagList(
+      if (dv$coh_n == 0) note_line(sprintf(paste(
+        "No %d-month rank slot has ever passed the evidence gate (win rate >=",
+        "55%% on >= 100 graded picks), so there are no historical entries at",
+        "this horizon - the model's proven horizons are 12 months and shorter."),
+        hz)),
+      if (!is.null(gap_lo)) note_line(sprintf(paste(
+        "Entry record: quarterly walk-forward cohorts to %s, then a gap with",
+        "no recorded signals until the daily ledger begins %s."),
+        gap_lo, led_lo))
+      else note_line(sprintf(
+        "Entry record: daily ledger only, beginning %s.", led_lo)))
     tagList(
+      notes,
       section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
-      section("buy - shortlist, rank slots winning >= 55%", col_of[["buy"]], core,
-              sprintf("%.0f%%", unname(slv[core]))),
-      div(style = "opacity:0.55;",
-        section("buy - rest of the gate, unproven slots", col_of[["buy"]], tail_b,
-                ifelse(unname(why[tail_b]) == "new entry", "new", ""), max_h = 170)),
-      section(sprintf("hold - warming: gate wanted it within %dmo (best slots first)", rw_mo),
-              amber, w_ord, w_note, max_h = 200),
-      section(sprintf("hold - cooling: last wanted %d to %dmo ago, going quiet",
-                      rw_mo, 2L * rw_mo),
-              "#fb923c", sort(cooling), rep("", length(cooling)), max_h = 150),
-      div(style = "opacity:0.55;",
-        section("hold - dormant: benched, no recent signal", "#64748b",
-                sort(dormant), rep("", length(dormant)), max_h = 150))
+      section(sprintf("buy - proven %d-month slots the gate endorses today", hz),
+              col_of[["buy"]], buys, b_note),
+      section("hold - open positions, model quiet (entry · % of horizon)",
+              col_of[["hold"]], holds, h_note, max_h = 220),
+      div(style = "color:#64748b; font-weight:600; font-size:0.85rem; margin-bottom:0.5rem;",
+          sprintf("closed - exited over a month ago (%d) · detail in the table below",
+                  length(closed)))
     )
   })
 
-  # The decision board: every ever-bought company with its CURRENT state.
-  # buy = the gate says buy now; hold = former buy washed to SKIP, still inside
-  # the horizon; sell = exit (matured / gate flipped / delisted). This table is
-  # the primary reading surface; the grid above summarizes recent movement.
+  # The full record: every company the model ever entered (cohort or ledger)
+  # with its CURRENT state - including the unproven gate names the board hides
+  # (flagged in the Proven column) and the closed history. Primary reading
+  # surface for detail; the board above is the at-a-glance summary.
   output$tableLC <- DT::renderDT({
     dv <- derivedLC()
     if (is.null(dv)) return(DT::datatable(
@@ -5694,17 +5815,19 @@ server <- function(input, output, session) {
       Ticker = dv$tickers,
       State  = unname(dv$state_now),
       Entry  = ifelse(is.na(dv$entry_of), "", dv$entry_of),
+      Source = ifelse(is.na(dv$src_of), "", unname(dv$src_of)),
       `Held (d)` = held,
       `% of horizon` = ifelse(is.na(held), NA,
                               pmin(100L, as.integer(round(100 * held / hz_days)))),
+      Matures = ifelse(is.na(dv$mat_of), "", format(dv$mat_of)),
       Why    = unname(dv$why_now),
+      Proven = ifelse(dv$tickers %in% names(dv$prov_of) & dv$prov_of[dv$tickers],
+                      "yes", "no"),
       `Gate today` = ifelse(dv$tickers %in% names(gate_v), gate_v[dv$tickers], "-"),
       stringsAsFactors = FALSE, check.names = FALSE)
-    # same shortlist evidence the board tiers on (win rate of the rank slot)
-    if (!is.null(d$sl) && nrow(d$sl) > 0) {
-      si <- match(df$Ticker, d$sl$ticker)
-      df$`Bin win %` <- as.numeric(d$sl$bin_win_pct)[si]
-    } else df$`Bin win %` <- NA_real_
+    # the rank slot's realized win rate at THIS horizon (the board's buy gate)
+    df$`Bin win %` <- ifelse(df$Ticker %in% names(dv$wpct),
+                             as.numeric(dv$wpct[df$Ticker]), NA_real_)
     # delist coloring on the Ticker column (same pattern as the ledger table)
     df$delisted <- if (!is.null(d$meta)) df$Ticker %in% d$meta$ticker else FALSE
     if (!is.null(d$meta) && nrow(d$meta) > 0) {
@@ -5715,16 +5838,25 @@ server <- function(input, output, session) {
     }
     df <- delist_enrich(df)
     df$del_class[!df$delisted] <- ""
-    # cluster-id filter (same control as the board); idless names always show
+    # cluster-id filter (same control + semantics as the board); idless names
+    # always show; deselect-all empties the table too
     sel_id <- input$idsLC
-    if (!is.null(sel_id) && !is.null(d$gate$id)) {
+    if (is.null(sel_id)) {
+      if (isTRUE(ids_seenLC())) df <- df[0, , drop = FALSE]
+    } else if (!is.null(d$gate$id)) {
       id_of <- setNames(suppressWarnings(as.integer(d$gate$id)), d$gate$ticker)
+      if (!is.null(d$coh) && nrow(d$coh) > 0) {   # cohort id fills gate gaps
+        ex <- d$coh[!(d$coh$ticker %in% names(id_of)), c("ticker", "id")]
+        ex <- ex[!duplicated(ex$ticker), , drop = FALSE]
+        if (nrow(ex)) id_of <- c(id_of, setNames(as.integer(ex$id), ex$ticker))
+      }
       tid <- id_of[df$Ticker]
       df <- df[is.na(tid) | tid %in% as.integer(sel_id), , drop = FALSE]
     }
-    keep <- c("Ticker", "State", "Entry", "Held (d)", "% of horizon", "Why",
-              "Gate today", "Bin win %", "del_class")
-    df <- df[order(factor(df$State, levels = c("sell", "buy", "hold")), df$Ticker), keep]
+    keep <- c("Ticker", "State", "Entry", "Source", "Held (d)", "% of horizon",
+              "Matures", "Why", "Proven", "Gate today", "Bin win %", "del_class")
+    df <- df[order(factor(df$State, levels = c("sell", "buy", "hold", "closed")),
+                   df$Ticker), keep]
     DT::datatable(
       df, selection = "none", rownames = FALSE, class = "compact",
       extensions = "Buttons", filter = "top",
@@ -5732,13 +5864,13 @@ server <- function(input, output, session) {
         pageLength = 25, lengthMenu = c(10, 25, 50, 100, 1000),
         dom = "Bftip", buttons = c("copy", "csv"), ordering = TRUE,
         columnDefs = list(
-          list(className = "dt-right", targets = c(3, 4, 7)),
-          list(visible = FALSE, targets = 8))
+          list(className = "dt-right", targets = c(4, 5, 10)),
+          list(visible = FALSE, targets = 11))
       )
     ) %>%
       DT::formatStyle("State", fontWeight = "600",
-        color = DT::styleEqual(c("buy", "hold", "sell"),
-                               c("#10b981", "#eab308", "#dc2626"))) %>%
+        color = DT::styleEqual(c("buy", "hold", "sell", "closed"),
+                               c("#10b981", "#eab308", "#dc2626", "#64748b"))) %>%
       DT::formatStyle("Ticker", valueColumns = "del_class",
         color = DT::styleEqual(names(DELIST_CLASSES), unname(DELIST_CLASSES)))
   }, server = FALSE)
