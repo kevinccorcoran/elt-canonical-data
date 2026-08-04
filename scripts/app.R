@@ -1189,6 +1189,14 @@ ui <- navbarPage(
                         "to SELL, when this horizon fully elapses (matured), or when the",
                         "series is delisted."),
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
+        selectInput("recwinLC", "Hold recency window",
+                    choices = c("1 month" = "1", "2 months" = "2", "3 months" = "3"),
+                    selected = "1"),
+        tags$span(paste("Slices the hold list by how lately the gate wanted each name.",
+                        "warming = re-endorsed within this window (could return to buy),",
+                        "best rank slots first. cooling = last wanted 1 to 2 windows ago,",
+                        "going quiet. dormant = benched, no recent signal."),
+                  style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
         tags$p(paste("A decision board of the model's calls, by company name.",
                      "sell = exit now (gate flipped, matured, or delisted).",
                      "buy = the gate endorses the name today, split by the Shortlist",
@@ -5632,6 +5640,23 @@ server <- function(input, output, session) {
     core   <- buys[!is.na(wv) & wv >= 55 & !is.na(nv) & nv >= 100]
     core   <- core[order(-slv[core], core)]
     tail_b <- setdiff(buys, core)
+    # slice holds by how lately the gate wanted them (recency window in months)
+    rw_mo <- suppressWarnings(as.integer(input$recwinLC)); if (is.na(rw_mo)) rw_mo <- 1L
+    W <- rw_mo * 30.44
+    led <- d$led
+    lb  <- tapply(as.Date(led$d[led$global_action == "BUY"]),
+                  led$ticker[led$global_action == "BUY"], max)  # last BUY date/ticker
+    hd_days <- as.numeric(Sys.Date()) - as.numeric(lb[holds])   # days since last BUY
+    warming <- holds[!is.na(hd_days) & hd_days <= W]
+    cooling <- holds[!is.na(hd_days) & hd_days > W & hd_days <= 2 * W]
+    dormant <- holds[is.na(hd_days) | hd_days > 2 * W]
+    # warming ordered: winning rank slots first (win% on chip), then the rest
+    w_win <- warming[!is.na(slv[warming]) & slv[warming] >= 55 &
+                     !is.na(sln[warming]) & sln[warming] >= 100]
+    w_win <- w_win[order(-slv[w_win], w_win)]
+    w_ord <- c(w_win, sort(setdiff(warming, w_win)))
+    w_note <- ifelse(w_ord %in% w_win, sprintf("%.0f%%", slv[w_ord]), "")
+    amber <- col_of[["hold"]]
     tagList(
       section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
       section("buy - shortlist, rank slots winning >= 55%", col_of[["buy"]], core,
@@ -5639,8 +5664,14 @@ server <- function(input, output, session) {
       div(style = "opacity:0.55;",
         section("buy - rest of the gate, unproven slots", col_of[["buy"]], tail_b,
                 ifelse(unname(why[tail_b]) == "new entry", "new", ""), max_h = 170)),
-      section("hold - former buys, maturing", col_of[["hold"]], holds,
-              rep("", length(holds)), max_h = 280)
+      section(sprintf("hold - warming: gate wanted it within %dmo (best slots first)", rw_mo),
+              amber, w_ord, w_note, max_h = 200),
+      section(sprintf("hold - cooling: last wanted %d to %dmo ago, going quiet",
+                      rw_mo, 2L * rw_mo),
+              "#fb923c", sort(cooling), rep("", length(cooling)), max_h = 150),
+      div(style = "opacity:0.55;",
+        section("hold - dormant: benched, no recent signal", "#64748b",
+                sort(dormant), rep("", length(dormant)), max_h = 150))
     )
   })
 
