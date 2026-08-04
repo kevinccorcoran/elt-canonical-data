@@ -1205,7 +1205,8 @@ ui <- navbarPage(
                      "gate follows, dimmed. hold = former buy washed out to SKIP but",
                      "still inside the hold window. Recorded exits stay exits; maturity",
                      "is checked against today. Recording began 2026-06-16."),
-               style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;")
+               style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;"),
+        uiOutput("idFilterLC")
       )),
       mainPanel(div(class = "main-card",
         uiOutput("boardLC"),
@@ -5476,7 +5477,7 @@ server <- function(input, output, session) {
         ORDER BY ticker, prediction_date")
       if (nrow(led) == 0) { status_msgLC("No recorded snapshots yet."); return() }
       gate <- dbGetQuery(con, "
-        SELECT DISTINCT ticker, global_action AS gate_today
+        SELECT ticker, global_action AS gate_today, id
         FROM serving.return_cluster_ticker_global_action_current")
       # raw.ticker_metadata holds ONLY delisted names -> presence = delisted
       meta <- tryCatch(dbGetQuery(con, "
@@ -5602,6 +5603,32 @@ server <- function(input, output, session) {
   # The decision board: three name sections ordered by action (exit list first,
   # then today's endorsed buys, then the maturing holds). Every ticker is
   # readable directly; the table below adds detail, filters, and CSV.
+  # cluster-id filter (mirrors the Predictions tab): checkboxes for the ids
+  # present in the loaded universe, all on by default; uncheck to narrow. The
+  # board and the table both read input$idsLC.
+  output$idFilterLC <- renderUI({
+    d <- app_dataLC(); if (is.null(d) || is.null(d$gate$id)) return(NULL)
+    ids <- sort(unique(stats::na.omit(as.integer(d$gate$id))))
+    if (!length(ids)) return(NULL)
+    div(style = "margin-bottom:0.6rem;",
+      tags$label("Cluster id filter (all on; uncheck to narrow)",
+                 style = paste0("color:#94a3b8; font-size:0.72rem; font-weight:600;",
+                                " display:block; margin-bottom:0.3rem;")),
+      checkboxGroupInput("idsLC", NULL, choices = ids, selected = ids, inline = TRUE),
+      actionLink("idsAllLC", "Select all",
+                 style = "font-size:0.7rem; color:#38bdf8; margin-right:0.9rem;"),
+      actionLink("idsNoneLC", "Deselect all",
+                 style = "font-size:0.7rem; color:#38bdf8;"))
+  })
+  observeEvent(input$idsAllLC, {
+    d <- app_dataLC(); req(d)
+    updateCheckboxGroupInput(session, "idsLC",
+      selected = sort(unique(stats::na.omit(as.integer(d$gate$id)))))
+  })
+  observeEvent(input$idsNoneLC, {
+    updateCheckboxGroupInput(session, "idsLC", selected = character(0))
+  })
+
   output$boardLC <- renderUI({
     dv <- derivedLC(); if (is.null(dv)) return(div(
       style = "color:#64748b; padding:1rem; font-size:0.85rem;",
@@ -5630,6 +5657,15 @@ server <- function(input, output, session) {
     sells <- sort(names(st)[st == "sell"])
     buys  <- sort(names(st)[st == "buy"])
     holds <- sort(names(st)[st == "hold"])
+    # cluster-id filter: keep only selected ids; names with no current cluster
+    # (delisted, ~1%) always show. NULL selection (pre-render) keeps everything.
+    id_of <- if (!is.null(d$gate$id))
+               setNames(suppressWarnings(as.integer(d$gate$id)), d$gate$ticker)
+             else setNames(integer(0), character(0))
+    sel_id <- input$idsLC
+    keep_id <- function(v) if (is.null(sel_id)) v else
+      v[is.na(id_of[v]) | id_of[v] %in% as.integer(sel_id)]
+    sells <- keep_id(sells); buys <- keep_id(buys); holds <- keep_id(holds)
     # tier the buys by the Shortlist rule: proven rank slots first (win rate on
     # the chip), the unproven tail dimmed below so it can't drown the signal
     slv <- if (!is.null(d$sl) && nrow(d$sl) > 0)
@@ -5714,6 +5750,13 @@ server <- function(input, output, session) {
     }
     df <- delist_enrich(df)
     df$del_class[!df$delisted] <- ""
+    # cluster-id filter (same control as the board); idless names always show
+    sel_id <- input$idsLC
+    if (!is.null(sel_id) && !is.null(d$gate$id)) {
+      id_of <- setNames(suppressWarnings(as.integer(d$gate$id)), d$gate$ticker)
+      tid <- id_of[df$Ticker]
+      df <- df[is.na(tid) | tid %in% as.integer(sel_id), , drop = FALSE]
+    }
     keep <- c("Ticker", "State", "Entry", "Held (d)", "% of horizon", "Why",
               "Gate today", "Bin win %", "del_class")
     df <- df[order(factor(df$State, levels = c("sell", "buy", "hold")), df$Ticker), keep]
