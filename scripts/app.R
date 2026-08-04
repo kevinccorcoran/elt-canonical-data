@@ -1182,10 +1182,12 @@ ui <- navbarPage(
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
         tags$p(paste("A decision board of the model's calls, by company name.",
                      "sell = exit now (gate flipped, matured, or delisted).",
-                     "buy = the gate endorses the name today (fresh entries marked new).",
-                     "hold = former buy washed out to SKIP but still inside the hold",
-                     "window. Recorded exits stay exits; maturity is checked against",
-                     "today. Recording began 2026-06-16."),
+                     "buy = the gate endorses the name today, split by the Shortlist",
+                     "rule: rank slots with a realized win rate >= 55% on >= 100 graded",
+                     "picks come first (win rate on the chip); the unproven rest of the",
+                     "gate follows, dimmed. hold = former buy washed out to SKIP but",
+                     "still inside the hold window. Recorded exits stay exits; maturity",
+                     "is checked against today. Recording began 2026-06-16."),
                style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;")
       )),
       mainPanel(div(class = "main-card",
@@ -5438,7 +5440,33 @@ server <- function(input, output, session) {
         SELECT ticker, name AS company_name, delisting_category,
                delisted_utc::date::text AS delisted_date
         FROM raw.ticker_metadata"), error = function(e) NULL)
-      app_dataLC(list(led = led, gate = gate, meta = meta))
+      # shortlist evidence: the ticker's walk-forward rank bin and that bin's
+      # realized win rate - the SAME rule as the Shortlist tab (>= 55% win on
+      # >= 100 graded observations). Used to tier the buy section.
+      sl <- tryCatch(dbGetQuery(con, "
+        WITH wfbin AS (
+            SELECT m.id AS eid, r.ticker,
+                   NTILE(20) OVER (PARTITION BY m.id
+                     ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                   )::int AS wf_bin
+            FROM validation.walk_forward_ticker_rank r
+            JOIN validation.walk_forward_cluster_id_map m
+              ON m.train_cutoff_date = r.train_cutoff_date
+             AND m.cluster_id       = r.cluster_id
+            WHERE r.fut_lag = 12
+              AND r.ticker_score IS NOT NULL AND r.ticker_score <> 0
+              AND r.train_cutoff_date = (SELECT MAX(train_cutoff_date)
+                    FROM validation.walk_forward_ticker_rank WHERE fut_lag = 12)
+        )
+        SELECT DISTINCT ON (w.ticker) w.ticker,
+               ROUND(ps.hit_rate::numeric * 100, 1) AS bin_win_pct,
+               ps.n_obs::int AS bin_n
+        FROM wfbin w
+        LEFT JOIN validation.walk_forward_pctile_summary ps
+          ON ps.id = w.eid AND ps.fut_lag = 12 AND ps.pctile_bin = w.wf_bin
+        ORDER BY w.ticker, ps.hit_rate DESC NULLS LAST"),
+        error = function(e) NULL)
+      app_dataLC(list(led = led, gate = gate, meta = meta, sl = sl))
       status_msgLC(sprintf("Loaded - %d series across %d snapshots.",
                            length(unique(led$ticker[led$global_action == "BUY"])),
                            length(unique(led$d))))
@@ -5559,10 +5587,23 @@ server <- function(input, output, session) {
     sells <- sort(names(st)[st == "sell"])
     buys  <- sort(names(st)[st == "buy"])
     holds <- sort(names(st)[st == "hold"])
+    # tier the buys by the Shortlist rule: proven rank slots first (win rate on
+    # the chip), the unproven tail dimmed below so it can't drown the signal
+    slv <- if (!is.null(d$sl) && nrow(d$sl) > 0)
+             setNames(as.numeric(d$sl$bin_win_pct), d$sl$ticker) else numeric(0)
+    sln <- if (!is.null(d$sl) && nrow(d$sl) > 0)
+             setNames(as.numeric(d$sl$bin_n), d$sl$ticker) else numeric(0)
+    wv <- unname(slv[buys]); nv <- unname(sln[buys])
+    core   <- buys[!is.na(wv) & wv >= 55 & !is.na(nv) & nv >= 100]
+    core   <- core[order(-slv[core], core)]
+    tail_b <- setdiff(buys, core)
     tagList(
       section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
-      section("buy - signal live today", col_of[["buy"]], buys,
-              ifelse(unname(why[buys]) == "new entry", "new", "")),
+      section("buy - shortlist, rank slots winning >= 55%", col_of[["buy"]], core,
+              sprintf("%.0f%%", unname(slv[core]))),
+      div(style = "opacity:0.55;",
+        section("buy - rest of the gate, unproven slots", col_of[["buy"]], tail_b,
+                ifelse(unname(why[tail_b]) == "new entry", "new", ""), max_h = 170)),
       section("hold - former buys, maturing", col_of[["hold"]], holds,
               rep("", length(holds)), max_h = 280)
     )
@@ -5592,6 +5633,11 @@ server <- function(input, output, session) {
       Why    = unname(dv$why_now),
       `Gate today` = ifelse(dv$tickers %in% names(gate_v), gate_v[dv$tickers], "-"),
       stringsAsFactors = FALSE, check.names = FALSE)
+    # same shortlist evidence the board tiers on (win rate of the rank slot)
+    if (!is.null(d$sl) && nrow(d$sl) > 0) {
+      si <- match(df$Ticker, d$sl$ticker)
+      df$`Bin win %` <- as.numeric(d$sl$bin_win_pct)[si]
+    } else df$`Bin win %` <- NA_real_
     # delist coloring on the Ticker column (same pattern as the ledger table)
     df$delisted <- if (!is.null(d$meta)) df$Ticker %in% d$meta$ticker else FALSE
     if (!is.null(d$meta) && nrow(d$meta) > 0) {
@@ -5603,7 +5649,7 @@ server <- function(input, output, session) {
     df <- delist_enrich(df)
     df$del_class[!df$delisted] <- ""
     keep <- c("Ticker", "State", "Entry", "Held (d)", "% of horizon", "Why",
-              "Gate today", "del_class")
+              "Gate today", "Bin win %", "del_class")
     df <- df[order(factor(df$State, levels = c("sell", "buy", "hold")), df$Ticker), keep]
     DT::datatable(
       df, selection = "none", rownames = FALSE, class = "compact",
@@ -5612,8 +5658,8 @@ server <- function(input, output, session) {
         pageLength = 25, lengthMenu = c(10, 25, 50, 100, 1000),
         dom = "Bftip", buttons = c("copy", "csv"), ordering = TRUE,
         columnDefs = list(
-          list(className = "dt-right", targets = 3:4),
-          list(visible = FALSE, targets = 7))
+          list(className = "dt-right", targets = c(3, 4, 7)),
+          list(visible = FALSE, targets = 8))
       )
     ) %>%
       DT::formatStyle("State", fontWeight = "600",
