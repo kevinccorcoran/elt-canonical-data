@@ -1180,25 +1180,18 @@ ui <- navbarPage(
                         "to SELL, when this horizon fully elapses (matured), or when the",
                         "series is delisted."),
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
-        selectInput("winLC", "Movement window",
-                    choices = c("Last 10 snapshots" = "10",
-                                "Last 5 snapshots" = "5",
-                                "Since previous snapshot" = "1",
-                                "Since first snapshot" = "all"),
-                    selected = "10"),
-        tags$p(paste("A transition grid of the model's calls: y = each name's state",
-                     "before, x = its state now (latest snapshot). Every ticker is a point",
-                     "in the cell for its move. buy = active signal, hold = still",
-                     "former buy washed out to SKIP but still maturing, sell = exit (gate flip,",
-                     "matured, or delisted). The diagonal is names that did not move; the",
-                     "buy->sell and hold->sell cells are the former buys the data now says",
-                     "to exit. States are computed over the FULL record; the window only",
-                     "sets how far back 'before' looks."),
+        tags$p(paste("A lifecycle timeline of the model's calls. x = months since the",
+                     "name's entry (0 to the hold length); lanes = its state now.",
+                     "buy = the gate says buy today, hold = former buy washed out to",
+                     "SKIP but still maturing, sell = exit (gate flip, matured, or",
+                     "delisted), frozen at the age it exited. Dots march right as",
+                     "positions age and mature at the vertical line. Recording began",
+                     "2026-06-16, so everything sits young/left for now."),
                style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;")
       )),
       mainPanel(div(class = "main-card",
         uiOutput("chipsLC"),
-        plotlyOutput("gridLC", height = "560px"),
+        plotlyOutput("timelineLC", height = "560px"),
         tags$hr(style = "border-color:#1e293b; margin:1.1rem 0 0.8rem;"),
         tags$div(style = "color:#94a3b8; font-size:0.8rem; margin-bottom:0.5rem;",
                  paste("Every company by current state. Filter State to buy / hold / sell",
@@ -5470,6 +5463,7 @@ server <- function(input, output, session) {
     M <- matrix("", nrow = length(tickers), ncol = length(dates),
                 dimnames = list(tickers, dates))
     entry_of <- setNames(rep(NA_character_, length(tickers)), tickers)
+    exit_of  <- setNames(rep(NA_character_, length(tickers)), tickers)
     reason_of <- setNames(rep("", length(tickers)), tickers)
     for (t in tickers) {
       open <- FALSE; sold <- FALSE; entry_d <- NA_character_; mat_d <- as.Date(NA)
@@ -5484,11 +5478,14 @@ server <- function(input, output, session) {
           }
         } else if (open && !sold) {                 # held: check exit triggers
           if (!is.na(a) && a == "SELL") {
-            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"; reason_of[[t]] <- "gate flipped"
+            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
+            reason_of[[t]] <- "gate flipped"; exit_of[[t]] <- D
           } else if (!is.na(dl_d) && dl_d <= as.Date(D)) {
-            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"; reason_of[[t]] <- "delisted"
+            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
+            reason_of[[t]] <- "delisted"; exit_of[[t]] <- D
           } else if (as.Date(D) >= mat_d) {
-            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"; reason_of[[t]] <- "matured"
+            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
+            reason_of[[t]] <- "matured"; exit_of[[t]] <- D
           } else if (!is.na(a) && a == "BUY") {
             M[t, j] <- "buy"; reason_of[[t]] <- "signal continuing"   # gate still says BUY
           } else {
@@ -5498,25 +5495,15 @@ server <- function(input, output, session) {
           if (!is.na(a) && a == "BUY") {
             open <- TRUE; sold <- FALSE; entry_d <- D
             mat_d <- seq(as.Date(D), by = paste(hz, "months"), length.out = 2)[2]
-            M[t, j] <- "buy"; reason_of[[t]] <- "re-entry"
+            M[t, j] <- "buy"; reason_of[[t]] <- "re-entry"; exit_of[[t]] <- NA_character_
           } else M[t, j] <- "sell"
         }
       }
       entry_of[[t]] <- entry_d
     }
     list(M = M, dates = dates, tickers = tickers,
-         entry_of = entry_of, reason_of = reason_of, hz = hz)
+         entry_of = entry_of, exit_of = exit_of, reason_of = reason_of, hz = hz)
   })
-
-  # resolve the movement-window endpoints (indices into dv$dates); shared by
-  # the chips line and the grid so their dates can never disagree
-  lc_win_idx <- function(nd, win) {
-    if (is.null(win) || win == "") win <- "10"
-    now_j <- nd
-    before_j <- if (win == "all") 1L else max(1L, now_j - suppressWarnings(as.integer(win)))
-    if (is.na(before_j) || before_j >= now_j) before_j <- max(1L, now_j - 1L)
-    c(before_j, now_j)
-  }
 
   output$chipsLC <- renderUI({
     dv <- derivedLC(); if (is.null(dv)) return(NULL)
@@ -5525,108 +5512,95 @@ server <- function(input, output, session) {
       style = sprintf("background:%s22; color:%s; border:1px solid %s55; border-radius:6px; padding:4px 12px; margin-right:8px; font-weight:600;", col, col, col),
       sprintf("%d %s", n, lab))
     n_mat <- sum(fin == "sell" & dv$reason_of == "matured")
-    w <- lc_win_idx(length(dv$dates), input$winLC)
     div(style = "margin-bottom:0.75rem;",
       chip("buy",  sum(fin == "buy"),  "#10b981"),
       chip("hold", sum(fin == "hold"), "#eab308"),
       chip("sell", sum(fin == "sell"), "#dc2626"),
-      span(sprintf("of the sells, %d matured (horizon %dmo). Movement %s → %s (latest snapshot).",
-                   n_mat, dv$hz,
-                   format(as.Date(dv$dates[w[1]]), "%b %d"),
-                   format(as.Date(dv$dates[w[2]]), "%b %d")),
+      span(sprintf("of the sells, %d matured (horizon %dmo). Latest snapshot %s.",
+                   n_mat, dv$hz, dv$dates[length(dv$dates)]),
            style = "color:#64748b; font-size:0.75rem;"))
   })
 
-  # 3x3 transition grid: x = state NOW, y = state BEFORE, one square point per
-  # ticker laid out as a tidy dot-matrix inside its cell (like the sketch).
-  # Deterministic (alphabetical) placement, marker size auto-scaled from the
-  # densest cell, every square individually hoverable. The diagonal is "did not
-  # move"; the right column (now = sell) is the former buys the data says to exit.
-  output$gridLC <- renderPlotly({
+  # Lifecycle timeline: x = months since entry (0..horizon), lanes = state now
+  # (buy top, hold middle, sell bottom). One dot per company; sells freeze at
+  # the age they exited. Same-day entry cohorts stack in tidy vertical columns
+  # (deterministic, alphabetical). Dots march right as positions age; the
+  # dashed line at the horizon is where holds mature into sells.
+  output$timelineLC <- renderPlotly({
     dv <- derivedLC()
     if (is.null(dv)) return(empty_plot("Connect and Generate to load the signal record."))
     d <- app_dataLC()
-    M <- dv$M; dts <- dv$dates
-    w <- lc_win_idx(length(dts), input$winLC)
-    before_j <- w[1]; now_j <- w[2]
-    norm <- function(x) { x[is.na(x) | x == ""] <- "out"; x }
-    bs <- norm(M[, before_j]); ns <- norm(M[, now_j])
-    tk <- rownames(M)
+    fin <- dv$M[, ncol(dv$M)]
+    ok  <- !is.na(dv$entry_of)
+    tk  <- dv$tickers[ok]; fin <- unname(fin[ok])
     if (length(tk) == 0) return(empty_plot("No signal record yet."))
-    lvl <- c("buy", "hold", "sell")                          # axis order: buy=1 .. sell=3
-    bbucket <- ifelse(bs %in% c("out", "sell"), "sell", bs)  # "not holding" -> sell band
-    nbucket <- ifelse(ns %in% c("out", "sell"), "sell", ns)  # (ns never "out" at latest)
-    x_num <- match(nbucket, lvl); y_num <- match(bbucket, lvl)
+    entry <- as.Date(dv$entry_of[ok])
+    exitd <- suppressWarnings(as.Date(dv$exit_of[ok]))
+    hz    <- dv$hz
+    # age in months; exited names freeze at their exit age
+    age <- ifelse(fin == "sell" & !is.na(exitd),
+                  as.numeric(exitd - entry), as.numeric(Sys.Date() - entry)) / 30.44
+    lane_of <- c(sell = 1, hold = 2, buy = 3)
+    ybase   <- unname(lane_of[fin])
 
-    # tidy dot-matrix per cell: alphabetical, centered, even pitch (no jitter);
-    # all series plot, so the counts here always equal the chips above
-    span_f <- 0.84
-    xj <- numeric(length(tk)); yj <- numeric(length(tk))
-    cell_n <- matrix(0L, 3, 3)
-    max_nr <- 1L
-    for (cy in 1:3) for (cx in 1:3) {
-      idx <- which(x_num == cx & y_num == cy)
-      n <- length(idx); cell_n[cy, cx] <- n
-      if (n == 0) next
-      idx <- idx[order(tk[idx])]
-      nc <- max(1L, min(n, ceiling(sqrt(n * 1.8))))          # 1.8 ~ cell aspect (w/h)
-      nr <- ceiling(n / nc); max_nr <- max(max_nr, nr)
-      k <- seq_len(n) - 1L
-      xj[idx] <- cx + ((k %% nc + 0.5) / nc - 0.5) * span_f
-      yj[idx] <- cy + (0.5 - (k %/% nc + 0.5) / nr) * span_f
+    # deterministic cohort stacking: per (lane, entry date) fill a vertical
+    # column of up to 25 dots, then start the next sub-column a hair right
+    grp <- paste(fin, format(entry))
+    xj <- age; yj <- numeric(length(tk))
+    for (g in unique(grp)) {
+      idx <- which(grp == g); idx <- idx[order(tk[idx])]
+      n <- length(idx); lev <- min(n, 25L); k <- seq_len(n) - 1L
+      yj[idx] <- ybase[idx] - 0.4 + (k %% lev + 0.5) * (0.8 / lev)
+      xj[idx] <- age[idx] + (k %/% lev) * 0.035
     }
-    msz <- max(3, min(10, floor(span_f * 150 / max_nr * 0.85)))
 
     del_ticks <- if (!is.null(d$meta)) d$meta$ticker else character(0)
     gate_v   <- setNames(as.character(d$gate$gate_today), d$gate$ticker)
-    reason_v <- dv$reason_of
-    blab     <- c(buy = "buy", hold = "hold", sell = "sell / flat")
-    gate_of  <- ifelse(tk %in% names(gate_v),   gate_v[tk],   "-")
-    reason_o <- ifelse(tk %in% names(reason_v), reason_v[tk], "")
     is_del   <- tk %in% del_ticks
-    htxt <- sprintf("<b>%s</b>%s<br>was %s  →  now %s<br>gate today: %s%s",
-                    tk, ifelse(is_del, " (delisted)", ""), blab[bbucket], nbucket, gate_of,
+    gate_of  <- ifelse(tk %in% names(gate_v), gate_v[tk], "-")
+    reason_o <- unname(dv$reason_of[ok])
+    pct      <- pmin(100L, as.integer(round(100 * age / hz)))
+    htxt <- sprintf("<b>%s</b>%s<br>%s | entered %s<br>age %.1f mo (%d%% of %dmo)<br>gate today: %s%s",
+                    tk, ifelse(is_del, " (delisted)", ""), fin,
+                    format(entry, "%b %d, %Y"), age, pct, hz, gate_of,
                     ifelse(nzchar(reason_o), paste0("<br>", reason_o), ""))
     col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
 
     fig <- plot_ly()
-    for (st in lvl) {
-      idx <- which(nbucket == st)
+    for (st in c("buy", "hold", "sell")) {
+      idx <- which(fin == st)
       if (!length(idx)) next
       fig <- add_trace(fig, x = xj[idx], y = yj[idx],
         type = "scatter", mode = "markers",
-        marker = list(color = col_of[[st]], size = msz,
+        marker = list(color = col_of[[st]], size = 5,
                       symbol = ifelse(is_del[idx], "square-open", "square"),
-                      # solid squares get a hairline dark border for separation in
-                      # dense cells; open (delisted) squares a colored one to stay visible
                       line = list(color = ifelse(is_del[idx], col_of[[st]], "#0b1220"),
-                                  width = ifelse(is_del[idx], 1.2, 0.5)),
+                                  width = ifelse(is_del[idx], 1.2, 0.4)),
                       opacity = 0.9),
         text = htxt[idx], hovertemplate = "%{text}<extra></extra>")
     }
-    ln <- function(x0, x1, y0, y1) list(type = "line", x0 = x0, x1 = x1, y0 = y0, y1 = y1,
-                                        line = list(color = "#1e293b", width = 1), layer = "below")
     shapes <- list(
-      list(type = "rect", x0 = 0.5, x1 = 3.5, y0 = 0.5, y1 = 3.5,
+      list(type = "line", x0 = 0, x1 = hz + 1, y0 = 1.5, y1 = 1.5,
            line = list(color = "#1e293b", width = 1), layer = "below"),
-      ln(1.5, 1.5, 0.5, 3.5), ln(2.5, 2.5, 0.5, 3.5),
-      ln(0.5, 3.5, 1.5, 1.5), ln(0.5, 3.5, 2.5, 2.5))
-    # small grey per-cell counts, top-left corner of each occupied cell
-    ann <- list()
-    for (cy in 1:3) for (cx in 1:3) if (cell_n[cy, cx] > 0)
-      ann[[length(ann) + 1]] <- list(
-        x = cx - 0.47, y = cy + 0.45, text = as.character(cell_n[cy, cx]),
-        showarrow = FALSE, xanchor = "left", yanchor = "top",
-        font = list(color = "#64748b", size = 10))
+      list(type = "line", x0 = 0, x1 = hz + 1, y0 = 2.5, y1 = 2.5,
+           line = list(color = "#1e293b", width = 1), layer = "below"),
+      list(type = "line", x0 = hz, x1 = hz, y0 = 0.5, y1 = 3.5,
+           line = list(color = "#64748b", width = 1, dash = "dash")))
+    ann <- list(list(x = hz, y = 3.5, text = sprintf("matures (%dmo)", hz),
+                     showarrow = FALSE, xanchor = "right", yanchor = "bottom",
+                     font = list(color = "#64748b", size = 11)))
     dark_layout(fig,
-      xaxis = list(title = "state now", tickvals = c(1, 2, 3), ticktext = lvl,
-                   range = c(0.42, 3.58), color = "#cbd5e1", zeroline = FALSE,
-                   showgrid = FALSE, fixedrange = TRUE),
-      yaxis = list(title = "state before", tickvals = c(1, 2, 3), ticktext = lvl,
-                   range = c(0.42, 3.58), color = "#cbd5e1", zeroline = FALSE,
+      xaxis = list(title = "months since entry", range = c(-0.4, hz + 1),
+                   dtick = 3, color = "#cbd5e1", zeroline = FALSE,
+                   gridcolor = "#151f2e"),
+      yaxis = list(tickvals = c(1, 2, 3),
+                   ticktext = c(sprintf("sell (%d)", sum(fin == "sell")),
+                                sprintf("hold (%d)", sum(fin == "hold")),
+                                sprintf("buy (%d)", sum(fin == "buy"))),
+                   range = c(0.45, 3.62), color = "#cbd5e1", zeroline = FALSE,
                    showgrid = FALSE, fixedrange = TRUE),
       shapes = shapes, annotations = ann, showlegend = FALSE,
-      margin = list(l = 70, r = 25, t = 30, b = 55)) %>%
+      margin = list(l = 85, r = 30, t = 20, b = 55)) %>%
       config(displayModeBar = FALSE)
   })
 
