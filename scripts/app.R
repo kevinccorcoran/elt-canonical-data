@@ -1031,10 +1031,19 @@ ui <- navbarPage(
           choiceValues = c("today", "ledger", "backtest"),
           selected = "today"),
         conditionalPanel(
-          condition = "input.date_modeBL == 'ledger'",
+          # day-level precision is only offered where days actually differ: the
+          # recorded BUY list is the one daily view. Picks/ladder snap to the
+          # last walk-forward cutoff, so for them the picker is replaced by an
+          # anchor note (ledger_anchorBL) instead of dead granularity.
+          condition = "input.date_modeBL == 'ledger' && input.bl_viewBL == 'buys'",
           # bounds arrive from Connect via updateDateInput; until then the
           # widget defaults to today and asof_dateBL() returns NULL (no bounds)
           dateInput("ledger_dayBL", NULL, value = NULL, format = "yyyy-mm-dd")),
+        conditionalPanel(
+          condition = paste0("input.date_modeBL == 'ledger' && ",
+                             "typeof input.bl_viewBL !== 'undefined' && ",
+                             "input.bl_viewBL != 'buys'"),
+          uiOutput("ledger_anchorBL")),
         conditionalPanel(
           condition = "input.date_modeBL == 'backtest'",
           selectInput("wf_cutoffBL", "Quarterly cutoff",
@@ -3521,16 +3530,42 @@ server <- function(input, output, session) {
   # The pre-first-cutoff branch is gone (the backtest picker only offers real
   # cutoffs) and so is the "(no newer cutoff yet)" note (the newest choice is
   # tagged "(newest)" in the dropdown itself).
+  # In Recorded-day mode the picks/ladder views cannot honor day precision:
+  # they snap to the newest walk-forward cutoff <= the day, which is the SAME
+  # cutoff for every recorded day. This block replaces the daily picker there.
+  output$ledger_anchorBL <- renderUI({
+    cuts <- wf_cutoffsBL()
+    anchor <- if (length(cuts) > 0) format(max(as.Date(cuts)), "%Y-%m-%d")
+              else "the last walk-forward cutoff"
+    div(style = paste0("background:rgba(255,255,255,0.03); border:1px solid ",
+                       "rgba(255,255,255,0.08); border-radius:6px; padding:0.5rem ",
+                       "0.65rem; margin-bottom:0.6rem;"),
+      tags$p(sprintf(paste("This view is anchored to cutoff %s and is identical",
+                           "for every recorded day."), anchor),
+             style = "color:#94a3b8; font-size:0.72rem; margin:0 0 0.25rem;"),
+      tags$p(paste("Use 'Backtest cutoff' to move the anchor, or the BUY list",
+                   "view for day-by-day changes."),
+             style = "color:#64748b; font-size:0.7rem; margin:0;"))
+  })
+
   output$wf_resolvedBL <- renderUI({
     mode <- input$date_modeBL
     d <- asof_dateBL()
     if (is.null(mode) || is.null(d) || length(d) != 1 || is.na(d)) return(NULL)
     sty <- "color:#64748b; font-size:0.7rem; margin:-0.4rem 0 0.75rem;"
+    # ledger mode reads differently per view: only the BUY list is daily
+    ledger_msg <- if (!is.null(input$bl_viewBL) && input$bl_viewBL != "buys") {
+      cuts <- wf_cutoffsBL()
+      anchor <- if (length(cuts) > 0) format(max(as.Date(cuts)), "%Y-%m-%d") else "?"
+      sprintf("Anchored to cutoff %s - same for every recorded day.", anchor)
+    } else {
+      sprintf(paste("Snapshot for %s (weekend/holiday dates resolve",
+                    "to the latest snapshot on or before)."),
+              format(d, "%Y-%m-%d"))
+    }
     msg <- switch(mode,
       today  = "Live data - the model as of right now.",
-      ledger = sprintf(paste("Snapshot for %s (weekend/holiday dates resolve",
-                             "to the latest snapshot on or before)."),
-                       format(d, "%Y-%m-%d")),
+      ledger = ledger_msg,
       backtest = sprintf(paste("Backtest state at cutoff %s - the same for",
                                "every date this bundle covers."),
                          format(d, "%Y-%m-%d")),
