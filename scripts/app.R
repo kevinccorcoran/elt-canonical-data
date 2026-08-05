@@ -5920,9 +5920,16 @@ server <- function(input, output, session) {
     b_note <- sprintf("%.0f%% · %d/%d runs", wp[buys],
                       ifelse(is.na(rn[buys]), 0L, rn[buys]), rt)
     b_note <- ifelse(why[buys] == "new entry", paste0(b_note, " · new"), b_note)
-    # orange + = the 20 highest qualstream grades within the buy section only
+    # orange + = qualstream's endorsement within the buy section: a GRADE
+    # THRESHOLD, not a fixed top-N. A rank cut splits ties arbitrarily (grades
+    # are coarse -- 11 names once tied on 62, so head(.., 20) marked 5 of them
+    # and dropped 6 identical ones on alphabetical order), and a fixed N always
+    # marks N names however weak the crop. The cap is only a backstop against a
+    # future re-calibration inflating every grade.
+    qs_min <- 68L; qs_cap <- 25L
     bg <- qs_grade[buys]
-    qs_top <- utils::head(buys[!is.na(bg)][order(-bg[!is.na(bg)])], 20)
+    qs_ok <- buys[!is.na(bg) & bg >= qs_min]
+    qs_top <- utils::head(qs_ok[order(-qs_grade[qs_ok], qs_ok)], qs_cap)
     holds <- holds[order(dv$entry_of[holds], holds)]
     hz_days <- round(hz * 30.44)
     h_pct <- pmin(100L, as.integer(round(100 *
@@ -5980,9 +5987,10 @@ server <- function(input, output, session) {
         gap_lo, led_lo))
       else note_line(sprintf(
         "Entry record: daily ledger only, beginning %s.", led_lo)),
-      if (length(qs_top)) note_line(paste(
-        "Orange + = the 20 highest qualstream grades among the buys, this",
-        "period.")))
+      if (length(qs_top)) note_line(sprintf(paste(
+        "Orange + = qualstream grade >= %d among the buys (%d of %d graded).",
+        "A threshold, not a top-N: it never splits a tie, and in a weak period",
+        "fewer names qualify."), qs_min, length(qs_top), sum(!is.na(bg)))))
     tagList(
       notes,
       section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
