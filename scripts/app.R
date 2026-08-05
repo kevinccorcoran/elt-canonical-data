@@ -1195,9 +1195,11 @@ ui <- navbarPage(
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
         tags$p(paste("A decision board of the model's calls, by company name.",
                      "sell = exit now (gate flipped, matured lately, or delisted).",
-                     "buy = proven rank slot the gate endorses today (win rate on the",
-                     "chip). hold = an open position the model is no longer pushing;",
-                     "the chip shows entry date and % of the hold horizon elapsed.",
+                     "buy = the period's standing recs: proven rank slots endorsed",
+                     "today, ranked by signal persistence over the trailing 4-month",
+                     "review window (chip: win rate + BUY on n of N recorded runs).",
+                     "hold = the period's dropped recs, still inside their hold",
+                     "window; the chip shows entry date and % of horizon elapsed.",
                      "closed = matured more than a month ago, collapsed to a count",
                      "(full detail in the table). Unproven gate names live in the",
                      "table only, flagged."),
@@ -5711,12 +5713,23 @@ server <- function(input, output, session) {
       vapply(tickers, function(t)
         identical(src_of[[t]], "cohort") || provf(t), logical(1)),
       tickers)
+    # signal persistence over the review window (trailing 4 months of daily
+    # runs): on how many recorded runs was this name a BUY? The period's real
+    # buy recs are the durable ones - this ranks the buy section and rides on
+    # every chip, so a day-one flicker can't outrank a name endorsed all period.
+    win_lo <- today - 122
+    in_win <- as.Date(led$d) >= win_lo
+    runs_tot <- length(unique(led$d[in_win]))
+    pb <- led[in_win & led$global_action == "BUY", ]
+    runs_of <- table(factor(pb$ticker, levels = tickers))
+    runs_of <- setNames(as.integer(runs_of), names(runs_of))
     list(M = M, dates = dates, tickers = tickers,
          entry_of = entry_of, exit_of = exit_of, reason_of = reason_of, hz = hz,
          state_now = state_now, why_now = why_now,
          mat_of = mat_of, src_of = src_of, prov_of = prov_of, wpct = wpct,
          board_ok = board_ok, coh_dates = coh_dates,
-         coh_n = if (is.null(ch)) 0L else nrow(ch))
+         coh_n = if (is.null(ch)) 0L else nrow(ch),
+         runs_of = runs_of, runs_tot = runs_tot)
   })
 
   # The decision board: three name sections ordered by action (exit list first,
@@ -5814,11 +5827,16 @@ server <- function(input, output, session) {
     buys   <- bt[st[bt] == "buy"]
     holds  <- bt[st[bt] == "hold"]
     closed <- sort(bt[st[bt] == "closed"])
-    # buys ordered by the slot's realized win rate; holds by entry (oldest,
-    # i.e. furthest through its horizon, first)
+    # buys = the period's surviving recs: ordered by signal persistence over
+    # the review window (BUY on how many recorded runs), then win rate. The
+    # chip carries both, so a day-one flicker reads differently from a name
+    # endorsed the entire period.
     wp <- dv$wpct
-    buys <- buys[order(-ifelse(is.na(wp[buys]), 0, wp[buys]), buys)]
-    b_note <- sprintf("%.0f%%", wp[buys])
+    rn <- dv$runs_of; rt <- max(1L, dv$runs_tot)
+    rb <- ifelse(is.na(rn[buys]), 0L, rn[buys])
+    buys <- buys[order(-rb, -ifelse(is.na(wp[buys]), 0, wp[buys]), buys)]
+    b_note <- sprintf("%.0f%% · %d/%d runs", wp[buys],
+                      ifelse(is.na(rn[buys]), 0L, rn[buys]), rt)
     b_note <- ifelse(why[buys] == "new entry", paste0(b_note, " · new"), b_note)
     holds <- holds[order(dv$entry_of[holds], holds)]
     hz_days <- round(hz * 30.44)
@@ -5847,9 +5865,11 @@ server <- function(input, output, session) {
     tagList(
       notes,
       section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
-      section(sprintf("buy - proven %d-month slots the gate endorses today", hz),
+      section(sprintf(
+                "buy - the period's standing recs: proven %d-month slots endorsed today (win%% · runs on list)",
+                hz),
               col_of[["buy"]], buys, b_note),
-      section("hold - open positions, model quiet (entry · % of horizon)",
+      section("hold - the period's dropped recs, still open (entry · % of horizon)",
               col_of[["hold"]], holds, h_note, max_h = 220),
       div(style = "color:#64748b; font-weight:600; font-size:0.85rem; margin-bottom:0.5rem;",
           sprintf("closed - exited over a month ago (%d) · detail in the table below",
@@ -5888,6 +5908,9 @@ server <- function(input, output, session) {
     # the rank slot's realized win rate at THIS horizon (the board's buy gate)
     df$`Bin win %` <- ifelse(df$Ticker %in% names(dv$wpct),
                              as.numeric(dv$wpct[df$Ticker]), NA_real_)
+    # signal persistence over the trailing review window (BUY on n of N runs)
+    rr <- ifelse(is.na(dv$runs_of[df$Ticker]), 0L, dv$runs_of[df$Ticker])
+    df$`Runs (4mo)` <- sprintf("%d/%d", rr, max(1L, dv$runs_tot))
     # qualstream grade column only once grades exist (dormant until then)
     has_qs <- !is.null(d$qs) && nrow(d$qs) > 0 &&
               all(c("ticker", "grade") %in% names(d$qs))
@@ -5922,11 +5945,11 @@ server <- function(input, output, session) {
     }
     keep <- c("Ticker", "State", "Entry", "Source", "Held (d)", "% of horizon",
               "Matures", "Why", "Proven", "Gate today", "Bin win %",
-              if (has_qs) "QS grade", "del_class")
+              "Runs (4mo)", if (has_qs) "QS grade", "del_class")
     df <- df[order(factor(df$State, levels = c("sell", "buy", "hold", "closed")),
                    df$Ticker), keep]
     # 0-based column targets, shifted when the optional QS grade column exists
-    num_t <- c(4, 5, 10, if (has_qs) 11)
+    num_t <- c(4, 5, 10, if (has_qs) 12)
     del_t <- length(keep) - 1L
     DT::datatable(
       df, selection = "none", rownames = FALSE, class = "compact",
