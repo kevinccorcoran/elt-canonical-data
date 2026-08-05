@@ -111,6 +111,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # The dashboard's Staging/Dev env presets point at the host's native
+    # Postgres via host.docker.internal; map it explicitly so the name
+    # resolves regardless of engine defaults.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Resilient launcher: app.R in a restart loop (crash/OOM self-heals) plus a
     # watchdog that restarts it if 3838 stops responding (hang self-heals).
     command: bash /opt/airflow/scripts/shiny_entrypoint.sh
