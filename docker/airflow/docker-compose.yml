@@ -115,15 +115,57 @@ services:
   #     host. A check without --hostname says "Found 2 alive jobs", which is
   #     the HA topology, not a fault.
   #
-  # To decommission the legacy container you must FIRST restore what it uniquely
-  # provides, or the Airflow UI and the violin board simply disappear:
-  #   1. re-add a webserver service (removed above) and a service for
-  #      app_violin.R on 3839;
-  #   2. `docker stop airflow`;
-  #   3. `docker compose up -d --remove-orphans`;
-  #   4. verify 3838, 3839 and 8080 all answer before declaring victory.
-  # Do it in a maintenance window; it is not a cleanup.
+  # DECOMMISSIONED 2026-08-05: the two services below (airflow-webserver and
+  # airflow-violin) restore what the legacy container uniquely provided, so it
+  # was stopped and every role now runs in its own service. It is stopped, NOT
+  # removed -- `docker start airflow` is the rollback, and it will re-seize
+  # 3838/3839/8080 if the compose services are not running. Do not run
+  # `docker compose up --remove-orphans` until you are happy to lose that
+  # rollback. Verified before the swap: the shiny image serves 200 on a spare
+  # port, and its httpuv/later stack (1.6.9/1.3.0) is identical to the legacy
+  # container's, so the swap changed nothing about the segfault-ABI warning the
+  # entrypoint prints -- that predates this and needs an image rebuild.
   # ---------------------------------------------------------------------------
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: bash -c "airflow webserver"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 8 http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    ports:
+      # Loopback-only: reach remotely via SSH tunnel.
+      - "127.0.0.1:8080:8080"
+
+  # Second Shiny board (violin). app_violin.R hardcodes host=0.0.0.0 port=3839,
+  # so unlike app.R it needs no SHINY_PORT and has no watchdog wrapper.
+  airflow-violin:
+    <<: *airflow-common
+    container_name: airflow-violin
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: bash -c "Rscript /opt/airflow/scripts/app_violin.R"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 8 http://localhost:3839/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    ports:
+      # Loopback-only: unauthenticated dashboard. Reach remotely via SSH tunnel.
+      - "127.0.0.1:3839:3839"
 
   airflow-shiny:
     <<: *airflow-common
