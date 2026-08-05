@@ -677,6 +677,59 @@ SELECT p.d::text AS d,
 FROM px p JOIN spy s ON s.d=p.d
 GROUP BY p.d, s.px, s.px0 ORDER BY p.d;", fixed = TRUE)
 
+# Lifecycle qualstream comparison: equal-weight return of the CURRENT BUYs that
+# qualstream graded (latest non-vetoed scorecard) vs the >= 68 subset vs SPY,
+# from the current 4-month window start (__ANCHOR__). DESCRIPTIVE, not a
+# walk-forward test: qualstream's grades are a single as-of snapshot applied
+# across the whole window, and it only covers the curated top-picks (a fraction
+# of the gate's BUYs). Same 68 cut and 150d freshness as the board's orange +.
+LC_QS_COMPARE_SQL <- "
+WITH params AS (SELECT DATE '__ANCHOR__' AS start_d),
+scored AS (
+    SELECT DISTINCT ON (ticker) ticker, overall, veto
+    FROM qual.ticker_scorecards
+    WHERE rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - 150
+    ORDER BY ticker, as_of DESC, graded_at DESC
+),
+graded_buys AS (
+    SELECT b.ticker, (s.overall >= 68) AS passed
+    FROM (SELECT DISTINCT ticker FROM serving.return_cluster_ticker_global_action_current
+          WHERE global_action = 'BUY') b
+    JOIN scored s ON s.ticker = b.ticker AND NOT s.veto
+),
+entry AS (
+    SELECT g.ticker, g.passed,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = g.ticker AND i.date >= (SELECT start_d FROM params)
+       ORDER BY i.date LIMIT 1) AS entry_px
+    FROM graded_buys g
+),
+dates AS (
+    SELECT DISTINCT date AS d FROM cdm.ingest_combined
+    WHERE ticker = 'SPY' AND date >= (SELECT start_d FROM params)
+      AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker = 'SPY')
+),
+px AS (
+    SELECT e.ticker, e.passed, d.d, e.entry_px,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = e.ticker AND i.date <= d.d ORDER BY i.date DESC LIMIT 1) AS px
+    FROM entry e CROSS JOIN dates d
+    WHERE e.entry_px > 0
+),
+spy AS (
+    SELECT d.d,
+      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY' AND date <= d.d ORDER BY date DESC LIMIT 1) AS px,
+      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY' AND date = (SELECT MIN(d) FROM dates)) AS px0
+    FROM dates d
+)
+SELECT p.d::text AS d,
+       ROUND((AVG(p.px / NULLIF(p.entry_px, 0) - 1) * 100)::numeric, 2) AS graded_pct,
+       ROUND((AVG(p.px / NULLIF(p.entry_px, 0) - 1) FILTER (WHERE p.passed) * 100)::numeric, 2) AS passed_pct,
+       ROUND(((s.px / s.px0) - 1)::numeric * 100, 2) AS spy_pct
+FROM px p JOIN spy s ON s.d = p.d
+GROUP BY p.d, s.px, s.px0
+ORDER BY p.d;"
+
 # Risk-adjustment series: the EQUAL-WEIGHT buy-and-hold basket value (=$1 -> avg
 # of price/entry over the picks) and SPY value, monthly, over the hold window.
 # Equal-weight-hold (not DCA) so month-over-month ratios are pure time-weighted
@@ -1284,6 +1337,8 @@ ui <- navbarPage(
       )),
       mainPanel(div(class = "main-card",
         uiOutput("boardLC"),
+        plotlyOutput("qsCompareLC", height = "320px"),
+        uiOutput("qsCompareNoteLC"),
         tags$hr(style = "border-color:#1e293b; margin:1.1rem 0 0.8rem;"),
         tags$div(style = "color:#94a3b8; font-size:0.8rem; margin-bottom:0.5rem;",
                  paste("Same companies with detail: entry, days held, % of horizon, why.",
@@ -5668,9 +5723,20 @@ server <- function(input, output, session) {
           AND as_of >= CURRENT_DATE - 150
         ORDER BY ticker, as_of DESC, graded_at DESC"),
         error = function(e) NULL)
+      # descriptive qualstream comparison series (LC_QS_COMPARE_SQL): current
+      # BUYs qualstream graded vs the >= 68 subset vs SPY, equal-weight from the
+      # current 4-month window start = the last Jan/May/Sep checkpoint.
+      ck_all <- as.Date(sprintf("%d-%02d-01",
+                  rep(as.integer(format(Sys.Date(), "%Y")) + c(-1, 0, 1), each = 3),
+                  c(1, 5, 9)))
+      qs_anchor <- max(ck_all[ck_all <= Sys.Date()])
+      qscmp <- tryCatch(coerce_numeric_cols(
+        dbGetQuery(con, gsub("__ANCHOR__", format(qs_anchor, "%Y-%m-%d"),
+                             LC_QS_COMPARE_SQL, fixed = TRUE)),
+        c("graded_pct", "passed_pct", "spy_pct")), error = function(e) NULL)
       ids_seenLC(FALSE)   # id checkboxes re-render fresh with the new universe
       app_dataLC(list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
-                      qs = qs))
+                      qs = qs, qscmp = qscmp, qscmp_anchor = qs_anchor))
       status_msgLC(sprintf(
         "Loaded - %d proven cohort picks across %d quarterly cutoffs + %d live series across %d snapshots.",
         if (is.null(coh)) 0L else nrow(coh),
@@ -6059,6 +6125,68 @@ server <- function(input, output, session) {
           sprintf("closed - exited over a month ago (%d) · detail in the table below",
                   length(closed)))
     )
+  })
+
+  # Does the qualstream marking help? Equal-weight return of the current BUYs
+  # qualstream graded vs the >= 68 (orange +) subset vs SPY, over the current
+  # 4-month window. Descriptive only: see the caption + LC_QS_COMPARE_SQL.
+  output$qsCompareLC <- renderPlotly({
+    req(app_dataLC())
+    d <- app_dataLC(); cmp <- d$qscmp
+    if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
+      return(empty_plot("No qualstream-graded buys in range - run qualstream to populate this."))
+    cmp$d <- as.Date(cmp$d)
+    buys_gate <- unique(d$gate$ticker[d$gate$gate_today == "BUY"])
+    qs_g <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
+    n_g  <- if (!is.null(d$qs)) length(intersect(d$qs$ticker, buys_gate)) else 0L
+    n_p  <- if (!is.null(d$qs)) length(intersect(d$qs$ticker[qs_g >= 68], buys_gate)) else 0L
+    has_pass <- any(!is.na(cmp$passed_pct))
+    fig <- plot_ly()
+    fig <- add_trace(fig, x = cmp$d, y = cmp$spy_pct, type = "scatter", mode = "lines",
+      name = "Benchmark (SPY)", line = list(color = "#3b82f6", width = 2.5),
+      hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    fig <- add_trace(fig, x = cmp$d, y = cmp$graded_pct, type = "scatter", mode = "lines",
+      name = sprintf("Graded buys (%d)", n_g), line = list(color = "#f59e0b", width = 3),
+      hovertemplate = "Graded buys<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    if (has_pass)
+      fig <- add_trace(fig, x = cmp$d, y = cmp$passed_pct, type = "scatter", mode = "lines",
+        name = sprintf("Passed qualstream ≥ 68 (%d)", n_p),
+        line = list(color = "#10b981", width = 3),
+        hovertemplate = "Passed ≥68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    dark_layout(fig,
+      title = list(text = sprintf(
+          "Does the qualstream marking help? Current buys vs benchmark (from %s, descriptive)",
+          format(d$qscmp_anchor, "%b %d")),
+        font = list(color = "#f8fafc", size = 13), x = 0.5),
+      xaxis = list(title = "", color = "#cbd5e1", type = "date",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
+      yaxis = list(title = "Equal-weight return (%)", color = "#cbd5e1",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
+                   zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%"),
+      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.2),
+      hovermode = "x unified", margin = list(l = 60, r = 20, t = 44, b = 40))
+  })
+
+  # Honesty caption: the comparison is a single-grade-run snapshot with partial
+  # coverage, so it describes this batch, it does not validate qualstream.
+  output$qsCompareNoteLC <- renderUI({
+    req(app_dataLC())
+    d <- app_dataLC()
+    if (is.null(d$qscmp) || nrow(d$qscmp) == 0 || all(is.na(d$qscmp$graded_pct))) return(NULL)
+    buys_gate <- unique(d$gate$ticker[d$gate$gate_today == "BUY"])
+    qs_g  <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
+    n_all <- length(buys_gate)
+    n_g   <- if (!is.null(d$qs)) length(intersect(d$qs$ticker, buys_gate)) else 0L
+    n_p   <- if (!is.null(d$qs)) length(intersect(d$qs$ticker[qs_g >= 68], buys_gate)) else 0L
+    qs_ran <- if (!is.null(d$qs) && nrow(d$qs) > 0 && "as_of" %in% names(d$qs))
+                suppressWarnings(max(as.Date(d$qs$as_of))) else as.Date(NA)
+    div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
+      sprintf(paste("Descriptive, not a walk-forward test: qualstream has a single grade run",
+                    "(as of %s) applied across the whole window. Coverage is partial - of %d current",
+                    "BUYs it graded %d, of which %d passed >= 68. Both baskets are equal-weight, held",
+                    "from %s (the current 4-month buy window). One retroactive grade set cannot yet",
+                    "prove qualstream adds return; that needs several cadence cycles of point-in-time grades."),
+              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_all, n_g, n_p, format(d$qscmp_anchor)))
   })
 
   # The full record: every company the model ever entered (cohort or ledger)
