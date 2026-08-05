@@ -49,7 +49,7 @@ with Diagram("AlphaStream Deployment Topology", filename=out, show=False,
                      graph_attr={"bgcolor": "#E8F5E9", "pencolor": "#2E7D32", "penwidth": "1.8"}):
             web = Airflow("airflow-webserver\n:8080")
             sched = Airflow("airflow-scheduler\n(ingest + dbt)")
-            shiny = R("airflow-shiny\n:3838 / :3839")
+            shiny = R("airflow-shiny\n:3838")
 
         pg = DbaasPrimary("Managed PostgreSQL\n:25060  ·  SSL")
 

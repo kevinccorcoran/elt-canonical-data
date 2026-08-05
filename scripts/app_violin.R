@@ -1,3 +1,9 @@
+# RETIRED (2026-08-05): this standalone violin dashboard (port 3839) is no longer
+# launched by scripts/shiny_entrypoint.sh and 3839 is no longer published in
+# docker/airflow/docker-compose.yml. Its views were folded into scripts/app.R.
+# Kept for reference only; do not wire it back into the entrypoint without also
+# republishing the port.
+
 library(shiny)
 library(DBI)
 library(RPostgres)
