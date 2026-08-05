@@ -1413,7 +1413,7 @@ server <- function(input, output, session) {
   # tab's own Connect logic also listens to input$connect_btn, so one click sets
   # up all tabs. Enter the password once.
   setup_env_switcher(input, session)
-  status_msgConn <- reactiveVal("Not connected.")
+  status_msgConn <- reactiveVal("Ready. Pick an environment and click Connect (top right).")
   output$statusMessageConn <- renderText({ status_msgConn() })
   observeEvent(input$connect_btn, {
     if (input$db_pass == "") { status_msgConn("Enter the password, then Connect."); return() }
@@ -1425,7 +1425,9 @@ server <- function(input, output, session) {
       status_msgConn(sprintf("Connected to %s (%s@%s/%s). Now Generate on any tab.",
                              input$db_env, input$db_user, input$db_host, cfg$dbname))
     }, error = function(e) status_msgConn(paste("Connection failed:", e$message)))
-  }, priority = 100)   # runs before the per-tab setup observers
+    # ignoreInit: do NOT fire on page load (before the password auto-populates),
+    # otherwise the empty-password guard leaves a misleading status on screen.
+  }, priority = 100, ignoreInit = TRUE)
 
   # ── TRANSITION: Reactive values ──
   app_dataT <- reactiveVal(NULL)
