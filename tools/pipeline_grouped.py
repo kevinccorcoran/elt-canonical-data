@@ -12,6 +12,9 @@ import os
 #   elt-inference-models  features + clustering (both off cdm, in parallel)
 #                         -> scoring -> serving,  plus validation (walk-forward)
 #                         and monitoring (prediction ledger).
+#   qualstream            qual = LLM scorecards; grades the clustered tickers
+#                         (one Claude call each) and feeds serving. Decoupled
+#                         repo, shares only Postgres.
 #   analysis  = python-produced clustering intermediate (folded into CLUSTERING)
 #   monitoring = served-call ledger (folded into SERVING)
 # ---------------------------------------------------------------------
@@ -59,6 +62,17 @@ STAGES = [
         ("Per-ticker signal summary", "one verdict per stock"),
         ("Buy / sell recommendations", "final calls"),
     ]),
+    ("qual", "QUALITATIVE GRADING", "qual", "#EDE7F6", "#5E35B1", "qualstream", "Grade each pick (LLM)", [
+        ("Business quality  ·  25%", "core weight of the score"),
+        ("Moat  ·  20%", "durability of the advantage"),
+        ("Valuation  ·  20%", "price vs intrinsic worth"),
+        ("Management  ·  15%", "quality of stewardship"),
+        ("Industry structure  ·  10%", "the operating environment"),
+        ("Investor lenses  ·  10%", "avg of Buffett, Graham, Fisher, Lynch, Klarman"),
+        ("Survival gate", "caps overall if score &lt; 40"),
+        ("Veto", "any red flag caps overall at 25"),
+        ("Overall = weighted sum  ·  0-100", "deterministic in code, backtestable"),
+    ]),
     ("validation", "MODEL VALIDATION", "validation", "#FFF3E0", "#EF6C00", "elt-inference-models", "Backtest on history", [
         ("Walk-forward out-of-sample test", "tested on unseen data"),
         ("Directional accuracy (sign agreement)", "how often direction was right"),
@@ -78,6 +92,7 @@ STAGES = [
 ML_TAGS = {
     "clustering": "MACHINE LEARNING  ·  unsupervised",
     "scoring": "MACHINE LEARNING  ·  forecasting model",
+    "qual": "LLM  ·  qualitative grader",
 }
 
 
@@ -140,6 +155,11 @@ g.edge("clustering", "scoring")
 
 # scoring -> serving (the served rollup the dashboard reads)
 g.edge("scoring", "serving")
+
+# Qualitative track: qualstream grades the clustered tickers with an LLM and
+# feeds its scorecards into serving (the dashboard reads qual directly).
+g.edge("clustering", "qual")
+g.edge("qual", "serving")
 
 # Model-validation loop: scoring is backtested, credibility feeds back into scoring
 g.edge("scoring", "validation", label="validate")

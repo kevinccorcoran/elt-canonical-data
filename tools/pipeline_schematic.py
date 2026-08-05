@@ -3,9 +3,10 @@
 A faithful digital reproduction of the hand sketch (distinct from
 pipeline_grouped.py, the concrete schema-by-schema pipeline):
 
-    Start -> three parallel DATA STREAMS -> a STAGE-1 box of per-stream
-    quality-gate funnels -> a STAGE-2 box where the streams merge -> two
-    planned live gates that cross into a LIVE finish line at two endpoints.
+    Start -> four parallel DATA STREAMS (three quantitative + qualstream,
+    the qualitative signal) -> a STAGE-1 box of per-stream quality-gate
+    funnels -> a STAGE-2 box where the streams merge -> two planned live
+    gates that cross into a LIVE finish line at two endpoints.
 
 The funnels are drawn exactly as sketched: NO gradient. Each is a wide-left ->
 pointed-right silhouette split into three discrete colour BANDS -- a green
@@ -48,9 +49,11 @@ PAPER  = "#ffffff"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # per-funnel section styles (green, orange, red) as read from the sketch
-FA = [(GREEN, "solid"),  (AMBER, "solid"),  (RED, "solid")]    # box1 top    (done)
-FB = [(GREEN, "hatch"),  (AMBER, "solid"),  (RED, "solid")]    # box1 mid
-FC = [(GREEN, "dotted"), (AMBER, "hatch"),  (RED, "solid")]    # box1 bottom
+FA = [(GREEN, "solid"),  (AMBER, "solid"),  (RED, "solid")]    # box1 lane 1 (done)
+FB = [(GREEN, "hatch"),  (AMBER, "solid"),  (RED, "solid")]    # box1 lane 2
+FC = [(GREEN, "dotted"), (AMBER, "hatch"),  (RED, "solid")]    # box1 lane 3
+FQ = [(GREEN, "dotted"), (AMBER, "dotted"), (RED, "solid")]    # box1 lane 4: qualstream —
+                                                                # model delivered, opt+testing planned
 FD = [(GREEN, "dotted"), (AMBER, "hatch"),  (RED, "hatch")]    # box2 upper
 FE = [(GREEN, "dotted"), (AMBER, "dotted"), (RED, "dotted")]   # box2 lower  (planned)
 PG = [(RED,   "dotted")]                                        # small live gates
@@ -113,21 +116,25 @@ def build(ax):
             fontsize=10.5, color=MUTED, va="top")
     ax.plot([0.3, 15.7], [9.02, 9.02], color="#d9dee6", lw=1.1)
 
-    yT, yM, yB = 6.7, 4.7, 2.7            # three stream lanes (even 2.0 pitch)
+    y1, y2, y3, y4 = 6.95, 5.40, 3.85, 2.30   # four stream lanes (1.55 pitch)
+    yC = (y1 + y4) / 2                         # visual centre of the lanes
 
     # ── Start ──
-    ax.add_patch(Ellipse((1.25, yM), 1.6, 1.05, facecolor=PAPER,
+    ax.add_patch(Ellipse((1.25, yC), 1.6, 1.05, facecolor=PAPER,
                          edgecolor=INK, linewidth=2, zorder=4))
-    ax.text(1.25, yM, "Start", ha="center", va="center",
+    ax.text(1.25, yC, "Start", ha="center", va="center",
             fontsize=12, fontweight="bold", color=INK, zorder=5)
 
-    # ── Data Streams axis (spans just the three stream nodes) ──
-    ax.plot([2.9, 2.9], [yB - 0.45, yT + 0.45], color=MUTED, lw=1.3,
+    # ── Data Streams axis (spans just the four stream nodes) ──
+    ax.plot([2.9, 2.9], [y4 - 0.45, y1 + 0.45], color=MUTED, lw=1.3,
             ls=(0, (1, 4)), zorder=1)
-    ax.text(2.9, yT + 0.62, "DATA STREAMS", ha="center", va="bottom",
+    ax.text(2.9, y1 + 0.62, "DATA STREAMS", ha="center", va="bottom",
             fontsize=11, color=INK, family="monospace")
-    for y in (yT, yM, yB):
+    for y in (y1, y2, y3, y4):
         ax.add_patch(Circle((2.9, y), 0.12, color=INK, zorder=4))
+    # the newly added qualitative stream gets a name; the others stay abstract
+    ax.text(2.62, y4, "qualstream", ha="right", va="center", fontsize=8,
+            color=MUTED, family="monospace")
 
     # ── Docker container: the whole pipeline + deliverables run containerized ──
     ax.add_patch(Rectangle((3.5, 0.3), 10.6, 8.1, facecolor="none",
@@ -142,22 +149,23 @@ def build(ax):
     ax.text(3.98, 7.9, "TECH LEAD · dbt architecture", fontsize=9,
             color=INK, family="monospace", va="top")
 
-    # ── Stage 1: three per-stream funnels ──
-    fw, fh, x1 = 2.05, 1.5, 4.35
-    funnel(ax, x1, yT, fw, fh, FA)
-    funnel(ax, x1, yM, fw, fh, FB)
-    funnel(ax, x1, yB, fw, fh, FC)
+    # ── Stage 1: four per-stream funnels ──
+    fw, fh, x1 = 2.05, 1.2, 4.35
+    funnel(ax, x1, y1, fw, fh, FA)
+    funnel(ax, x1, y2, fw, fh, FB)
+    funnel(ax, x1, y3, fw, fh, FC)
+    funnel(ax, x1, y4, fw, fh, FQ)
 
     # ── Stage 2: two merged funnels ──
-    yU, yL = 5.7, 3.7
+    yU, yL = 6.1, 3.1
     fw2, fh2, x2 = 1.8, 1.4, 8.9
     funnel(ax, x2, yU, fw2, fh2, FD)
     funnel(ax, x2, yL, fw2, fh2, FE)
 
     # stage captions: make the 1 -> 2 progression explicit (quiet, muted)
-    ax.text(5.4, 1.68, "1 · per-stream models", fontsize=8, color=MUTED,
+    ax.text(5.4, 1.58, "1 · per-stream models", fontsize=8, color=MUTED,
             ha="center", va="center", family="monospace")
-    ax.text(9.8, 2.62, "2 · consolidated models", fontsize=8, color=MUTED,
+    ax.text(9.8, 2.25, "2 · consolidated models", fontsize=8, color=MUTED,
             ha="center", va="center", family="monospace")
 
     # ── Pre-finish live gates: small red, ~size of a funnel's red tip ──
@@ -174,19 +182,20 @@ def build(ax):
     ax.plot([xF, xF], [2.2, 7.2], color=ACCENT, lw=3, zorder=2)
     for y in (yTg, yBg):
         ax.add_patch(Circle((xF, y), 0.12, color=ACCENT, zorder=4))
-    ax.text(xF + 0.45, yM, "Finish · Live", rotation=90, ha="left",
+    ax.text(xF + 0.45, yC, "Finish · Live", rotation=90, ha="left",
             va="center", fontsize=12, color=ACCENT, family="monospace",
             fontweight="bold")
 
     # ── flow ──
-    for y, r in ((yT, -0.06), (yM, 0.0), (yB, 0.06)):
-        arrow(ax, (2.05, yM), (2.78, y), rad=r)
-    for y in (yT, yM, yB):
+    for y, r in ((y1, -0.07), (y2, -0.025), (y3, 0.025), (y4, 0.07)):
+        arrow(ax, (2.05, yC), (2.78, y), rad=r)
+    for y in (y1, y2, y3, y4):
         arrow(ax, (3.02, y), (x1 - 0.03, y))
-    # stage 1 tips -> stage 2 (top+mid merge into upper; bottom -> lower)
-    arrow(ax, (x1 + fw, yT), (x2 - 0.03, yU), rad=-0.05)
-    arrow(ax, (x1 + fw, yM), (x2 - 0.03, yU), rad=0.05)
-    arrow(ax, (x1 + fw, yB), (x2 - 0.03, yL), rad=0.05)
+    # stage 1 tips -> stage 2 (lanes 1+2 merge into upper; 3+qual -> lower)
+    arrow(ax, (x1 + fw, y1), (x2 - 0.03, yU), rad=-0.05)
+    arrow(ax, (x1 + fw, y2), (x2 - 0.03, yU), rad=0.05)
+    arrow(ax, (x1 + fw, y3), (x2 - 0.03, yL), rad=-0.05)
+    arrow(ax, (x1 + fw, y4), (x2 - 0.03, yL), rad=0.05)
     # stage 2 -> live gates: many-to-many (each model feeds each endpoint)
     for ys in (yU, yL):
         for yg in (yTg, yBg):
