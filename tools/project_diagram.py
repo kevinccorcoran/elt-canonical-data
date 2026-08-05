@@ -15,6 +15,10 @@ import os
 #                                      -> serving, plus validation
 #                                      (walk-forward) and monitoring
 #                                      (prediction ledger).
+#   Qualitative (qualstream):          qual scorecards, one forced-tool Claude
+#                                      call per ticker, read straight by the
+#                                      dashboard. Decoupled: shared Postgres is
+#                                      the only integration.
 # Airflow orchestrates; walk-forward validation feeds credibility back into
 # the serving rollup.
 # ---------------------------------------------------------------------
@@ -47,7 +51,7 @@ edge_cfg = {
     "feedback": {"color": "#EF6C00", "style": "dashed"},
 }
 
-out_name = os.environ.get("DIAGRAM_OUTPUT", "alphastream_system_architecture")
+out_name = os.environ.get("DIAGRAM_OUTPUT", "tools/alphastream_system_architecture")
 
 with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
              direction="LR", graph_attr=graph_attr, node_attr=node_attr):
@@ -57,6 +61,11 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
         massive = InternetAlt1("Massive Data API")
         yfinance = InternetAlt1("Yahoo Finance API")
         delisted = InternetAlt1("Polygon Delisted\n(Flat Files)")
+
+    # LLM grader (external Anthropic API) — qualstream's only non-Postgres
+    # dependency; kept in its own cluster so External APIs stays compact.
+    with Cluster("LLM  ·  Anthropic", graph_attr={"bgcolor": "white", "pencolor": "#5E35B1", "style": "dashed"}):
+        claude = InternetAlt1("Claude API\n(qual grading)")
 
     with Cluster("DigitalOcean Production (Docker)", graph_attr={"bgcolor": "#E1F5FE", "pencolor": "#0288D1", "penwidth": "2.0"}):
 
@@ -84,6 +93,10 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
             # Validation schema (holds the walk-forward backtest output)
             with Cluster("Validation (walk-forward)", graph_attr={"bgcolor": "#FFF3E0", "pencolor": "#EF6C00", "penwidth": "2.0"}):
                 validation = DbaasPrimary("validation")
+
+            # Qualitative schema (qualstream's LLM scorecards; decoupled repo)
+            with Cluster("Qualitative  |  qualstream", graph_attr={"bgcolor": "#EDE7F6", "pencolor": "#5E35B1", "penwidth": "2.0"}):
+                qual = DbaasPrimary("qual")
 
         # Dashboard app (reads the serving + monitoring schemas)
         with Cluster("Dashboard", graph_attr={"bgcolor": "#F3E5F5", "pencolor": "#7B1FA2", "penwidth": "2.0"}):
@@ -130,9 +143,16 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
     # Validate: scoring is backtested into the validation schema
     scoring >> Edge(**edge_cfg["transform"], label="Backtest") >> validation
 
+    # Qualitative: qualstream resolves cluster tickers, grades each with one
+    # forced-tool Claude call, and writes qual.ticker_scorecards. The dashboard
+    # reads that table directly (shared Postgres is the only integration).
+    analysis >> Edge(**edge_cfg["transform"], label="Tickers") >> qual
+    claude >> Edge(**edge_cfg["ingest"], label="LLM grade") >> qual
+
     # Serve
     serving >> Edge(**edge_cfg["serve"], label="Serve") >> dashboard
     monitoring >> Edge(**edge_cfg["serve"]) >> dashboard
+    qual >> Edge(**edge_cfg["serve"], label="Qual grades") >> dashboard
     dashboard >> Edge(**edge_cfg["serve"], label="Explore") >> analysts
 
     # Feedback: walk-forward credibility gates the serving rollup

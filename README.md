@@ -1,8 +1,8 @@
 # AlphaStream
 
-![Architecture Diagram](tools/alphastream_system_architecture.png?v=4)
+![Architecture Diagram](tools/alphastream_system_architecture.png?v=5)
 
-AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans and standardizes it, then uses unsupervised clustering and statistical scoring to rank groups, checked against later periods it did not use. An interactive dashboard sits on top.
+AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans and standardizes it, then uses unsupervised clustering and statistical scoring to rank groups, checked against later periods it did not use. A separate LLM layer grades each pick against a weighted qualitative rubric. An interactive dashboard sits on top.
 
 Over 2012–2024, the model's picks beat the benchmark by about 8 percentage points a year on average.
 
@@ -12,7 +12,7 @@ AlphaStream is organized into three repositories:
 
 - **`elt-canonical-data`** (this repo, public) — the data layer. Ingestion, raw storage, cleaned canonical tables, and shared infrastructure and documentation.
 - **`inference-models`** (private) — the modeling layer: unsupervised clustering, statistical scoring, walk-forward validation, and serving tables that sit on top of the canonical tables.
-- **`qualstream`** (private, not yet integrated, ETA mid-August 2026) — a standalone agent that grades each group member qualitatively via the Claude API with Anthropic's web-search tool, refreshed every 3 months.
+- **`qualstream`** (private, newly integrated) — a standalone agent that grades each group member qualitatively with one Claude call per pick, judged only from a point-in-time data block (no web search, so every grade is reproducible and backtestable), refreshed every 4 months.
 
 ## Environments
 
@@ -21,9 +21,9 @@ AlphaStream is organized into three repositories:
 
 ## Pipeline
 
-![Pipeline](tools/pipeline_grouped.png?v=2)
+![Pipeline](tools/pipeline_grouped.png?v=3)
 
-The end-to-end flow grouped by stage, each box labeled with the database schema it lands in. Data is pulled in, screened for quality, and standardized into a canonical layer, then split into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, validated before it reaches the dashboard. The machine-learning stages are flagged in the diagram.
+The end-to-end flow grouped by stage, each box labeled with the database schema it lands in. Data is pulled in, screened for quality, and standardized into a canonical layer, then split into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, validated before it reaches the dashboard. A parallel qualitative grading stage (qualstream) scores each pick against a weighted rubric with a single LLM call, feeding the same dashboard. The machine-learning and LLM stages are flagged in the diagram.
 
 ## Data Lineage
 
@@ -126,10 +126,11 @@ Supports:
 - Built a backtest replay, scoring every pick against the benchmark
 - Added a live out-of-sample log, grading each published pick as prices arrive
 - Gated forecasts to the rank ranges with proven edge
+- Integrated qualstream, a qualitative LLM grade on each selection
 
 **Upcoming**
 - Build a decision board for today's keep-or-drop calls on active selections
-- Integrate qualstream for a qualitative read on each selection
+- Optimize and test the qualstream grading layer
 - Audit the design against a structured set of decision principles
 
 ---
