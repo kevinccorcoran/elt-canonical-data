@@ -300,17 +300,57 @@ hr {
 .caveat-warning { border-left: 2px solid #f59e0b; }
 "
 
+# ─── Single source of truth for DB endpoints ───
+# Every environment's host/port/user/dbname/sslmode lives here and NOWHERE else
+# (previously duplicated across widget defaults, the get_con dbname map, the
+# sslmode host-regex, and the env-switcher). Env vars override each value so the
+# same code serves local dev and the prod server without editing this table;
+# `pass_env` names the env var the password field is seeded from.
+DB_ENVIRONMENTS <- list(
+  Production = list(host = Sys.getenv("PROD_DB_HOST", ""),
+                    port = Sys.getenv("PROD_DB_PORT", "25060"),
+                    user = Sys.getenv("PROD_DB_USER", "doadmin"),
+                    dbname = Sys.getenv("PROD_DB_NAME", "prod"),
+                    sslmode = "require", pass_env = "PROD_DB_PASSWORD"),
+  Staging    = list(host = Sys.getenv("LOCAL_DB_HOST", "host.docker.internal"),
+                    port = Sys.getenv("LOCAL_DB_PORT", "5432"),
+                    user = Sys.getenv("LOCAL_DB_USER", "postgres"),
+                    dbname = "staging", sslmode = "prefer", pass_env = "DB_PASSWORD"),
+  Dev        = list(host = Sys.getenv("LOCAL_DB_HOST", "host.docker.internal"),
+                    port = Sys.getenv("LOCAL_DB_PORT", "5432"),
+                    user = Sys.getenv("LOCAL_DB_USER", "postgres"),
+                    dbname = "dev", sslmode = "prefer", pass_env = "DB_PASSWORD"))
+DB_ENV_DEFAULT <- "Production"
+
+# ─── Helper: the ONE shared connection bar (rendered once in the navbar header) ───
+# Replaces the old per-tab connection forms: pick env, type the password once,
+# click Connect once, and every tab reads these global inputs.
+connection_bar <- function() {
+  d <- DB_ENVIRONMENTS[[DB_ENV_DEFAULT]]
+  div(class = "conn-bar",
+      style = paste("display:flex; flex-wrap:wrap; align-items:flex-end; gap:0.6rem;",
+                    "padding:0.6rem 0.9rem; margin:0 0 0.5rem; background:rgba(255,255,255,0.03);",
+                    "border:1px solid #1e293b; border-radius:6px;"),
+    div(style = "min-width:130px;",
+        selectInput("db_env", "Environment",
+                    choices = names(DB_ENVIRONMENTS), selected = DB_ENV_DEFAULT, width = "100%")),
+    div(style = "min-width:210px; flex:1 1 210px;",
+        textInput("db_host", "Host", value = d$host, width = "100%")),
+    div(style = "width:90px;",  numericInput("db_port", "Port", value = as.integer(d$port), min = 1, max = 65535, width = "100%")),
+    div(style = "width:120px;", textInput("db_user", "User", value = d$user, width = "100%")),
+    div(style = "min-width:150px;", passwordInput("db_pass", "Password", value = "", width = "100%")),
+    div(actionButton("connect_btn", "Connect", class = "btn-primary")),
+    div(style = "flex:1 1 200px; color:#94a3b8; font-size:0.8rem; padding-bottom:0.4rem;",
+        textOutput("statusMessageConn", inline = TRUE)))
+}
+
 # ─── Helper: sidebar panel for a given tab suffix ───
+# Connection widgets now live in the shared connection_bar(); the sidebar holds
+# only this tab's filters, its Generate button, optional post-Generate refiners,
+# and its own load-status line.
 make_sidebar <- function(suffix, title, filter_widgets, post_widgets = NULL) {
   sidebarPanel(
     h4(title),
-    selectInput(paste0("db_env", suffix), "Environment", choices = c("Production", "Staging", "Dev"), selected = "Production"),
-    textInput(paste0("db_host", suffix), "Host", value = "host.docker.internal"),
-    textInput(paste0("db_port", suffix), "Port", value = "5432"),
-    textInput(paste0("db_user", suffix), "User", value = "postgres"),
-    passwordInput(paste0("db_pass", suffix), "Password", value = ""),
-    actionButton(paste0("connect_btn", suffix), "Connect", class = "btn-primary"),
-    hr(),
     h5("Filters"),
     div(id = paste0("filter_panel", suffix), filter_widgets),
     hr(),
@@ -627,6 +667,8 @@ FROM vdates v JOIN bv ON bv.d=v.d GROUP BY v.d ORDER BY v.d;"
 # ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
+  # the ONE shared connection, rendered on every tab above its content
+  header = connection_bar(),
   tags$head(
     tags$style(HTML(custom_css)),
     # Auto-heal Shiny's grey disconnect overlay. Forced reconnect stays OFF
@@ -656,7 +698,7 @@ ui <- navbarPage(
   # ── Tab 1: Transition Range ──
   tabPanel("Transition Range",
     sidebarLayout(
-      make_sidebar("T", "Database Connection (Transition)", tagList(
+      make_sidebar("T", "Transition", tagList(
         selectInput("id_valT", "ID", choices = c("Connect first..." = ""), selected = ""),
         selectInput("past_fib_lagT", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
         selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = ""),
@@ -730,7 +772,7 @@ ui <- navbarPage(
   # ── Tab 3: Data QA ──
   tabPanel("Data QA",
     sidebarLayout(
-      make_sidebar("Q", "Database Connection (Data QA)", tagList(
+      make_sidebar("Q", "Data QA", tagList(
         tags$div(
           style = "padding: 0.75rem; background: rgba(255,255,255,0.03);
                    border-left: 2px solid #64748b; border-radius: 4px;
@@ -831,7 +873,7 @@ ui <- navbarPage(
   # ── Tab 4: Ticker Coverage ──
   tabPanel("Coverage",
     sidebarLayout(
-      make_sidebar("V", "Database Connection (Coverage)", tagList(
+      make_sidebar("V", "Coverage", tagList(
         tags$div(
           style = "padding: 0.75rem; background: rgba(255,255,255,0.03);
                    border-left: 2px solid #64748b; border-radius: 4px;
@@ -852,7 +894,7 @@ ui <- navbarPage(
   # ── Tab: Clusters ──
   tabPanel("Clusters",
     sidebarLayout(
-      make_sidebar("K", "Database Connection (Clusters)", tagList()),
+      make_sidebar("K", "Clusters", tagList()),
       mainPanel(div(class = "main-card",
         h4("Per-series scatter",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
@@ -870,7 +912,7 @@ ui <- navbarPage(
   # ── Tab: Top Picks ──
   tabPanel("Shortlist",
     sidebarLayout(
-      make_sidebar("P", "Database Connection (Top Picks)", tagList(
+      make_sidebar("P", "Top Picks", tagList(
         selectInput("id_valP", "Cluster ID", choices = c("Connect first..." = ""), selected = ""),
         sliderInput("top_n_valP", "Top N tickers", min = 5, max = 400, value = 30, step = 5)
       )),
@@ -904,7 +946,7 @@ ui <- navbarPage(
   # ── Tab: Rank Stability ──
   tabPanel("Rank Stability",
     sidebarLayout(
-      make_sidebar("RS", "Database Connection (Rank Stability)", tagList(
+      make_sidebar("RS", "Rank Stability", tagList(
         selectInput("id_valRS", "Cluster ID",
                     choices = c("Connect first..." = ""), selected = ""),
         sliderInput("top_n_valRS", "Max vingtile to display (1 = top 5%, 20 = bottom 5%)",
@@ -970,7 +1012,7 @@ ui <- navbarPage(
   # ── Tab 8: Model Validation ──
   tabPanel("Model Validation",
     sidebarLayout(
-      make_sidebar("MV", "Database Connection (Model Validation)", tagList(
+      make_sidebar("MV", "Model Validation", tagList(
         selectInput("id_valMV", "Cluster ID",
                     choices = c("Connect first..." = ""), selected = ""),
         selectInput("past_lagMV", "Past lag (Wilson forest)",
@@ -1016,7 +1058,7 @@ ui <- navbarPage(
   # ── Tab 9: Buy List ──
   tabPanel("Predictions",
     sidebarLayout(
-      make_sidebar("BL", "Database Connection (Buy List)", tagList(
+      make_sidebar("BL", "Buy List", tagList(
         radioButtons("date_modeBL", "As-of",
           choiceNames = list(
             tagList("Today (live)",
@@ -1132,7 +1174,7 @@ ui <- navbarPage(
   # ── Tab: Forecast (backtest growth curve vs live ledger) ──
   tabPanel("Forecast",
     sidebarLayout(
-      make_sidebar("FC", "Database Connection (Forecast)", tagList(
+      make_sidebar("FC", "Forecast", tagList(
         tags$label("As-of date (stand here in the past)", style = "color: #94a3b8; font-weight: 600;"),
         tags$style(HTML(".shiny-split-layout > div { overflow: visible; }")),
         splitLayout(cellWidths = c("30%", "38%", "32%"),
@@ -1179,7 +1221,7 @@ ui <- navbarPage(
   # ── Tab: Lifecycle (buy/hold/sell transition grid of points: before -> now) ──
   tabPanel("Lifecycle",
     sidebarLayout(
-      make_sidebar("LC", "Database Connection (Lifecycle)", tagList(
+      make_sidebar("LC", "Lifecycle", tagList(
         selectInput("holdLC", "Hold length (model horizons)",
                     choices = c("1 month" = "1", "2 months" = "2", "4 months" = "4",
                                 "7 months" = "7", "12 months" = "12",
@@ -1221,9 +1263,25 @@ ui <- navbarPage(
 )
 
 # ─── Helper: create a DB connection ───
-get_con <- function(input, suffix) {
-  env   <- input[[paste0("db_env", suffix)]]
-  db_string <- if (env == "Production") "prod" else if (env == "Staging") "staging" else "dev"
+# One shared connection: reads the global connection_bar() inputs (no per-tab
+# suffix). dbname + sslmode come from DB_ENVIRONMENTS keyed by the selected
+# environment; host/port/user still come from the fields so a manual override
+# survives.
+get_con <- function(input) {
+  env <- input$db_env
+  cfg <- DB_ENVIRONMENTS[[env]]
+  if (is.null(cfg)) stop(sprintf("Unknown environment '%s'.", env))
+
+  host_val <- input$db_host
+  port_val <- suppressWarnings(as.integer(input$db_port))
+  if (is.na(port_val)) stop("Port must be a number (e.g. 25060 for prod, 5432 for local).")
+  # sslmode from config; upgrade prefer->require if the host is non-loopback so a
+  # remote host typed under a local preset still gets TLS.
+  ssl_mode <- cfg$sslmode
+  if (ssl_mode == "prefer" &&
+      !grepl("^(host\\.docker\\.internal|localhost|127\\.0\\.0\\.1)$", host_val)) {
+    ssl_mode <- "require"
+  }
 
   # In-container DNS hiccups surface as "could not translate host name ...
   # Temporary failure in name resolution" (EAI_AGAIN). They are transient, so
@@ -1232,18 +1290,14 @@ get_con <- function(input, suffix) {
   transient <- "name resolution|translate host name|EAI_AGAIN|could not connect|server closed the connection|connection timed out"
   attempts  <- 3
   con <- NULL
-  # Enforce TLS for remote (managed) DBs; loopback dev/staging containers do not
-  # serve SSL, so fall back to 'prefer' only for local hosts.
-  host_val  <- input[[paste0("db_host", suffix)]]
-  ssl_mode  <- if (grepl("^(host\\.docker\\.internal|localhost|127\\.0\\.0\\.1)$", host_val)) "prefer" else "require"
   for (i in seq_len(attempts)) {
     con <- tryCatch(
       dbConnect(RPostgres::Postgres(),
-        dbname   = db_string,
+        dbname   = cfg$dbname,
         host     = host_val,
-        port     = as.integer(input[[paste0("db_port", suffix)]]),
-        user     = input[[paste0("db_user", suffix)]],
-        password = input[[paste0("db_pass", suffix)]],
+        port     = port_val,
+        user     = input$db_user,
+        password = input$db_pass,
         sslmode  = ssl_mode,
         connect_timeout = 10
       ),
@@ -1262,22 +1316,17 @@ get_con <- function(input, suffix) {
   con
 }
 
-# ─── Helper: wire up env-switcher for a given suffix ───
-setup_env_switcher <- function(input, session, suffix) {
-  observeEvent(input[[paste0("db_env", suffix)]], {
-    env <- input[[paste0("db_env", suffix)]]
-    if (env == "Production") {
-      updateTextInput(session, paste0("db_host", suffix),
-                      value = Sys.getenv("PROD_DB_HOST", ""))
-      updateTextInput(session, paste0("db_port", suffix), value = Sys.getenv("PROD_DB_PORT", "25060"))
-      updateTextInput(session, paste0("db_user", suffix), value = Sys.getenv("PROD_DB_USER", ""))
-      updateTextInput(session, paste0("db_pass", suffix), value = Sys.getenv("PROD_DB_PASSWORD", ""))
-    } else {
-      updateTextInput(session, paste0("db_host", suffix), value = "host.docker.internal")
-      updateTextInput(session, paste0("db_port", suffix), value = "5432")
-      updateTextInput(session, paste0("db_user", suffix), value = "postgres")
-      updateTextInput(session, paste0("db_pass", suffix), value = Sys.getenv("DB_PASSWORD", ""))
-    }
+# ─── Helper: wire up the ONE global env-switcher ───
+# Fills the shared host/port/user/password fields from DB_ENVIRONMENTS whenever
+# the environment changes (and once on load). Called a single time in server().
+setup_env_switcher <- function(input, session) {
+  observeEvent(input$db_env, {
+    cfg <- DB_ENVIRONMENTS[[input$db_env]]
+    if (is.null(cfg)) return()
+    updateTextInput(session, "db_host", value = cfg$host)
+    updateNumericInput(session, "db_port", value = suppressWarnings(as.integer(cfg$port)))
+    updateTextInput(session, "db_user", value = cfg$user)
+    updateTextInput(session, "db_pass", value = Sys.getenv(cfg$pass_env, ""))
   })
 }
 
@@ -1359,18 +1408,36 @@ server <- function(input, output, session) {
   # page shows a grey overlay and needs one manual reload instead of
   # auto-resuming. Re-enable only if the segfaults are truly gone.
 
+  # ── Shared connection (one form in the navbar header for the whole app) ──
+  # The env switcher and a single validating connect observer live here; every
+  # tab's own Connect logic also listens to input$connect_btn, so one click sets
+  # up all tabs. Enter the password once.
+  setup_env_switcher(input, session)
+  status_msgConn <- reactiveVal("Not connected.")
+  output$statusMessageConn <- renderText({ status_msgConn() })
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgConn("Enter the password, then Connect."); return() }
+    status_msgConn(sprintf("Connecting to %s ...", input$db_env))
+    tryCatch({
+      con <- get_con(input)
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      cfg <- DB_ENVIRONMENTS[[input$db_env]]
+      status_msgConn(sprintf("Connected to %s (%s@%s/%s). Now Generate on any tab.",
+                             input$db_env, input$db_user, input$db_host, cfg$dbname))
+    }, error = function(e) status_msgConn(paste("Connection failed:", e$message)))
+  }, priority = 100)   # runs before the per-tab setup observers
+
   # ── TRANSITION: Reactive values ──
   app_dataT <- reactiveVal(NULL)
   status_msgT <- reactiveVal("Ready")
   output$statusMessageT <- renderText({ status_msgT() })
-  setup_env_switcher(input, session, "T")
 
   # ── TRANSITION: Connect ──
-  observeEvent(input$connect_btnT, {
-    if (input$db_passT == "") { status_msgT("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgT("Error: Password is not set."); return() }
     status_msgT("Connecting...")
     tryCatch({
-      con <- get_con(input, "T")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals         <- dbGetQuery(con, "SELECT DISTINCT id FROM scoring.return_cluster_lag_viability ORDER BY 1")
       past_fib_vals   <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM scoring.return_cluster_lag_viability ORDER BY 1")
@@ -1384,7 +1451,7 @@ server <- function(input, output, session) {
 
   # ── TRANSITION: Execute ──
   observeEvent(input$execute_T, {
-    if (input$db_passT == "") { status_msgT("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgT("Error: Password is not set."); return() }
     if (input$id_valT == "" || input$past_fib_lagT == "" || input$future_fib_lagT == "") {
       status_msgT("Error: Select filters first."); return()
     }
@@ -1425,7 +1492,7 @@ server <- function(input, output, session) {
       ORDER BY past_excess_return_z_bucket_num;",
       input$past_fib_lagT, input$future_fib_lagT, input$id_valT, actionable_clause)
     tryCatch({
-      con <- get_con(input, "T")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       res <- dbGetQuery(con, query)
       for(col in names(res)) { if(!(col %in% c("signal","alpha_signal","recommendation"))) res[[col]] <- as.numeric(res[[col]]) }
@@ -1610,16 +1677,15 @@ server <- function(input, output, session) {
                  nrow(initial_hist), length(unique(initial_hist$run_at)))
   )
   output$statusMessageQ <- renderText({ status_msgQ() })
-  setup_env_switcher(input, session, "Q")
 
   qa_schemasQ <- reactiveVal(NULL)
 
   # ── DATA QA: Connect — load list of schemas that have tables with a ticker column ──
-  observeEvent(input$connect_btnQ, {
-    if (input$db_passQ == "") { status_msgQ("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgQ("Error: Password is not set."); return() }
     status_msgQ("Loading schemas...")
     tryCatch({
-      con <- get_con(input, "Q")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       schemas <- dbGetQuery(con, "
         SELECT table_schema, COUNT(*) AS n_tables
@@ -1656,13 +1722,13 @@ server <- function(input, output, session) {
 
   # ── DATA QA: Execute ──
   observeEvent(input$execute_Q, {
-    if (input$db_passQ == "") { status_msgQ("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgQ("Error: Password is not set."); return() }
 
     # First click: load schemas and show checkboxes, then stop and wait for user
     if (is.null(qa_schemasQ())) {
       status_msgQ("Loading schemas...")
       schemas <- tryCatch({
-        con <- get_con(input, "Q")
+        con <- get_con(input)
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
         dbGetQuery(con, "
           SELECT table_schema, COUNT(*) AS n_tables
@@ -1687,7 +1753,7 @@ server <- function(input, output, session) {
     }
     status_msgQ("Scanning tables...")
     tryCatch({
-      con <- get_con(input, "Q")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
 
       placeholders <- paste(as.character(DBI::dbQuoteString(con, selected)), collapse = ",")
@@ -1897,14 +1963,13 @@ server <- function(input, output, session) {
   app_dataV <- reactiveVal(NULL)
   status_msgV <- reactiveVal("Ready")
   output$statusMessageV <- renderText({ status_msgV() })
-  setup_env_switcher(input, session, "V")
 
   # ── COVERAGE: Connect — just smoke-test the query source ──
-  observeEvent(input$connect_btnV, {
-    if (input$db_passV == "") { status_msgV("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgV("Error: Password is not set."); return() }
     status_msgV("Connecting...")
     tryCatch({
-      con <- get_con(input, "V")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       n <- dbGetQuery(con,
         "SELECT COUNT(DISTINCT ticker) AS n FROM cdm.ingest_combined")$n[1]
@@ -1914,10 +1979,10 @@ server <- function(input, output, session) {
 
   # ── COVERAGE: Execute — load min/max date per ticker ──
   observeEvent(input$execute_V, {
-    if (input$db_passV == "") { status_msgV("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgV("Error: Password is not set."); return() }
     status_msgV("Loading coverage...")
     tryCatch({
-      con <- get_con(input, "V")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
         SELECT ticker,
@@ -1994,13 +2059,12 @@ server <- function(input, output, session) {
   app_dataK   <- reactiveVal(NULL)
   status_msgK <- reactiveVal("Not connected.")
   output$statusMessageK <- renderText({ status_msgK() })
-  setup_env_switcher(input, session, "K")
 
-  observeEvent(input$connect_btnK, {
-    if (input$db_passK == "") { status_msgK("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgK("Error: Password is not set."); return() }
     status_msgK("Connecting...")
     tryCatch({
-      con <- get_con(input, "K")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       n <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM analysis.ticker_cluster_segments")$n[1]
       status_msgK(sprintf("Connected — %s tickers clustered.", n))
@@ -2008,10 +2072,10 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$execute_K, {
-    if (input$db_passK == "") { status_msgK("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgK("Error: Password is not set."); return() }
     status_msgK("Loading clusters...")
     tryCatch({
-      con <- get_con(input, "K")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
         SELECT s.ticker,
@@ -2093,14 +2157,13 @@ server <- function(input, output, session) {
   cluster_ic_metaP <- reactiveVal(NULL)
   status_msgP <- reactiveVal("Ready")
   output$statusMessageP <- renderText({ status_msgP() })
-  setup_env_switcher(input, session, "P")
 
   # ── TOP PICKS: Connect ──
-  observeEvent(input$connect_btnP, {
-    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgP("Error: Password is not set."); return() }
     status_msgP("Connecting...")
     tryCatch({
-      con <- get_con(input, "P")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
         "SELECT DISTINCT id FROM serving.return_cluster_ticker_summary_current ORDER BY 1")
@@ -2111,7 +2174,7 @@ server <- function(input, output, session) {
 
   # ── TOP PICKS: Execute ──
   observeEvent(input$execute_P, {
-    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgP("Error: Password is not set."); return() }
     if (input$id_valP == "") { status_msgP("Error: Select a cluster first."); return() }
     status_msgP("Running query...")
 
@@ -2168,7 +2231,7 @@ server <- function(input, output, session) {
       input$id_valP, input$top_n_valP, input$id_valP)
 
     tryCatch({
-      con <- get_con(input, "P")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       res <- dbGetQuery(con, query)
       res$agg_rank <- as.integer(res$agg_rank)
@@ -2304,13 +2367,12 @@ server <- function(input, output, session) {
   app_dataRS_meta     <- reactiveVal(NULL)
   status_msgRS <- reactiveVal("Ready")
   output$statusMessageRS <- renderText({ status_msgRS() })
-  setup_env_switcher(input, session, "RS")
 
-  observeEvent(input$connect_btnRS, {
-    if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgRS("Error: Password is not set."); return() }
     status_msgRS("Connecting...")
     tryCatch({
-      con <- get_con(input, "RS")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
         "SELECT DISTINCT id FROM validation.walk_forward_pctile_summary ORDER BY id")
@@ -2337,7 +2399,7 @@ server <- function(input, output, session) {
     if (is.null(id_sel) || id_sel == "" || id_sel == "ALL") {
       updateSliderInput(session, "top_n_valRS", value = 20); return()
     }
-    con <- tryCatch(get_con(input, "RS"), error = function(e) NULL)
+    con <- tryCatch(get_con(input), error = function(e) NULL)
     # register cleanup BEFORE the early return so a half-open connection
     # can't leak when con is NULL-but-partially-created
     on.exit({ if (!is.null(con) && DBI::dbIsValid(con)) try(dbDisconnect(con), silent = TRUE) }, add = TRUE)
@@ -2355,7 +2417,7 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   observeEvent(input$execute_RS, {
-    if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgRS("Error: Password is not set."); return() }
     if (is.null(input$id_valRS) || input$id_valRS == "") {
       status_msgRS("Error: Select a cluster (or 'All clusters') first."); return()
     }
@@ -2449,7 +2511,7 @@ server <- function(input, output, session) {
     }
 
     tryCatch({
-      con <- get_con(input, "RS")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       slot_df <- dbGetQuery(con, slot_query)
       slot_df$rank_within_cluster <- as.integer(slot_df$rank_within_cluster)
@@ -2645,10 +2707,10 @@ server <- function(input, output, session) {
   app_dataRS_allIds <- reactiveVal(NULL)
 
   observeEvent(input$execute_all_RS, {
-    if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgRS("Error: Password is not set."); return() }
     status_msgRS("Querying all ids...")
     tryCatch({
-      con <- get_con(input, "RS")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
         SELECT id, pctile_bin, fut_lag, mean_return, median_return, hit_rate, sharpe_like, n_obs
@@ -2874,13 +2936,12 @@ server <- function(input, output, session) {
   app_dataMV_forest <- reactiveVal(NULL)
   status_msgMV <- reactiveVal("Ready")
   output$statusMessageMV <- renderText({ status_msgMV() })
-  setup_env_switcher(input, session, "MV")
 
-  observeEvent(input$connect_btnMV, {
-    if (input$db_passMV == "") { status_msgMV("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgMV("Error: Password is not set."); return() }
     status_msgMV("Connecting...")
     tryCatch({
-      con <- get_con(input, "MV")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
         "SELECT DISTINCT id FROM validation.cell_credibility
@@ -2903,12 +2964,12 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$execute_MV, {
-    if (input$db_passMV == "") { status_msgMV("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgMV("Error: Password is not set."); return() }
     status_msgMV("Running queries...")
     id_filter <- if (is.null(input$id_valMV) || input$id_valMV %in% c("", "ALL")) "" else
       sprintf("AND id = %d", as.integer(input$id_valMV))
     tryCatch({
-      con <- get_con(input, "MV")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
 
       ic_df <- dbGetQuery(con, "
@@ -3183,7 +3244,6 @@ server <- function(input, output, session) {
   wf_cutoffsBL <- reactiveVal(NULL)      # all distinct backtest cutoffs (desc) for the bundle picker
   status_msgBL <- reactiveVal("Ready")
   output$statusMessageBL <- renderText({ status_msgBL() })
-  setup_env_switcher(input, session, "BL")
 
   # As-of date from the three-mode control. Modes map 1:1 onto the resolver's
   # existing ranges: today -> latest snapshot (>= b[2] => current), ledger ->
@@ -3343,7 +3403,7 @@ server <- function(input, output, session) {
     if (!identical(m, prev_m)) return()        # date/mode flip: date observer handles it
     if (identical(v, prev_v)) return()         # no real change
     if (m %in% c("wf", "ledger") &&
-        !is.null(input$db_passBL) && nzchar(input$db_passBL) &&
+        !is.null(input$db_pass) && nzchar(input$db_pass) &&
         !is.null(ledger_boundsBL())) bump_genBL()
   })
 
@@ -3486,11 +3546,11 @@ server <- function(input, output, session) {
     }
   })
 
-  observeEvent(input$connect_btnBL, {
-    if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgBL("Error: Password is not set."); return() }
     status_msgBL("Connecting...")
     tryCatch({
-      con <- get_con(input, "BL")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       n <- dbGetQuery(con, "
         SELECT COUNT(*) AS n
@@ -3604,12 +3664,12 @@ server <- function(input, output, session) {
     a <- asof_dateBL()
     if (identical(a, last_asof_genBL())) return()
     last_asof_genBL(a)
-    if (!is.null(input$db_passBL) && nzchar(input$db_passBL) &&
+    if (!is.null(input$db_pass) && nzchar(input$db_pass) &&
         !is.null(ledger_boundsBL())) bump_genBL()
   }, ignoreInit = TRUE)
 
   observeEvent(gen_triggerBL(), {
-    if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgBL("Error: Password is not set."); return() }
     status_msgBL("Running query...")
     b <- ledger_boundsBL()
     asof <- asof_dateBL()
@@ -3630,7 +3690,7 @@ server <- function(input, output, session) {
       # is missing (first build lands with the next walk-forward) or has no
       # cutoff early enough, fall through to the full ranking replay below.
       handled <- tryCatch({
-        con <- get_con(input, "BL")
+        con <- get_con(input)
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
         has_picks <- isTRUE(tryCatch(dbGetQuery(con, "
           SELECT EXISTS (SELECT 1 FROM information_schema.tables
@@ -3786,7 +3846,7 @@ server <- function(input, output, session) {
         ORDER BY m.id, r.rank_within_cluster;",
         format(asof, "%Y-%m-%d"), hz, hz, hz, hz)
       tryCatch({
-        con <- get_con(input, "BL")
+        con <- get_con(input)
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
         # delisting metadata is display-only enrichment; a DB without the
         # table (env dropdown on dev) degrades to plain 'delisted'. Injected
@@ -3898,7 +3958,7 @@ server <- function(input, output, session) {
         __METAJOIN__
         ORDER BY excess_vs_spy_pct DESC NULLS LAST;",
         format(asof, "%Y-%m-%d"))
-        con <- get_con(input, "BL")
+        con <- get_con(input)
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
         # same display-only delisting enrichment as the wf branch (gsub
         # tokens, not sprintf - see the %% note above)
@@ -3935,7 +3995,7 @@ server <- function(input, output, session) {
     # payoff evidence fixed to fut_lag <= 12 (matched short horizons)
     fut_cap <- 12L
     tryCatch({
-      con <- get_con(input, "BL")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       # evidence_status ships with the Phase A dbt deploy; the query adapts so
       # the dashboard works BEFORE and AFTER the column lands on prod
@@ -5002,7 +5062,6 @@ server <- function(input, output, session) {
   fc_ledger    <- reactiveVal(NULL)
   fc_ledseries <- reactiveVal(NULL)
   output$statusMessageFC <- renderText({ status_msgFC() })
-  setup_env_switcher(input, session, "FC")
 
   # The valid cluster ids depend on which cutoff the History-start resolves to
   # (id 4 exists at the Dec-2024 cutoff but not at Jun-2024), so the checkboxes
@@ -5037,12 +5096,12 @@ server <- function(input, output, session) {
     updateCheckboxGroupInput(session, "idsFC", choices = ids, selected = ids, inline = TRUE)
   }
 
-  observeEvent(input$connect_btnFC, {
-    if (input$db_passFC == "") { status_msgFC("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgFC("Error: Password is not set."); return() }
     status_msgFC("Connecting...")
     fc_curve(NULL); fc_ledger(NULL); fc_ledseries(NULL)  # invalidate caches on (re)connect
     tryCatch({
-      con <- get_con(input, "FC")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       n <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM monitoring.prediction_ledger")$n[1]
       cim <- dbGetQuery(con, "SELECT DISTINCT train_cutoff_date AS cutoff, id FROM validation.walk_forward_top_picks ORDER BY 1, 2")
@@ -5103,12 +5162,12 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$execute_FC, {
-    if (input$db_passFC == "") { status_msgFC("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgFC("Error: Password is not set."); return() }
     anchor <- asof_dateFC()
     if (is.null(anchor) || is.na(anchor)) { status_msgFC("Pick an as-of date first."); return() }
     status_msgFC(sprintf("Loading selected set + Benchmark from %s to today...", format(anchor, "%b %Y")))
     tryCatch({
-      con <- get_con(input, "FC")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       DBI::dbExecute(con, "SET statement_timeout = '120s'")
       ids_sel <- as.integer(input$idsFC)
@@ -5453,13 +5512,12 @@ server <- function(input, output, session) {
   ids_seenLC   <- reactiveVal(FALSE)
   observeEvent(input$idsLC, ids_seenLC(TRUE), ignoreNULL = TRUE)
   output$statusMessageLC <- renderText({ status_msgLC() })
-  setup_env_switcher(input, session, "LC")
 
-  observeEvent(input$connect_btnLC, {
-    if (input$db_passLC == "") { status_msgLC("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgLC("Error: Password is not set."); return() }
     status_msgLC("Connecting...")
     tryCatch({
-      con <- get_con(input, "LC")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       b <- dbGetQuery(con, "
         SELECT COUNT(*) AS n, COUNT(DISTINCT prediction_date) AS d,
@@ -5471,10 +5529,10 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$execute_LC, {
-    if (input$db_passLC == "") { status_msgLC("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgLC("Error: Password is not set."); return() }
     status_msgLC("Loading the signal record...")
     tryCatch({
-      con <- get_con(input, "LC")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       led <- dbGetQuery(con, "
         SELECT prediction_date::text AS d, ticker, global_action
@@ -6034,4 +6092,9 @@ server <- function(input, output, session) {
 }
 
 # Run the application
-runApp(list(ui = ui, server = server), host="0.0.0.0", port=3838)
+# Bind address/port are env-overridable (SHINY_HOST / SHINY_PORT) so the same
+# script serves local and the prod server; defaults keep the historical 0.0.0.0:3838.
+.shiny_port <- suppressWarnings(as.integer(Sys.getenv("SHINY_PORT", "3838")))
+if (is.na(.shiny_port)) .shiny_port <- 3838L
+runApp(list(ui = ui, server = server),
+       host = Sys.getenv("SHINY_HOST", "0.0.0.0"), port = .shiny_port)
