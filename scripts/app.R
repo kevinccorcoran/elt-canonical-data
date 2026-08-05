@@ -696,10 +696,11 @@ scored AS (
     ORDER BY ticker, as_of DESC, graded_at DESC
 ),
 graded_buys AS (
-    SELECT b.ticker, (s.overall >= 68) AS passed
-    FROM (SELECT DISTINCT ticker FROM serving.return_cluster_ticker_global_action_current
-          WHERE global_action = 'BUY') b
-    JOIN scored s ON s.ticker = b.ticker
+    -- basket = qualstream's graded standing-rec buys (the board's buy list = the
+    -- orange + universe), NOT the current-day gate snapshot. The snapshot dropped
+    -- names reading SKIP today that are still board buys (monthly-majority standing
+    -- recs), so the green line undercounted the + (10 shown vs 15 on the board).
+    SELECT s.ticker, (s.overall >= 68) AS passed FROM scored s
 ),
 entry AS (
     SELECT g.ticker, g.passed,
@@ -6140,10 +6141,9 @@ server <- function(input, output, session) {
     if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
       return(empty_plot("No qualstream-graded buys in range - run qualstream to populate this."))
     cmp$d <- as.Date(cmp$d)
-    buys_gate <- unique(d$gate$ticker[d$gate$gate_today == "BUY"])
     qs_g <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
-    n_g  <- if (!is.null(d$qs)) length(intersect(d$qs$ticker, buys_gate)) else 0L
-    n_p  <- if (!is.null(d$qs)) length(intersect(d$qs$ticker[qs_g >= 68], buys_gate)) else 0L
+    n_g  <- if (!is.null(d$qs)) length(d$qs$ticker) else 0L
+    n_p  <- if (!is.null(d$qs)) sum(qs_g >= 68, na.rm = TRUE) else 0L
     has_pass <- any(!is.na(cmp$passed_pct))
     fig <- plot_ly()
     fig <- add_trace(fig, x = cmp$d, y = cmp$spy_pct, type = "scatter", mode = "lines",
@@ -6177,23 +6177,21 @@ server <- function(input, output, session) {
     req(app_dataLC())
     d <- app_dataLC()
     if (is.null(d$qscmp) || nrow(d$qscmp) == 0 || all(is.na(d$qscmp$graded_pct))) return(NULL)
-    buys_gate <- unique(d$gate$ticker[d$gate$gate_today == "BUY"])
     qs_g  <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
-    n_all <- length(buys_gate)
-    n_g   <- if (!is.null(d$qs)) length(intersect(d$qs$ticker, buys_gate)) else 0L
-    n_p   <- if (!is.null(d$qs)) length(intersect(d$qs$ticker[qs_g >= 68], buys_gate)) else 0L
+    n_g   <- if (!is.null(d$qs)) length(d$qs$ticker) else 0L
+    n_p   <- if (!is.null(d$qs)) sum(qs_g >= 68, na.rm = TRUE) else 0L
     qs_ran <- if (!is.null(d$qs) && nrow(d$qs) > 0 && "as_of" %in% names(d$qs))
                 suppressWarnings(max(as.Date(d$qs$as_of))) else as.Date(NA)
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
       sprintf(paste("Descriptive, not a walk-forward test: qualstream has a single grade run",
-                    "(as of %s) applied across the whole window. Coverage is partial - of %d current",
-                    "BUYs it graded %d, of which %d passed >= 68. Both baskets are equal-weight, held",
-                    "from %s (the current 4-month buy window). One retroactive grade set cannot yet",
-                    "prove qualstream adds return; that needs several cadence cycles of point-in-time grades.",
-                    "Basket membership is also retroactive: these are today's buys applied backward,",
-                    "which flatters both baskets against SPY; the graded-vs-passed comparison itself",
-                    "is unaffected since both carry the same tilt."),
-              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_all, n_g, n_p, format(d$qscmp_anchor)))
+                    "(as of %s) applied across the whole window. The basket is qualstream's %d graded",
+                    "standing-rec buys (the board's buy list = the orange + universe); the green line is",
+                    "the %d that scored >= 68. Both are equal-weight, held from %s (the current 4-month",
+                    "window). Membership is retroactive (today's buys applied backward), which flatters",
+                    "both against SPY; the graded-vs-passed comparison is unaffected since both carry the",
+                    "same tilt. One retroactive grade set cannot yet prove qualstream adds return; that",
+                    "needs several cadence cycles of point-in-time grades."),
+              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_g, n_p, format(d$qscmp_anchor)))
   })
 
   # The full record: every company the model ever entered (cohort or ledger)
