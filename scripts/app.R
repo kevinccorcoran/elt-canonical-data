@@ -5550,8 +5550,17 @@ server <- function(input, output, session) {
                           WHERE tm.ticker = w.ticker
                             AND tm.delisted_utc::date <= w.train_cutoff_date)"),
         error = function(e) NULL)
+      # qualstream qualitative grades (integration lands ~mid-Aug 2026): a thin
+      # current-period contract - ticker, numeric grade, graded_at. The table
+      # does not exist yet, so this stays dormant (NULL) until qualstream
+      # starts writing; the board then marks its top-20 with an orange +.
+      qs <- tryCatch(dbGetQuery(con, "
+        SELECT ticker, grade, graded_at::date::text AS graded_at
+        FROM qualstream.ticker_grade_current"),
+        error = function(e) NULL)
       ids_seenLC(FALSE)   # id checkboxes re-render fresh with the new universe
-      app_dataLC(list(led = led, gate = gate, meta = meta, sl = sl, coh = coh))
+      app_dataLC(list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
+                      qs = qs))
       status_msgLC(sprintf(
         "Loaded - %d proven cohort picks across %d quarterly cutoffs + %d live series across %d snapshots.",
         if (is.null(coh)) 0L else nrow(coh),
@@ -5748,13 +5757,22 @@ server <- function(input, output, session) {
     del_ticks <- if (!is.null(d$meta)) d$meta$ticker else character(0)
     st <- dv$state_now; why <- dv$why_now; hz <- dv$hz
     col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
-    chipf <- function(t, colr, note = "", strike = FALSE) span(
+    # qualstream top-20 of the current grading period gets an orange + on its
+    # chip; empty until the qualstream table exists and holds grades
+    qs_top <- character(0)
+    if (!is.null(d$qs) && nrow(d$qs) > 0 &&
+        all(c("ticker", "grade") %in% names(d$qs))) {
+      qo <- d$qs[order(-suppressWarnings(as.numeric(d$qs$grade))), , drop = FALSE]
+      qs_top <- utils::head(unique(qo$ticker), 20)
+    }
+    chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE) span(
       style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
                              " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
                              " margin:2px; font-size:0.78rem; font-weight:600;%s"),
                       colr, colr, colr,
                       if (strike) " text-decoration:line-through; opacity:0.7;" else ""),
-      if (nzchar(note)) sprintf("%s · %s", t, note) else t)
+      if (nzchar(note)) sprintf("%s · %s", t, note) else t,
+      if (plus) span("+", style = "color:#fb923c; font-weight:800; margin-left:3px;"))
     section <- function(title, colr, ticks, notes, max_h = NA) {
       div(style = "margin-bottom:1rem;",
         div(style = sprintf("color:%s; font-weight:700; margin-bottom:0.35rem;", colr),
@@ -5762,7 +5780,8 @@ server <- function(input, output, session) {
         div(style = if (!is.na(max_h))
               sprintf("display:flex; flex-wrap:wrap; max-height:%dpx; overflow-y:auto;", max_h)
             else "display:flex; flex-wrap:wrap;",
-          mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks),
+          mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks,
+                                      plus = t %in% qs_top),
                  ticks, notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)))
     }
     note_line <- function(txt) div(
@@ -5818,7 +5837,10 @@ server <- function(input, output, session) {
         "no recorded signals until the daily ledger begins %s."),
         gap_lo, led_lo))
       else note_line(sprintf(
-        "Entry record: daily ledger only, beginning %s.", led_lo)))
+        "Entry record: daily ledger only, beginning %s.", led_lo)),
+      if (length(qs_top)) note_line(paste(
+        "Orange + = qualstream top-20 qualitative grade for the current",
+        "period.")))
     tagList(
       notes,
       section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
@@ -5863,6 +5885,13 @@ server <- function(input, output, session) {
     # the rank slot's realized win rate at THIS horizon (the board's buy gate)
     df$`Bin win %` <- ifelse(df$Ticker %in% names(dv$wpct),
                              as.numeric(dv$wpct[df$Ticker]), NA_real_)
+    # qualstream grade column only once grades exist (dormant until then)
+    has_qs <- !is.null(d$qs) && nrow(d$qs) > 0 &&
+              all(c("ticker", "grade") %in% names(d$qs))
+    if (has_qs) {
+      qi <- match(df$Ticker, d$qs$ticker)
+      df$`QS grade` <- suppressWarnings(as.numeric(d$qs$grade))[qi]
+    }
     # delist coloring on the Ticker column (same pattern as the ledger table)
     df$delisted <- if (!is.null(d$meta)) df$Ticker %in% d$meta$ticker else FALSE
     if (!is.null(d$meta) && nrow(d$meta) > 0) {
@@ -5889,9 +5918,13 @@ server <- function(input, output, session) {
       df <- df[is.na(tid) | tid %in% as.integer(sel_id), , drop = FALSE]
     }
     keep <- c("Ticker", "State", "Entry", "Source", "Held (d)", "% of horizon",
-              "Matures", "Why", "Proven", "Gate today", "Bin win %", "del_class")
+              "Matures", "Why", "Proven", "Gate today", "Bin win %",
+              if (has_qs) "QS grade", "del_class")
     df <- df[order(factor(df$State, levels = c("sell", "buy", "hold", "closed")),
                    df$Ticker), keep]
+    # 0-based column targets, shifted when the optional QS grade column exists
+    num_t <- c(4, 5, 10, if (has_qs) 11)
+    del_t <- length(keep) - 1L
     DT::datatable(
       df, selection = "none", rownames = FALSE, class = "compact",
       extensions = "Buttons", filter = "top",
@@ -5899,8 +5932,8 @@ server <- function(input, output, session) {
         pageLength = 25, lengthMenu = c(10, 25, 50, 100, 1000),
         dom = "Bftip", buttons = c("copy", "csv"), ordering = TRUE,
         columnDefs = list(
-          list(className = "dt-right", targets = c(4, 5, 10)),
-          list(visible = FALSE, targets = 11))
+          list(className = "dt-right", targets = num_t),
+          list(visible = FALSE, targets = del_t))
       )
     ) %>%
       DT::formatStyle("State", fontWeight = "600",
