@@ -6040,7 +6040,12 @@ server <- function(input, output, session) {
       if (length(qs_top)) note_line(sprintf(paste(
         "Orange + = qualstream grade >= %d among the buys (%d of %d graded).",
         "A threshold, not a top-N: it never splits a tie, and in a weak period",
-        "fewer names qualify."), qs_min, length(qs_top), sum(!is.na(bg)))))
+        "fewer names qualify."), qs_min, length(qs_top), sum(!is.na(bg)))),
+      if (length(qs_top)) note_line(tagList(
+        span("+", style = "color:#fb923c; font-weight:800;"),
+        sprintf(" passed qualstream: %s.",
+          paste(sprintf("%s %d", qs_top,
+                        as.integer(round(qs_grade[qs_top]))), collapse = ", ")))))
     tagList(
       notes,
       section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
