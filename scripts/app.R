@@ -485,42 +485,14 @@ SELECT p.h AS horizon_months,
        COUNT(*)                                      AS n_cells
 FROM per p GROUP BY p.h ORDER BY p.h;"
 
-# LEDGER REGIME EPOCH. monitoring.prediction_ledger rows before this date were
-# produced by a BUY gate that was replaced on 2026-07-02 (elt-inference-models
-# b650cb2) because it emitted ZERO BUYs and its in-sample screen was measured
-# ANTI-correlated with realized IC (CORR -0.72). The record either side of that
-# boundary is two different systems: BUYs run 63 -> 19 -> 0 through Jul 1, then
-# 0 -> 572 overnight, while SELLs stay flat (~170-186) because only the long gate
-# changed that night. Jul 2's batch was hand-run at 00:30 UTC, 54 minutes BEFORE
-# the commit landed, so Jul 3 07:46 is the first scheduled run on committed code
-# and is the epoch. Nothing that averages runs or grades forward performance may
-# span this date. Smaller boundaries are NOT floored (they would leave 14 usable
-# days): Jul 5 IC tuning settles, Jul 18 the SELL gate becomes performance-based,
-# Jul 23 evidence_status/buy_weight_mature begin.
-# Deliberately NOT applied to: the 30-day majority window (already clears it and
-# always will) and the as-of replay (time travel: it must show what was actually
-# said on the date the user picks).
-LEDGER_EPOCH <- "2026-07-03"
-
-# Live ledger basket = the earliest recorded BUY snapshot at/after the regime
-# epoch (2026-07-03; pre-epoch picks came from the retired gate), equal-weighted,
-# graded to the latest bar off the CURRENT series so a post-entry split can't
-# re-base it (same split-safe rule the Buy List ledger replay uses).
-# Expect entry_d to read EARLIER than the epoch (2026-06-23 at the time of
-# writing) and the per-name entry prices to be non-uniform. That is the ledger's
-# entry_date, i.e. the last price bar available when the call was logged, and
-# prediction_ledger admits names whose last bar is up to 10 days old. The Jun 16
-# anchor hid this because all 63 of its names happened to price at Jun 15; the
-# Jul 3 anchor spreads Jun 23 - Jul 2. Pre-existing and out of scope here (Kevin:
-# the price dating is by design) - but it means the basket banks a few days of
-# drift before the call, so read the first days of this chart loosely.
-FORECAST_LEDGER_SQL <- gsub("__EPOCH__", LEDGER_EPOCH, "
+# Live ledger basket = the earliest recorded BUY snapshot (inception, 2026-06-16),
+# equal-weighted, graded to the latest bar off the CURRENT series so a post-entry
+# split can't re-base it (same split-safe rule the Buy List ledger replay uses).
+FORECAST_LEDGER_SQL <- "
 WITH first_snap AS (
     SELECT ticker, entry_date
     FROM monitoring.prediction_ledger
-    WHERE prediction_date = (SELECT MIN(prediction_date)
-                             FROM monitoring.prediction_ledger
-                             WHERE prediction_date >= '__EPOCH__')
+    WHERE prediction_date = (SELECT MIN(prediction_date) FROM monitoring.prediction_ledger)
       AND global_action = 'BUY'
 ),
 entry_now AS (
@@ -551,7 +523,7 @@ SELECT
           - (SELECT MIN(entry_date) FROM first_snap) )/30.0)::numeric, 2) AS months_held
 FROM first_snap f
 JOIN entry_now e ON e.ticker = f.ticker
-JOIN now_px n ON n.ticker = f.ticker;", fixed = TRUE)
+JOIN now_px n ON n.ticker = f.ticker;"
 
 # Live all-strategy portfolio, REAL calendar monthly series. Buys the CURRENT
 # picks (latest cutoff) starting at __ANCHOR__ via the 6-strategy DCA, values the
@@ -645,18 +617,14 @@ SELECT ps.vdate::text AS vdate, ps.id::int AS id, ROUND(AVG(ps.ret)::numeric,2) 
 FROM per_strat ps GROUP BY ps.id, ps.vdate ORDER BY ps.id, ps.vdate;"
 
 # Live ledger vs Benchmark on the ledger's OWN clock: daily cumulative return of the
-# epoch BUY basket (equal-weight, split-safe current-series entry) and the same-day
-# SPY, both rebased to 0 at the basket's entry date. Fast (~0.1s). This is the fair
-# out-of-sample view - the ledger is weeks old and cannot share the 2-year calendar
-# axis with a portfolio that has compounded since 2024. Anchored at LEDGER_EPOCH,
-# not the ledger's first row: the pre-epoch snapshots were picked by the retired
-# gate, so charting them would grade a system that no longer exists.
-FORECAST_LEDGER_SERIES_SQL <- gsub("__EPOCH__", LEDGER_EPOCH, "
+# inception BUY basket (equal-weight, split-safe current-series entry) and the
+# same-day SPY, both rebased to 0 at 2026-06-15. Fast (~0.1s). This is the fair
+# out-of-sample view - the ledger is 6 weeks old and cannot share the 2-year
+# calendar axis with a portfolio that has compounded since 2024.
+FORECAST_LEDGER_SERIES_SQL <- "
 WITH first_snap AS (
     SELECT ticker, entry_date FROM monitoring.prediction_ledger
-    WHERE prediction_date = (SELECT MIN(prediction_date)
-                             FROM monitoring.prediction_ledger
-                             WHERE prediction_date >= '__EPOCH__')
+    WHERE prediction_date = (SELECT MIN(prediction_date) FROM monitoring.prediction_ledger)
       AND global_action = 'BUY'
 ),
 entry_now AS (SELECT ic.ticker, ic.adj_close AS entry_px
@@ -675,7 +643,7 @@ SELECT p.d::text AS d,
        ROUND((AVG(p.px/NULLIF(p.entry_px,0)-1)*100)::numeric,2) AS ledger_pct,
        ROUND(((s.px/s.px0)-1)::numeric*100,2) AS spy_pct
 FROM px p JOIN spy s ON s.d=p.d
-GROUP BY p.d, s.px, s.px0 ORDER BY p.d;", fixed = TRUE)
+GROUP BY p.d, s.px, s.px0 ORDER BY p.d;"
 
 # Risk-adjustment series: the EQUAL-WEIGHT buy-and-hold basket value (=$1 -> avg
 # of price/entry over the picks) and SPY value, monthly, over the hold window.
@@ -5566,14 +5534,10 @@ server <- function(input, output, session) {
     tryCatch({
       con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      # Floored at LEDGER_EPOCH: pre-epoch BUYs came from the retired gate, and
-      # letting them into the walk would start maturity clocks (and therefore
-      # "matured"/"sell" states) from entries the current model never made.
-      led <- dbGetQuery(con, gsub("__EPOCH__", LEDGER_EPOCH, "
+      led <- dbGetQuery(con, "
         SELECT prediction_date::text AS d, ticker, global_action
         FROM monitoring.prediction_ledger
-        WHERE prediction_date >= '__EPOCH__'
-        ORDER BY ticker, prediction_date", fixed = TRUE))
+        ORDER BY ticker, prediction_date")
       if (nrow(led) == 0) { status_msgLC("No recorded snapshots yet."); return() }
       gate <- dbGetQuery(con, "
         SELECT ticker, global_action AS gate_today, id
@@ -5832,15 +5796,10 @@ server <- function(input, output, session) {
         identical(src_of[[t]], "cohort") || provf(t), logical(1)),
       tickers)
     # signal persistence over the review window (trailing 4 months of daily
-    # runs, floored at the regime epoch): on how many recorded runs was this name
-    # a BUY? The period's real buy recs are the durable ones - this ranks the buy
-    # section and rides on every chip, so a day-one flicker can't outrank a name
-    # endorsed all period. The floor matters HERE most of all: 686 names held
-    # pre-epoch BUY runs, and unfloored they bank persistence the current model
-    # never awarded them. It cut both ways - CARR/HWM/NXT read 25% (10/40) while
-    # the live gate has not bought them once (0/24), and genuinely durable names
-    # were held down (ICHR 88% -> 100%, PENG 83% -> 96%).
-    win_lo <- max(today - 122, as.Date(LEDGER_EPOCH))
+    # runs): on how many recorded runs was this name a BUY? The period's real
+    # buy recs are the durable ones - this ranks the buy section and rides on
+    # every chip, so a day-one flicker can't outrank a name endorsed all period.
+    win_lo <- today - 122
     in_win <- as.Date(led$d) >= win_lo
     runs_tot <- length(unique(led$d[in_win]))
     pb <- led[in_win & led$global_action == "BUY", ]
@@ -6024,17 +5983,10 @@ server <- function(input, output, session) {
         hz)),
       if (!is.null(gap_lo)) note_line(sprintf(paste(
         "Entry record: quarterly walk-forward cohorts to %s, then a gap with",
-        "no recorded signals until the daily ledger, read from %s."),
+        "no recorded signals until the daily ledger begins %s."),
         gap_lo, led_lo))
       else note_line(sprintf(
-        "Entry record: daily ledger only, read from %s.", led_lo)),
-      note_line(sprintf(paste(
-        "The ledger physically starts 2026-06-16, but everything above is read",
-        "from %s: the BUY gate was replaced on 2026-07-02 after the old one was",
-        "measured anti-correlated with realized returns and had stopped emitting",
-        "buys entirely. Pre-epoch rows are kept as history and excluded from run",
-        "counts, entries and the ledger-vs-benchmark chart, so nothing here",
-        "averages two different systems together."), led_lo)),
+        "Entry record: daily ledger only, beginning %s.", led_lo)),
       if (length(qs_top)) note_line(sprintf(paste(
         "Orange + = qualstream grade >= %d among the buys (%d of %d graded).",
         "A threshold, not a top-N: it never splits a tie, and in a weak period",
@@ -6087,9 +6039,7 @@ server <- function(input, output, session) {
                              as.numeric(dv$wpct[df$Ticker]), NA_real_)
     # signal persistence over the trailing review window (BUY on n of N runs)
     rr <- ifelse(is.na(dv$runs_of[df$Ticker]), 0L, dv$runs_of[df$Ticker])
-    # not "(4mo)" any more: the window is floored at the regime epoch, so it is
-    # 4 months OR the time since the gate change, whichever is shorter.
-    df$`Runs` <- sprintf("%d/%d", rr, max(1L, dv$runs_tot))
+    df$`Runs (4mo)` <- sprintf("%d/%d", rr, max(1L, dv$runs_tot))
     # qualstream grade column only once grades exist (dormant until then)
     has_qs <- !is.null(d$qs) && nrow(d$qs) > 0 &&
               all(c("ticker", "grade") %in% names(d$qs))
@@ -6124,7 +6074,7 @@ server <- function(input, output, session) {
     }
     keep <- c("Ticker", "State", "Entry", "Source", "Held (d)", "% of horizon",
               "Matures", "Why", "Proven", "Gate today", "Bin win %",
-              "Runs", if (has_qs) "QS grade", "del_class")
+              "Runs (4mo)", if (has_qs) "QS grade", "del_class")
     df <- df[order(factor(df$State, levels = c("sell", "buy", "hold", "closed")),
                    df$Ticker), keep]
     # 0-based column targets, shifted when the optional QS grade column exists

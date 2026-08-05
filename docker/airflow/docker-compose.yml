@@ -94,6 +94,36 @@ services:
   # (airflow-webserver service removed: the combined `airflow` container serves
   # the UI and owns host port 8080, so a separate webserver service could never
   # bind -- it sat permanently in Created/port-conflict state.)
+  #
+  # ---------------------------------------------------------------------------
+  # LEGACY CONTAINER, READ BEFORE `docker compose up -d`.
+  # A container named plain `airflow` (created 2026-05-26, same compose project,
+  # from a since-split single-service definition) is what actually serves prod:
+  #     airflow db upgrade && Rscript app.R & Rscript app_violin.R &
+  #     airflow webserver & airflow scheduler
+  # It owns host ports 3838 (this board), 3839 (violin) and 8080 (Airflow UI),
+  # and `docker compose up` never removed it because the service was renamed
+  # rather than deleted (orphans survive without --remove-orphans).
+  #
+  # Consequences, all observed rather than theorised:
+  #   * airflow-shiny below can never bind 3838, so it published no ports, ran
+  #     no R process at all, and was stopped on 2026-08-05. Starting it again
+  #     without freeing 3838 just recreates dead weight.
+  #   * two schedulers run (here and in the legacy container). This is FINE --
+  #     Airflow 2 supports multiple schedulers, and `airflow jobs check
+  #     --job-type SchedulerJob --hostname $HOSTNAME` reports one alive job per
+  #     host. A check without --hostname says "Found 2 alive jobs", which is
+  #     the HA topology, not a fault.
+  #
+  # To decommission the legacy container you must FIRST restore what it uniquely
+  # provides, or the Airflow UI and the violin board simply disappear:
+  #   1. re-add a webserver service (removed above) and a service for
+  #      app_violin.R on 3839;
+  #   2. `docker stop airflow`;
+  #   3. `docker compose up -d --remove-orphans`;
+  #   4. verify 3838, 3839 and 8080 all answer before declaring victory.
+  # Do it in a maintenance window; it is not a cleanup.
+  # ---------------------------------------------------------------------------
 
   airflow-shiny:
     <<: *airflow-common
