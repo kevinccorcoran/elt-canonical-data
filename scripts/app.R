@@ -1195,9 +1195,11 @@ ui <- navbarPage(
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
         tags$p(paste("A decision board of the model's calls, by company name.",
                      "sell = exit now (gate flipped, matured lately, or delisted).",
-                     "buy = the period's standing recs: proven rank slots endorsed",
-                     "today, ranked by signal persistence over the trailing 4-month",
-                     "review window (chip: win rate + BUY on n of N recorded runs).",
+                     "buy = the period's standing recs: proven rank slots backed by",
+                     "the majority of the last month's recorded runs (a rolling",
+                     "monthly evaluation, so one off-day cannot demote a durable",
+                     "name), ranked by persistence over the trailing 4-month review",
+                     "window (chip: win rate + BUY on n of N recorded runs).",
                      "hold = the period's dropped recs, still inside their hold",
                      "window; the chip shows entry date and % of horizon elapsed.",
                      "closed = matured more than a month ago, collapsed to a count",
@@ -5662,10 +5664,24 @@ server <- function(input, output, session) {
     }
     # current-decision bucket (the board's truth), 4 states as of TODAY:
     #   sell   - action item: matured/delisted/gate-flipped within ~a month
-    #   buy    - proven rank slot the serving gate endorses today
-    #   hold   - open position the model is no longer pushing
+    #   buy    - proven rank slot backed by the MAJORITY of the last month's
+    #            recorded runs (rolling monthly evaluation: one off-day cannot
+    #            demote a durable rec, one on-day cannot promote a flicker)
+    #   hold   - open position below the monthly majority
     #   closed - the exit is > 30 days old; history, not an action item
     today <- Sys.Date()
+    led_dd <- as.Date(led$d)
+    d30 <- sort(unique(led_dd[led_dd >= today - 30]))
+    b30 <- led[led_dd >= today - 30 & led$global_action == "BUY", , drop = FALSE]
+    share_of <- if (nrow(b30) > 0) {
+      fb <- tapply(as.Date(b30$d), b30$ticker, min)   # first BUY inside window
+      nb <- tapply(b30$d, b30$ticker, length)
+      # denominator starts at the name's first window appearance so a fresh
+      # entrant (3/3 runs) qualifies while a long flicker (8/21) does not
+      setNames(mapply(function(n, f) n / max(1L, sum(d30 >= f)), nb, fb),
+               names(nb))
+    } else setNames(numeric(0), character(0))
+    majf <- function(t) t %in% names(share_of) && share_of[[t]] >= 0.5
     gate_now <- setNames(as.character(d$gate$gate_today), d$gate$ticker)
     fin <- M[, ncol(M)]
     state_now <- setNames(rep("hold", length(tickers)), tickers)
@@ -5695,15 +5711,16 @@ server <- function(input, output, session) {
         why_now[[t]]   <- sprintf("matured %s", format(mat_d))
       } else if (!is.na(g) && g == "SELL") {
         state_now[[t]] <- "sell"; why_now[[t]] <- "gate flipped (today)"
-      } else if (!is.na(g) && g == "BUY" && provf(t)) {
+      } else if (majf(t) && provf(t)) {
         state_now[[t]] <- "buy"
         why_now[[t]] <- if (!is.na(e) && as.numeric(today - e) <= 7) "new entry"
                         else sprintf("held since %s", entry_of[[t]])
-      } else {                                      # hold: open, model quiet
+      } else {                                      # hold: open, below majority
         d2m <- if (is.na(mat_d)) NA_real_ else as.numeric(mat_d - today)
         why_now[[t]] <- if (!is.na(d2m) && d2m <= 30)
             sprintf("matures %s", format(mat_d))
-          else if (!is.na(g) && g == "BUY") "signal live (unproven slot)"
+          else if (majf(t)) "signal live (unproven slot)"
+          else if (!is.na(g) && g == "BUY") "flickering (below monthly majority)"
           else "washed out to SKIP"
       }
     }
@@ -5866,7 +5883,7 @@ server <- function(input, output, session) {
       notes,
       section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
       section(sprintf(
-                "buy - the period's standing recs: proven %d-month slots endorsed today (win%% · runs on list)",
+                "buy - the period's standing recs: proven %d-month slots backed by the last month of runs (win%% · runs on list)",
                 hz),
               col_of[["buy"]], buys, b_note),
       section("hold - the period's dropped recs, still open (entry · % of horizon)",
