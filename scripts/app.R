@@ -5861,10 +5861,33 @@ server <- function(input, output, session) {
                as.numeric(Sys.Date() - as.Date(dv$entry_of[holds])) / hz_days)))
     h_note <- ifelse(grepl("^matures", why[holds]), unname(why[holds]),
                      sprintf("%s · %d%%", dv$entry_of[holds], h_pct))
+    # checkpoint calendar: qualstream runs every 4 months (Jan/May/Sep 1, in
+    # sync with the qual_scorecards_4monthly DAG); the buy/prune window is the
+    # few days right AFTER the run, so grades inform the prune. Amber while
+    # the window is open, grey while waiting.
+    ck_all <- as.Date(sprintf("%d-%02d-01",
+                rep(as.integer(format(Sys.Date(), "%Y")) + c(-1, 0, 1), each = 3),
+                c(1, 5, 9)))
+    ck_last <- max(ck_all[ck_all <= Sys.Date()])
+    ck_next <- min(ck_all[ck_all > Sys.Date()])
+    ck_open <- Sys.Date() <= ck_last + 4
+    ck_note <- if (ck_open) div(
+        style = "color:#fbbf24; font-size:0.78rem; font-weight:700; margin:0.15rem 0 0.6rem;",
+        sprintf(paste("CHECKPOINT WINDOW OPEN - qualstream ran %s: prune",
+                      "(matured / vetoed / washed-out) and buy the new cohort by %s.",
+                      "Sells in the red section never wait for this window."),
+                format(ck_last), format(ck_last + 4)))
+      else note_line(sprintf(paste(
+        "Next checkpoint: qualstream runs %s (in %d days); buy/prune window %s",
+        "to %s - act after the run so its grades inform the prune. Gate flips,",
+        "delistings and maturities in the sell section do not wait."),
+        format(ck_next), as.integer(ck_next - Sys.Date()),
+        format(ck_next + 1), format(ck_next + 4)))
     # honesty notes: where the record is thin, say so instead of implying signal
     gap_lo <- if (length(dv$coh_dates)) max(dv$coh_dates) else NULL
     led_lo <- min(d$led$d)
     notes <- tagList(
+      ck_note,
       if (dv$coh_n == 0) note_line(sprintf(paste(
         "No %d-month rank slot has ever passed the evidence gate (win rate >=",
         "55%% on >= 100 graded picks), so there are no historical entries at",
