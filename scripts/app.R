@@ -5738,14 +5738,14 @@ server <- function(input, output, session) {
     del_ticks <- if (!is.null(d$meta)) d$meta$ticker else character(0)
     st <- dv$state_now; why <- dv$why_now; hz <- dv$hz
     col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
-    # qualstream top-20 of the current grading period gets an orange + on its
-    # chip; empty until the qualstream table exists and holds grades
+    # qualstream grades per ticker (latest non-vetoed); the top-20 AMONG THE
+    # BUY SECTION get an orange +. Resolved after the buy set is known below;
+    # empty until the qualstream table exists and holds grades.
+    qs_grade <- if (!is.null(d$qs) && nrow(d$qs) > 0 &&
+                    all(c("ticker", "grade") %in% names(d$qs)))
+      setNames(suppressWarnings(as.numeric(d$qs$grade)), d$qs$ticker)
+    else setNames(numeric(0), character(0))
     qs_top <- character(0)
-    if (!is.null(d$qs) && nrow(d$qs) > 0 &&
-        all(c("ticker", "grade") %in% names(d$qs))) {
-      qo <- d$qs[order(-suppressWarnings(as.numeric(d$qs$grade))), , drop = FALSE]
-      qs_top <- utils::head(unique(qo$ticker), 20)
-    }
     chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE) span(
       style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
                              " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
@@ -5803,6 +5803,9 @@ server <- function(input, output, session) {
     b_note <- sprintf("%.0f%% · %d/%d runs", wp[buys],
                       ifelse(is.na(rn[buys]), 0L, rn[buys]), rt)
     b_note <- ifelse(why[buys] == "new entry", paste0(b_note, " · new"), b_note)
+    # orange + = the 20 highest qualstream grades within the buy section only
+    bg <- qs_grade[buys]
+    qs_top <- utils::head(buys[!is.na(bg)][order(-bg[!is.na(bg)])], 20)
     holds <- holds[order(dv$entry_of[holds], holds)]
     hz_days <- round(hz * 30.44)
     h_pct <- pmin(100L, as.integer(round(100 *
@@ -5825,7 +5828,7 @@ server <- function(input, output, session) {
       else note_line(sprintf(
         "Entry record: daily ledger only, beginning %s.", led_lo)),
       if (length(qs_top)) note_line(paste(
-        "Orange + = qualstream top-20 qualitative grade for the current",
+        "Orange + = the 20 highest qualstream grades among the buys, this",
         "period.")))
     tagList(
       notes,
