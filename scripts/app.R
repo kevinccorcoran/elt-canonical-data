@@ -5550,13 +5550,16 @@ server <- function(input, output, session) {
                           WHERE tm.ticker = w.ticker
                             AND tm.delisted_utc::date <= w.train_cutoff_date)"),
         error = function(e) NULL)
-      # qualstream qualitative grades (integration lands ~mid-Aug 2026): a thin
-      # current-period contract - ticker, numeric grade, graded_at. The table
-      # does not exist yet, so this stays dormant (NULL) until qualstream
-      # starts writing; the board then marks its top-20 with an orange +.
+      # qualstream qualitative grades: latest non-vetoed scorecard per ticker
+      # from the semi-annual rubric grader (qualstream repo writes
+      # qual.ticker_scorecards; overall is 0-100). Absent table or no rows ->
+      # dormant; once grades exist the board marks the top-20 with an orange +.
       qs <- tryCatch(dbGetQuery(con, "
-        SELECT ticker, grade, graded_at::date::text AS graded_at
-        FROM qualstream.ticker_grade_current"),
+        SELECT DISTINCT ON (ticker) ticker,
+               overall AS grade, graded_at::date::text AS graded_at
+        FROM qual.ticker_scorecards
+        WHERE NOT veto
+        ORDER BY ticker, as_of DESC, graded_at DESC"),
         error = function(e) NULL)
       ids_seenLC(FALSE)   # id checkboxes re-render fresh with the new universe
       app_dataLC(list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
