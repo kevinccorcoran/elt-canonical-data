@@ -686,16 +686,20 @@ GROUP BY p.d, s.px, s.px0 ORDER BY p.d;", fixed = TRUE)
 LC_QS_COMPARE_SQL <- "
 WITH params AS (SELECT DATE '__ANCHOR__' AS start_d),
 scored AS (
-    SELECT DISTINCT ON (ticker) ticker, overall, veto
+    -- latest NON-VETOED scorecard per ticker: veto filtered BEFORE DISTINCT ON,
+    -- the same rule the board's orange + uses, so chart and board populations
+    -- never diverge once multiple grade runs exist
+    SELECT DISTINCT ON (ticker) ticker, overall
     FROM qual.ticker_scorecards
-    WHERE rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - 150
+    WHERE NOT veto
+      AND rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - 150
     ORDER BY ticker, as_of DESC, graded_at DESC
 ),
 graded_buys AS (
     SELECT b.ticker, (s.overall >= 68) AS passed
     FROM (SELECT DISTINCT ticker FROM serving.return_cluster_ticker_global_action_current
           WHERE global_action = 'BUY') b
-    JOIN scored s ON s.ticker = b.ticker AND NOT s.veto
+    JOIN scored s ON s.ticker = b.ticker
 ),
 entry AS (
     SELECT g.ticker, g.passed,
@@ -6163,8 +6167,8 @@ server <- function(input, output, session) {
       yaxis = list(title = "Equal-weight return (%)", color = "#cbd5e1",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
                    zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%"),
-      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.2),
-      hovermode = "x unified", margin = list(l = 60, r = 20, t = 44, b = 40))
+      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.35),
+      hovermode = "x unified", margin = list(l = 60, r = 20, t = 44, b = 70))
   })
 
   # Honesty caption: the comparison is a single-grade-run snapshot with partial
@@ -6185,7 +6189,10 @@ server <- function(input, output, session) {
                     "(as of %s) applied across the whole window. Coverage is partial - of %d current",
                     "BUYs it graded %d, of which %d passed >= 68. Both baskets are equal-weight, held",
                     "from %s (the current 4-month buy window). One retroactive grade set cannot yet",
-                    "prove qualstream adds return; that needs several cadence cycles of point-in-time grades."),
+                    "prove qualstream adds return; that needs several cadence cycles of point-in-time grades.",
+                    "Basket membership is also retroactive: these are today's buys applied backward,",
+                    "which flatters both baskets against SPY; the graded-vs-passed comparison itself",
+                    "is unaffected since both carry the same tilt."),
               if (is.na(qs_ran)) "n/a" else format(qs_ran), n_all, n_g, n_p, format(d$qscmp_anchor)))
   })
 
