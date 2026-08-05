@@ -16,6 +16,12 @@ x-airflow-common: &airflow-common
     - timeout:2
     - attempts:3
     - rotate
+  # Map host.docker.internal for EVERY inheriting service (webserver/scheduler/
+  # init/shiny). The DAGs and the dashboard's Staging/Dev presets dial the host's
+  # native Postgres via this name; under engines without Docker-Desktop's implicit
+  # resolution (e.g. OrbStack) it does not resolve unless mapped here.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -85,6 +91,42 @@ services:
       retries: 5
       start_period: 30s
 
+  # (airflow-webserver service removed: the combined `airflow` container serves
+  # the UI and owns host port 8080, so a separate webserver service could never
+  # bind -- it sat permanently in Created/port-conflict state.)
+  #
+  # ---------------------------------------------------------------------------
+  # LEGACY CONTAINER, READ BEFORE `docker compose up -d`.
+  # A container named plain `airflow` (created 2026-05-26, same compose project,
+  # from a since-split single-service definition) is what actually serves prod:
+  #     airflow db upgrade && Rscript app.R & Rscript app_violin.R &
+  #     airflow webserver & airflow scheduler
+  # It owns host ports 3838 (this board), 3839 (violin) and 8080 (Airflow UI),
+  # and `docker compose up` never removed it because the service was renamed
+  # rather than deleted (orphans survive without --remove-orphans).
+  #
+  # Consequences, all observed rather than theorised:
+  #   * airflow-shiny below can never bind 3838, so it published no ports, ran
+  #     no R process at all, and was stopped on 2026-08-05. Starting it again
+  #     without freeing 3838 just recreates dead weight.
+  #   * two schedulers run (here and in the legacy container). This is FINE --
+  #     Airflow 2 supports multiple schedulers, and `airflow jobs check
+  #     --job-type SchedulerJob --hostname $HOSTNAME` reports one alive job per
+  #     host. A check without --hostname says "Found 2 alive jobs", which is
+  #     the HA topology, not a fault.
+  #
+  # DECOMMISSIONED 2026-08-05: the two services below (airflow-webserver and
+  # airflow-violin) restore what the legacy container uniquely provided, so it
+  # was stopped and every role now runs in its own service. It is stopped, NOT
+  # removed -- `docker start airflow` is the rollback, and it will re-seize
+  # 3838/3839/8080 if the compose services are not running. Do not run
+  # `docker compose up --remove-orphans` until you are happy to lose that
+  # rollback. Verified before the swap: the shiny image serves 200 on a spare
+  # port, and its httpuv/later stack (1.6.9/1.3.0) is identical to the legacy
+  # container's, so the swap changed nothing about the segfault-ABI warning the
+  # entrypoint prints -- that predates this and needs an image rebuild.
+  # ---------------------------------------------------------------------------
+
   airflow-webserver:
     <<: *airflow-common
     container_name: airflow-webserver
@@ -95,14 +137,35 @@ services:
       airflow-init:
         condition: service_completed_successfully
     command: bash -c "airflow webserver"
-    ports:
-      - "8080:8080"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS --max-time 8 http://localhost:8080/health >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 60s
+    ports:
+      # Loopback-only: reach remotely via SSH tunnel.
+      - "127.0.0.1:8080:8080"
+
+  # Second Shiny board (violin). app_violin.R hardcodes host=0.0.0.0 port=3839,
+  # so unlike app.R it needs no SHINY_PORT and has no watchdog wrapper.
+  airflow-violin:
+    <<: *airflow-common
+    container_name: airflow-violin
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: bash -c "Rscript /opt/airflow/scripts/app_violin.R"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 8 http://localhost:3839/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    ports:
+      # Loopback-only: unauthenticated dashboard. Reach remotely via SSH tunnel.
+      - "127.0.0.1:3839:3839"
 
   airflow-shiny:
     <<: *airflow-common
@@ -111,8 +174,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # host.docker.internal is mapped on the shared anchor above (all services).
     # Resilient launcher: app.R in a restart loop (crash/OOM self-heals) plus a
-    # watchdog that restarts it if 3838 stops responding (hang self-heals).
+    # watchdog that restarts it if the port stops responding (hang self-heals).
     command: bash /opt/airflow/scripts/shiny_entrypoint.sh
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS --max-time 8 http://localhost:3838/ >/dev/null || exit 1"]

@@ -4,6 +4,10 @@ services:
     container_name: dbt-docs-canonical
     restart: unless-stopped
     working_dir: /app/dbt/src/app
+    # DB_HOST below is host.docker.internal; map it so it resolves under engines
+    # without Docker-Desktop's implicit host-gateway (e.g. OrbStack).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - .env.docs
     environment:

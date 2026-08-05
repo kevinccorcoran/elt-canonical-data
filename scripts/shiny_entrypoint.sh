@@ -1,12 +1,29 @@
 #!/usr/bin/env bash
-# Resilient launcher for the Shiny dashboard on port 3838.
+# Resilient launcher for the Shiny dashboard.
 #   - app.R runs in a restart loop, so a crash or OOM-kill self-heals.
-#   - a watchdog restarts app.R if 3838 stops responding, so a hang self-heals.
+#   - a watchdog restarts app.R if the port stops responding, so a hang self-heals.
 # DB-level protection (connect_timeout + statement_timeout) lives in app.R's
 # get_con() helper; this script is the process-level backstop.
+# Port is env-overridable (SHINY_PORT), matching app.R's runApp default of 3838.
 set -u
+PORT="${SHINY_PORT:-3838}"
+
+# Preflight: the r-cran-shiny apt bundle's event-loop stack (httpuv <= 1.6.9 /
+# later 1.3.0) segfaults R in execCallbacks under reconnect churn. The
+# Dockerfile installs a fixed stack from CRAN; if a stale image ever serves the
+# old ABI again, say so LOUDLY on every start instead of crashing in silence.
+preflight() {
+  local ver
+  ver=$(Rscript -e 'cat(as.character(packageVersion("httpuv")), as.character(packageVersion("later")))' 2>/dev/null)
+  echo "[preflight] event-loop stack: httpuv/later = ${ver:-unknown}"
+  case "${ver%% *}" in
+    1.6.[0-9]|1.[0-5].*)
+      echo "[preflight] ERROR: stale httpuv (${ver%% *}) - known segfault ABI (crashes under reconnect churn). Rebuild the image: cd docker/airflow && docker compose build && docker compose up -d --no-deps airflow-shiny" ;;
+  esac
+}
 
 run_app() {
+  preflight
   while true; do
     echo "[supervisor] starting app.R"
     Rscript /opt/airflow/scripts/app.R > /opt/airflow/scripts/shiny.log 2>&1
@@ -27,18 +44,18 @@ run_app() {
 
 watchdog() {
   local fails=0
-  sleep 120          # grace period for the initial data load
+  sleep 60           # grace period for the initial data load
   while true; do
-    sleep 30
-    if curl -fsS --max-time 10 http://localhost:3838/ >/dev/null 2>&1; then
+    sleep 15
+    if curl -fsS --max-time 10 "http://localhost:${PORT}/" >/dev/null 2>&1; then
       fails=0
     else
       fails=$((fails + 1))
-      echo "[watchdog] 3838 unresponsive (${fails}/3)"
-      if [ "$fails" -ge 3 ]; then
+      echo "[watchdog] ${PORT} unresponsive (${fails}/2)"
+      if [ "$fails" -ge 2 ]; then
         echo "[watchdog] restarting app.R"
         python3 /opt/airflow/scripts/shiny_monitor.py record \
-          --kind watchdog --note "3838 unresponsive x${fails}" \
+          --kind watchdog --note "${PORT} unresponsive x${fails}" \
           --logfile /opt/airflow/scripts/shiny.log \
           --events /opt/airflow/scripts/shiny_events.log 2>/dev/null || true
         for p in /proc/[0-9]*; do

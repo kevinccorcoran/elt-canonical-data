@@ -2,60 +2,94 @@
 
 ## What's running
 
-### `airflow` container — port 8080 (DAGs), 3838 + 3839 (Shiny)
-**What it does:** runs your scheduled data pipelines (DAGs) and serves two Shiny dashboards on the same container.
-**Why one container:** the dashboards read the same data the DAGs produce. Putting Python (Airflow) and R (Shiny) in one image avoids volume juggling and inter-container networking just to share files.
-**Built from:** `elt-canonical-data/Dockerfile` — apache/airflow base + R + Shiny libraries + Python `requirements.txt`.
+The old single `airflow` container was split into one service per concern. All of
+it is defined in `docker/airflow/docker-compose.yml`, built from the repo-root
+`Dockerfile` (apache/airflow base + R + Shiny libs + Python `requirements.txt`).
 
-### `airflow-postgres` container — port 5432
-**What it does:** a Postgres database that Airflow uses **only for itself** — DAG run history, task states, scheduling metadata.
-**Why separate from your Mac Postgres:** Airflow has churn (millions of metadata rows over time). Keeping its DB inside docker means you can wipe it without touching your real trading data, and your real DB never ages from Airflow internals.
+### Port registry (single source of truth)
 
-### `dbt-docs` container — port 8889
-**What it does:** serves the dbt lineage graph for the **inference-models** repo only.
-**Why a container at all:** dbt docs needs Python + dbt installed. Containerizing means you don't pollute your laptop's Python with project-specific dbt versions.
-**Why slim and pip-installed at startup:** image is `python:3.11-slim` and runs `pip install dbt-postgres` on boot. That keeps the image tiny and always uses the latest dbt — at the cost of ~30 sec startup.
+Services defined in `docker/airflow/docker-compose.yml`:
 
-### `dbt-docs-canonical` container — port 8890
-**What it does:** same as above but for the **canonical** repo.
-**Why two separate containers:** each repo has its own dbt project. Mixing them produces a lineage graph that shows models from both, which is misleading. Separation keeps each graph honest.
-**Special trick:** this one runs a Python script at startup that **prunes the dbt manifest** to remove anything not in the canonical project. Reason: canonical historically imported the inference repo as a dbt package, leaving leftover model files that still get picked up by `dbt docs generate`.
-**Why `target/` is on an anonymous volume:** the source repo is bind-mounted into the container, but `target/` is intentionally shadowed by a private docker volume. Without that, anything on the host (or another container) that runs `dbt docs generate` would overwrite the pruned manifest mid-life and silently un-prune the lineage graph.
+| Container | Published | Bind | Purpose |
+|---|---|---|---|
+| `airflow-init` | — | — | one-shot `airflow db upgrade`, then exits |
+| `airflow-scheduler` | — | — | runs DAGs (no port) |
+| `airflow-shiny` | 3838 -> 3838 | 127.0.0.1 | the Shiny dashboard (`scripts/app.R`) |
+| `airflow-postgres` | 5435 -> 5432 | 127.0.0.1 | Airflow **metadata** DB (dbname `airflow`) |
+| `dbt-docs` (inference repo) | 8889 -> 8080 | 127.0.0.1 | dbt lineage for inference-models |
+| `dbt-docs-canonical` | 8890 -> 8080 | 127.0.0.1 | dbt lineage for canonical |
 
-### `moltbot-postgres-1` container
-**Unrelated project.** Ignore.
+The **Airflow UI (8080)** is served by a separate long-running webserver container,
+not a service in this compose (the `airflow-webserver` service was removed — see the
+comment in the compose — because a combined container already owns host 8080).
 
----
+Notes:
+- Everything in this compose is loopback-only; reach the dashboard remotely via SSH
+  tunnel (it is unauthenticated).
+- **The dashboard port is env-overridable:** `SHINY_PORT` (default 3838) is honored
+  by both `scripts/app.R` (`runApp`) and `scripts/shiny_entrypoint.sh`.
+- `app_violin.R` / port **3839 is retired** — it is no longer launched or published
+  (it only survives in `docker-compose.yml.bak`).
+- `airflow-postgres` is the metadata DB only (DAG run history, task states). It is
+  deliberately NOT any trading database and must not be reachable off-host.
 
-## How env vars get into the airflow container
+### The Shiny launcher (`airflow-shiny`)
+`scripts/shiny_entrypoint.sh` runs `app.R` in a restart loop plus a watchdog that
+restarts it if the port stops answering — a crash, OOM-kill, or hang self-heals. A
+preflight warns loudly if a stale `httpuv/later` ABI (the known segfault stack) ever
+ships in the image.
 
-There are two ways docker-compose feeds environment variables, and **the order matters**:
-
-1. **`env_file: .env`** — every line in the file becomes an env var inside the container. This is where secrets and DB credentials live.
-2. **`environment:` block in compose** — these *override* env_file values. Useful for hardcoded settings (e.g. `AIRFLOW__CORE__PARALLELISM: 4`) or for renaming a var (`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DATABASE_URL}`).
-
-**Rule:** never list the same variable name in both. The `environment:` line wins, even if it's empty — that's how `MASSIVE_API_KEY` got silently blanked.
-
-**Active env file:** `docker/airflow/.env`. Templates exist alongside (`.env.dev`, `.env.staging`, `.env.prod`) — to switch envs, copy a template over `.env`.
-
----
-
-## How the airflow container reaches your data
-
-- **Inside docker:** services find each other by container name. Airflow → `airflow-postgres` (its own metadata DB).
-- **Reaching the host (your Mac):** docker provides a magic hostname `host.docker.internal` that resolves to your laptop. Airflow uses this to reach your **Mac Postgres** (where the real trading data lives).
-
-So inside the container, `DB_HOST=host.docker.internal DB_PORT=5432` means *"connect to whatever Postgres is on my Mac at 5432."*
+### dbt-docs containers
+`python:3.11-slim` that `pip install dbt-postgres` on boot and serve the pruned
+lineage as static HTML. `dbt-docs-canonical` prunes the manifest to canonical-only
+models and shadows `target/` with an anonymous volume so a host `dbt docs generate`
+can't silently un-prune it.
 
 ---
 
-## Why source code is mounted, not baked into the image
+## How env vars get into the containers
 
-The compose file mounts `src/`, `dbt/`, `airflow/dags/` as volumes. That means:
-- You edit code on your Mac → it's instantly visible inside the container, no rebuild.
-- Only system-level stuff (R packages, system libs, Python deps) lives in the image. That changes rarely, so rebuilds are rare.
+Two mechanisms, and **order matters**:
 
-Trade-off: the container is tied to your Mac filesystem. Not portable, but convenient for solo dev.
+1. **`env_file: .env`** — every line becomes an env var in the container. Secrets and
+   DB credentials live here.
+2. **`environment:` block in compose** — these *override* env_file values (e.g.
+   `AIRFLOW__CORE__PARALLELISM`, or renaming via `${AIRFLOW_DATABASE_URL}`).
+
+**Rule:** never list the same variable in both — the `environment:` line wins even if
+empty (that's how `MASSIVE_API_KEY` once got silently blanked).
+
+**Active env file:** `docker/airflow/.env` (gitignored). A tracked, secret-free
+template `docker/airflow/.env.example` documents every required key —
+`cp .env.example .env` and fill in. The `.env.dev/.staging/.prod` files are
+switchable presets you copy over `.env`. The dbt-docs container has its own
+`.env.docs` (template: `.env.example` in the same dir).
+
+---
+
+## How the containers reach your data
+
+- **Inside docker:** services find each other by container name — Airflow reaches
+  `airflow-postgres` (its metadata DB) directly.
+- **Reaching the host Mac:** the hostname `host.docker.internal` resolves to your
+  laptop; the DAGs and the dashboard's Staging/Dev presets use it to reach the
+  **Mac-native Postgres** (real trading data). `DB_HOST=host.docker.internal
+  DB_PORT=5432` means "the Postgres on my Mac at 5432."
+- **Explicit mapping:** `host.docker.internal:host-gateway` is declared on the
+  `x-airflow-common` anchor (so every airflow service inherits it) and on both
+  dbt-docs composes. Docker Desktop resolves this name implicitly, but engines like
+  **OrbStack do not** — without the explicit map, connections fail with "could not
+  translate host name."
+
+---
+
+## Why source is mounted, not baked
+
+Compose mounts `src/`, `dbt/`, `airflow/dags/`, `scripts/` (and the sibling
+`elt-inference-models` / `qualstream` repos) as volumes — edit on the Mac, it's live
+in the container, no rebuild. Only system-level deps (R packages, libs, Python) live
+in the image, so rebuilds are rare. `app.R` in particular is read at container start,
+so a change needs `docker restart airflow-shiny`, not a rebuild.
 
 ---
 
@@ -63,40 +97,41 @@ Trade-off: the container is tied to your Mac filesystem. Not portable, but conve
 
 | What | Where |
 |---|---|
-| Airflow image build | `elt-canonical-data/Dockerfile` |
-| Airflow compose | `elt-canonical-data/docker/airflow/docker-compose.yml` |
-| Airflow active env | `elt-canonical-data/docker/airflow/.env` |
-| Env templates | `.env.dev`, `.env.staging`, `.env.prod` (same dir) |
+| Airflow image build | `Dockerfile` |
+| Airflow compose | `docker/airflow/docker-compose.yml` |
+| Airflow active env / template | `docker/airflow/.env` / `.env.example` |
+| Env presets | `.env.dev`, `.env.staging`, `.env.prod` (same dir) |
 | inference dbt-docs compose | `elt-inference-models/docker-compose.docs.yml` |
-| canonical dbt-docs compose | `elt-canonical-data/docker/dbt-docs-canonical/docker-compose.yml` |
+| canonical dbt-docs compose | `docker/dbt-docs-canonical/docker-compose.yml` |
+| Shiny launcher | `scripts/shiny_entrypoint.sh` |
 
 ---
 
 ## Known issues
 
-1. **Edit `.env`, not the compose file.** Secrets live in `.env`. Compose only references variable names.
-2. **Shiny dashboard (3838 or 3839) shows nothing** → R package missing. `docker exec airflow tail /opt/airflow/scripts/shiny.log` for `there is no package called 'X'`. Add to [Dockerfile:8](../Dockerfile#L8) and rebuild.
+1. **Edit `.env`, not the compose file** for secrets. Compose only references names.
+2. **Dashboard shows nothing / an R package is missing** →
+   `docker exec airflow-shiny tail /opt/airflow/scripts/shiny.log` and look for
+   `there is no package called 'X'`; add it to the `Dockerfile` CRAN layer and rebuild.
+3. **"could not translate host name host.docker.internal"** → the service is missing
+   the `extra_hosts` map (see above); it lives on the anchor + both dbt-docs composes.
 
 ---
 
 ## Useful commands
 
 ```bash
-# See what's up
-docker ps
+docker ps                                              # what's up
 
-# Tail airflow logs
-docker logs airflow --tail 50 -f
+# Tail the dashboard log
+docker exec airflow-shiny tail -f /opt/airflow/scripts/shiny.log
 
-# Tail shiny logs
-docker exec airflow tail -f /opt/airflow/scripts/shiny.log
+# Reload the dashboard after an app.R edit (no rebuild)
+docker restart airflow-shiny
 
-# Shell inside airflow
-docker exec -it airflow bash
+# Recreate a service after a compose change (picks up extra_hosts etc.)
+cd docker/airflow && docker compose up -d --force-recreate airflow-webserver airflow-scheduler
 
-# Restart airflow (keeps image)
-cd elt-canonical-data/docker/airflow && docker compose up -d --force-recreate airflow
-
-# Rebuild airflow image (slow — only when Dockerfile changes)
-cd elt-canonical-data/docker/airflow && docker compose build airflow
+# Rebuild the image (slow — only when Dockerfile changes)
+cd docker/airflow && docker compose build && docker compose up -d --no-deps --force-recreate airflow-shiny
 ```

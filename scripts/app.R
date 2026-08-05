@@ -300,17 +300,57 @@ hr {
 .caveat-warning { border-left: 2px solid #f59e0b; }
 "
 
+# ─── Single source of truth for DB endpoints ───
+# Every environment's host/port/user/dbname/sslmode lives here and NOWHERE else
+# (previously duplicated across widget defaults, the get_con dbname map, the
+# sslmode host-regex, and the env-switcher). Env vars override each value so the
+# same code serves local dev and the prod server without editing this table;
+# `pass_env` names the env var the password field is seeded from.
+DB_ENVIRONMENTS <- list(
+  Production = list(host = Sys.getenv("PROD_DB_HOST", ""),
+                    port = Sys.getenv("PROD_DB_PORT", "25060"),
+                    user = Sys.getenv("PROD_DB_USER", "doadmin"),
+                    dbname = Sys.getenv("PROD_DB_NAME", "prod"),
+                    sslmode = "require", pass_env = "PROD_DB_PASSWORD"),
+  Staging    = list(host = Sys.getenv("LOCAL_DB_HOST", "host.docker.internal"),
+                    port = Sys.getenv("LOCAL_DB_PORT", "5432"),
+                    user = Sys.getenv("LOCAL_DB_USER", "postgres"),
+                    dbname = "staging", sslmode = "prefer", pass_env = "DB_PASSWORD"),
+  Dev        = list(host = Sys.getenv("LOCAL_DB_HOST", "host.docker.internal"),
+                    port = Sys.getenv("LOCAL_DB_PORT", "5432"),
+                    user = Sys.getenv("LOCAL_DB_USER", "postgres"),
+                    dbname = "dev", sslmode = "prefer", pass_env = "DB_PASSWORD"))
+DB_ENV_DEFAULT <- "Production"
+
+# ─── Helper: the ONE shared connection bar (rendered once in the navbar header) ───
+# Replaces the old per-tab connection forms: pick env, type the password once,
+# click Connect once, and every tab reads these global inputs.
+connection_bar <- function() {
+  d <- DB_ENVIRONMENTS[[DB_ENV_DEFAULT]]
+  div(class = "conn-bar",
+      style = paste("display:flex; flex-wrap:wrap; align-items:flex-end; gap:0.6rem;",
+                    "padding:0.6rem 0.9rem; margin:0 0 0.5rem; background:rgba(255,255,255,0.03);",
+                    "border:1px solid #1e293b; border-radius:6px;"),
+    div(style = "min-width:130px;",
+        selectInput("db_env", "Environment",
+                    choices = names(DB_ENVIRONMENTS), selected = DB_ENV_DEFAULT, width = "100%")),
+    div(style = "min-width:210px; flex:1 1 210px;",
+        textInput("db_host", "Host", value = d$host, width = "100%")),
+    div(style = "width:90px;",  numericInput("db_port", "Port", value = as.integer(d$port), min = 1, max = 65535, width = "100%")),
+    div(style = "width:120px;", textInput("db_user", "User", value = d$user, width = "100%")),
+    div(style = "min-width:150px;", passwordInput("db_pass", "Password", value = "", width = "100%")),
+    div(actionButton("connect_btn", "Connect", class = "btn-primary")),
+    div(style = "flex:1 1 200px; color:#94a3b8; font-size:0.8rem; padding-bottom:0.4rem;",
+        textOutput("statusMessageConn", inline = TRUE)))
+}
+
 # ─── Helper: sidebar panel for a given tab suffix ───
+# Connection widgets now live in the shared connection_bar(); the sidebar holds
+# only this tab's filters, its Generate button, optional post-Generate refiners,
+# and its own load-status line.
 make_sidebar <- function(suffix, title, filter_widgets, post_widgets = NULL) {
   sidebarPanel(
     h4(title),
-    selectInput(paste0("db_env", suffix), "Environment", choices = c("Production", "Staging", "Dev"), selected = "Production"),
-    textInput(paste0("db_host", suffix), "Host", value = "host.docker.internal"),
-    textInput(paste0("db_port", suffix), "Port", value = "5432"),
-    textInput(paste0("db_user", suffix), "User", value = "postgres"),
-    passwordInput(paste0("db_pass", suffix), "Password", value = ""),
-    actionButton(paste0("connect_btn", suffix), "Connect", class = "btn-primary"),
-    hr(),
     h5("Filters"),
     div(id = paste0("filter_panel", suffix), filter_widgets),
     hr(),
@@ -445,14 +485,42 @@ SELECT p.h AS horizon_months,
        COUNT(*)                                      AS n_cells
 FROM per p GROUP BY p.h ORDER BY p.h;"
 
-# Live ledger basket = the earliest recorded BUY snapshot (inception, 2026-06-16),
-# equal-weighted, graded to the latest bar off the CURRENT series so a post-entry
-# split can't re-base it (same split-safe rule the Buy List ledger replay uses).
-FORECAST_LEDGER_SQL <- "
+# LEDGER REGIME EPOCH. monitoring.prediction_ledger rows before this date were
+# produced by a BUY gate that was replaced on 2026-07-02 (elt-inference-models
+# b650cb2) because it emitted ZERO BUYs and its in-sample screen was measured
+# ANTI-correlated with realized IC (CORR -0.72). The record either side of that
+# boundary is two different systems: BUYs run 63 -> 19 -> 0 through Jul 1, then
+# 0 -> 572 overnight, while SELLs stay flat (~170-186) because only the long gate
+# changed that night. Jul 2's batch was hand-run at 00:30 UTC, 54 minutes BEFORE
+# the commit landed, so Jul 3 07:46 is the first scheduled run on committed code
+# and is the epoch. Nothing that averages runs or grades forward performance may
+# span this date. Smaller boundaries are NOT floored (they would leave 14 usable
+# days): Jul 5 IC tuning settles, Jul 18 the SELL gate becomes performance-based,
+# Jul 23 evidence_status/buy_weight_mature begin.
+# Deliberately NOT applied to: the 30-day majority window (already clears it and
+# always will) and the as-of replay (time travel: it must show what was actually
+# said on the date the user picks).
+LEDGER_EPOCH <- "2026-07-03"
+
+# Live ledger basket = the earliest recorded BUY snapshot at/after the regime
+# epoch (2026-07-03; pre-epoch picks came from the retired gate), equal-weighted,
+# graded to the latest bar off the CURRENT series so a post-entry split can't
+# re-base it (same split-safe rule the Buy List ledger replay uses).
+# Expect entry_d to read EARLIER than the epoch (2026-06-23 at the time of
+# writing) and the per-name entry prices to be non-uniform. That is the ledger's
+# entry_date, i.e. the last price bar available when the call was logged, and
+# prediction_ledger admits names whose last bar is up to 10 days old. The Jun 16
+# anchor hid this because all 63 of its names happened to price at Jun 15; the
+# Jul 3 anchor spreads Jun 23 - Jul 2. Pre-existing and out of scope here (Kevin:
+# the price dating is by design) - but it means the basket banks a few days of
+# drift before the call, so read the first days of this chart loosely.
+FORECAST_LEDGER_SQL <- gsub("__EPOCH__", LEDGER_EPOCH, "
 WITH first_snap AS (
     SELECT ticker, entry_date
     FROM monitoring.prediction_ledger
-    WHERE prediction_date = (SELECT MIN(prediction_date) FROM monitoring.prediction_ledger)
+    WHERE prediction_date = (SELECT MIN(prediction_date)
+                             FROM monitoring.prediction_ledger
+                             WHERE prediction_date >= '__EPOCH__')
       AND global_action = 'BUY'
 ),
 entry_now AS (
@@ -483,7 +551,7 @@ SELECT
           - (SELECT MIN(entry_date) FROM first_snap) )/30.0)::numeric, 2) AS months_held
 FROM first_snap f
 JOIN entry_now e ON e.ticker = f.ticker
-JOIN now_px n ON n.ticker = f.ticker;"
+JOIN now_px n ON n.ticker = f.ticker;", fixed = TRUE)
 
 # Live all-strategy portfolio, REAL calendar monthly series. Buys the CURRENT
 # picks (latest cutoff) starting at __ANCHOR__ via the 6-strategy DCA, values the
@@ -577,14 +645,18 @@ SELECT ps.vdate::text AS vdate, ps.id::int AS id, ROUND(AVG(ps.ret)::numeric,2) 
 FROM per_strat ps GROUP BY ps.id, ps.vdate ORDER BY ps.id, ps.vdate;"
 
 # Live ledger vs Benchmark on the ledger's OWN clock: daily cumulative return of the
-# inception BUY basket (equal-weight, split-safe current-series entry) and the
-# same-day SPY, both rebased to 0 at 2026-06-15. Fast (~0.1s). This is the fair
-# out-of-sample view - the ledger is 6 weeks old and cannot share the 2-year
-# calendar axis with a portfolio that has compounded since 2024.
-FORECAST_LEDGER_SERIES_SQL <- "
+# epoch BUY basket (equal-weight, split-safe current-series entry) and the same-day
+# SPY, both rebased to 0 at the basket's entry date. Fast (~0.1s). This is the fair
+# out-of-sample view - the ledger is weeks old and cannot share the 2-year calendar
+# axis with a portfolio that has compounded since 2024. Anchored at LEDGER_EPOCH,
+# not the ledger's first row: the pre-epoch snapshots were picked by the retired
+# gate, so charting them would grade a system that no longer exists.
+FORECAST_LEDGER_SERIES_SQL <- gsub("__EPOCH__", LEDGER_EPOCH, "
 WITH first_snap AS (
     SELECT ticker, entry_date FROM monitoring.prediction_ledger
-    WHERE prediction_date = (SELECT MIN(prediction_date) FROM monitoring.prediction_ledger)
+    WHERE prediction_date = (SELECT MIN(prediction_date)
+                             FROM monitoring.prediction_ledger
+                             WHERE prediction_date >= '__EPOCH__')
       AND global_action = 'BUY'
 ),
 entry_now AS (SELECT ic.ticker, ic.adj_close AS entry_px
@@ -603,7 +675,60 @@ SELECT p.d::text AS d,
        ROUND((AVG(p.px/NULLIF(p.entry_px,0)-1)*100)::numeric,2) AS ledger_pct,
        ROUND(((s.px/s.px0)-1)::numeric*100,2) AS spy_pct
 FROM px p JOIN spy s ON s.d=p.d
-GROUP BY p.d, s.px, s.px0 ORDER BY p.d;"
+GROUP BY p.d, s.px, s.px0 ORDER BY p.d;", fixed = TRUE)
+
+# Lifecycle qualstream comparison: equal-weight return of the CURRENT BUYs that
+# qualstream graded (latest non-vetoed scorecard) vs the >= 68 subset vs SPY,
+# from the current 4-month window start (__ANCHOR__). DESCRIPTIVE, not a
+# walk-forward test: qualstream's grades are a single as-of snapshot applied
+# across the whole window, and it only covers the curated top-picks (a fraction
+# of the gate's BUYs). Same 68 cut and 150d freshness as the board's orange +.
+LC_QS_COMPARE_SQL <- "
+WITH params AS (SELECT DATE '__ANCHOR__' AS start_d),
+scored AS (
+    SELECT DISTINCT ON (ticker) ticker, overall, veto
+    FROM qual.ticker_scorecards
+    WHERE rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - 150
+    ORDER BY ticker, as_of DESC, graded_at DESC
+),
+graded_buys AS (
+    SELECT b.ticker, (s.overall >= 68) AS passed
+    FROM (SELECT DISTINCT ticker FROM serving.return_cluster_ticker_global_action_current
+          WHERE global_action = 'BUY') b
+    JOIN scored s ON s.ticker = b.ticker AND NOT s.veto
+),
+entry AS (
+    SELECT g.ticker, g.passed,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = g.ticker AND i.date >= (SELECT start_d FROM params)
+       ORDER BY i.date LIMIT 1) AS entry_px
+    FROM graded_buys g
+),
+dates AS (
+    SELECT DISTINCT date AS d FROM cdm.ingest_combined
+    WHERE ticker = 'SPY' AND date >= (SELECT start_d FROM params)
+      AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker = 'SPY')
+),
+px AS (
+    SELECT e.ticker, e.passed, d.d, e.entry_px,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = e.ticker AND i.date <= d.d ORDER BY i.date DESC LIMIT 1) AS px
+    FROM entry e CROSS JOIN dates d
+    WHERE e.entry_px > 0
+),
+spy AS (
+    SELECT d.d,
+      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY' AND date <= d.d ORDER BY date DESC LIMIT 1) AS px,
+      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY' AND date = (SELECT MIN(d) FROM dates)) AS px0
+    FROM dates d
+)
+SELECT p.d::text AS d,
+       ROUND((AVG(p.px / NULLIF(p.entry_px, 0) - 1) * 100)::numeric, 2) AS graded_pct,
+       ROUND((AVG(p.px / NULLIF(p.entry_px, 0) - 1) FILTER (WHERE p.passed) * 100)::numeric, 2) AS passed_pct,
+       ROUND(((s.px / s.px0) - 1)::numeric * 100, 2) AS spy_pct
+FROM px p JOIN spy s ON s.d = p.d
+GROUP BY p.d, s.px, s.px0
+ORDER BY p.d;"
 
 # Risk-adjustment series: the EQUAL-WEIGHT buy-and-hold basket value (=$1 -> avg
 # of price/entry over the picks) and SPY value, monthly, over the hold window.
@@ -627,6 +752,8 @@ FROM vdates v JOIN bv ON bv.d=v.d GROUP BY v.d ORDER BY v.d;"
 # ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
+  # the ONE shared connection, rendered on every tab above its content
+  header = connection_bar(),
   tags$head(
     tags$style(HTML(custom_css)),
     # Auto-heal Shiny's grey disconnect overlay. Forced reconnect stays OFF
@@ -656,7 +783,7 @@ ui <- navbarPage(
   # ── Tab 1: Transition Range ──
   tabPanel("Transition Range",
     sidebarLayout(
-      make_sidebar("T", "Database Connection (Transition)", tagList(
+      make_sidebar("T", "Transition", tagList(
         selectInput("id_valT", "ID", choices = c("Connect first..." = ""), selected = ""),
         selectInput("past_fib_lagT", "Fibonacci Lag Value", choices = c("Connect first..." = ""), selected = ""),
         selectInput("future_fib_lagT", "Future Fibonacci Lag", choices = c("Connect first..." = ""), selected = ""),
@@ -730,7 +857,7 @@ ui <- navbarPage(
   # ── Tab 3: Data QA ──
   tabPanel("Data QA",
     sidebarLayout(
-      make_sidebar("Q", "Database Connection (Data QA)", tagList(
+      make_sidebar("Q", "Data QA", tagList(
         tags$div(
           style = "padding: 0.75rem; background: rgba(255,255,255,0.03);
                    border-left: 2px solid #64748b; border-radius: 4px;
@@ -831,7 +958,7 @@ ui <- navbarPage(
   # ── Tab 4: Ticker Coverage ──
   tabPanel("Coverage",
     sidebarLayout(
-      make_sidebar("V", "Database Connection (Coverage)", tagList(
+      make_sidebar("V", "Coverage", tagList(
         tags$div(
           style = "padding: 0.75rem; background: rgba(255,255,255,0.03);
                    border-left: 2px solid #64748b; border-radius: 4px;
@@ -852,7 +979,7 @@ ui <- navbarPage(
   # ── Tab: Clusters ──
   tabPanel("Clusters",
     sidebarLayout(
-      make_sidebar("K", "Database Connection (Clusters)", tagList()),
+      make_sidebar("K", "Clusters", tagList()),
       mainPanel(div(class = "main-card",
         h4("Per-series scatter",
            style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
@@ -870,7 +997,7 @@ ui <- navbarPage(
   # ── Tab: Top Picks ──
   tabPanel("Shortlist",
     sidebarLayout(
-      make_sidebar("P", "Database Connection (Top Picks)", tagList(
+      make_sidebar("P", "Top Picks", tagList(
         selectInput("id_valP", "Cluster ID", choices = c("Connect first..." = ""), selected = ""),
         sliderInput("top_n_valP", "Top N tickers", min = 5, max = 400, value = 30, step = 5)
       )),
@@ -904,7 +1031,7 @@ ui <- navbarPage(
   # ── Tab: Rank Stability ──
   tabPanel("Rank Stability",
     sidebarLayout(
-      make_sidebar("RS", "Database Connection (Rank Stability)", tagList(
+      make_sidebar("RS", "Rank Stability", tagList(
         selectInput("id_valRS", "Cluster ID",
                     choices = c("Connect first..." = ""), selected = ""),
         sliderInput("top_n_valRS", "Max vingtile to display (1 = top 5%, 20 = bottom 5%)",
@@ -970,7 +1097,7 @@ ui <- navbarPage(
   # ── Tab 8: Model Validation ──
   tabPanel("Model Validation",
     sidebarLayout(
-      make_sidebar("MV", "Database Connection (Model Validation)", tagList(
+      make_sidebar("MV", "Model Validation", tagList(
         selectInput("id_valMV", "Cluster ID",
                     choices = c("Connect first..." = ""), selected = ""),
         selectInput("past_lagMV", "Past lag (Wilson forest)",
@@ -1016,7 +1143,7 @@ ui <- navbarPage(
   # ── Tab 9: Buy List ──
   tabPanel("Predictions",
     sidebarLayout(
-      make_sidebar("BL", "Database Connection (Buy List)", tagList(
+      make_sidebar("BL", "Buy List", tagList(
         radioButtons("date_modeBL", "As-of",
           choiceNames = list(
             tagList("Today (live)",
@@ -1031,10 +1158,19 @@ ui <- navbarPage(
           choiceValues = c("today", "ledger", "backtest"),
           selected = "today"),
         conditionalPanel(
-          condition = "input.date_modeBL == 'ledger'",
+          # day-level precision is only offered where days actually differ: the
+          # recorded BUY list is the one daily view. Picks/ladder snap to the
+          # last walk-forward cutoff, so for them the picker is replaced by an
+          # anchor note (ledger_anchorBL) instead of dead granularity.
+          condition = "input.date_modeBL == 'ledger' && input.bl_viewBL == 'buys'",
           # bounds arrive from Connect via updateDateInput; until then the
           # widget defaults to today and asof_dateBL() returns NULL (no bounds)
           dateInput("ledger_dayBL", NULL, value = NULL, format = "yyyy-mm-dd")),
+        conditionalPanel(
+          condition = paste0("input.date_modeBL == 'ledger' && ",
+                             "typeof input.bl_viewBL !== 'undefined' && ",
+                             "input.bl_viewBL != 'buys'"),
+          uiOutput("ledger_anchorBL")),
         conditionalPanel(
           condition = "input.date_modeBL == 'backtest'",
           selectInput("wf_cutoffBL", "Quarterly cutoff",
@@ -1123,7 +1259,7 @@ ui <- navbarPage(
   # ── Tab: Forecast (backtest growth curve vs live ledger) ──
   tabPanel("Forecast",
     sidebarLayout(
-      make_sidebar("FC", "Database Connection (Forecast)", tagList(
+      make_sidebar("FC", "Forecast", tagList(
         tags$label("As-of date (stand here in the past)", style = "color: #94a3b8; font-weight: 600;"),
         tags$style(HTML(".shiny-split-layout > div { overflow: visible; }")),
         splitLayout(cellWidths = c("30%", "38%", "32%"),
@@ -1167,42 +1303,72 @@ ui <- navbarPage(
     )
   ),
 
-  # ── Tab: Lifecycle (signal state matrix: buy / hold / sell over snapshots) ──
+  # ── Tab: Lifecycle (buy/hold/sell transition grid of points: before -> now) ──
   tabPanel("Lifecycle",
     sidebarLayout(
-      make_sidebar("LC", "Database Connection (Lifecycle)", tagList(
+      make_sidebar("LC", "Lifecycle", tagList(
         selectInput("holdLC", "Hold length (model horizons)",
-                    choices = c("4 months" = "4", "7 months" = "7", "12 months" = "12",
+                    choices = c("1 month" = "1", "2 months" = "2", "4 months" = "4",
+                                "7 months" = "7", "12 months" = "12",
                                 "20 months" = "20", "33 months" = "33"),
                     selected = "12"),
-        tags$span(paste("How long a signaled name is held before its prediction counts as",
-                        "realized. A held name flips to sell when the recorded gate flips",
-                        "to SELL, when this horizon fully elapses (matured), or when the",
-                        "series is delisted."),
+        tags$span(paste("Pick horizon AND hold duration: the board replays the model's",
+                        "hz-month strategy. Entries come from the model's own record:",
+                        "quarterly walk-forward top slots (proven bins only, win rate",
+                        ">= 55% on >= 100 graded picks) plus the daily live ledger.",
+                        "A held name flips to sell when the recorded gate flips to SELL,",
+                        "when this horizon fully elapses (matured), or when the series",
+                        "is delisted."),
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
-        selectInput("nsnapLC", "Snapshots shown",
-                    choices = c("All" = "all", "Last 10" = "10", "Last 20" = "20",
-                                "Last 40" = "40"),
-                    selected = "all"),
-        tags$p(paste("One row per series ever signaled buy; one column per recorded daily",
-                     "snapshot (since 2026-06-16). buy = new entry that day, hold = still",
-                     "maturing (includes gate wash-outs to SKIP), sell = exit (gate flip,",
-                     "matured, or delisted) - sticky until a fresh re-entry. States are",
-                     "computed over the FULL record even when fewer snapshots are shown."),
-               style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;")
+        tags$p(paste("A decision board of the model's calls, by company name.",
+                     "sell = exit now (gate flipped, matured lately, or delisted).",
+                     "buy = the period's standing recs: proven rank slots backed by",
+                     "the majority of the last month's recorded runs (a rolling",
+                     "monthly evaluation, so one off-day cannot demote a durable",
+                     "name), ranked by persistence over the trailing 4-month review",
+                     "window (chip: win rate + BUY on n of N recorded runs).",
+                     "hold = the period's dropped recs, still inside their hold",
+                     "window; the chip shows entry date and % of horizon elapsed.",
+                     "closed = matured more than a month ago, collapsed to a count",
+                     "(full detail in the table). Unproven gate names live in the",
+                     "table only, flagged."),
+               style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;"),
+        uiOutput("idFilterLC")
       )),
       mainPanel(div(class = "main-card",
-        uiOutput("chipsLC"),
-        DT::DTOutput("matrixLC")
+        uiOutput("boardLC"),
+        plotlyOutput("qsCompareLC", height = "320px"),
+        uiOutput("qsCompareNoteLC"),
+        tags$hr(style = "border-color:#1e293b; margin:1.1rem 0 0.8rem;"),
+        tags$div(style = "color:#94a3b8; font-size:0.8rem; margin-bottom:0.5rem;",
+                 paste("Same companies with detail: entry, days held, % of horizon, why.",
+                       "Filter the State column or search; the CSV button exports the lot.")),
+        DT::DTOutput("tableLC")
       ))
     )
   )
 )
 
 # ─── Helper: create a DB connection ───
-get_con <- function(input, suffix) {
-  env   <- input[[paste0("db_env", suffix)]]
-  db_string <- if (env == "Production") "prod" else if (env == "Staging") "staging" else "dev"
+# One shared connection: reads the global connection_bar() inputs (no per-tab
+# suffix). dbname + sslmode come from DB_ENVIRONMENTS keyed by the selected
+# environment; host/port/user still come from the fields so a manual override
+# survives.
+get_con <- function(input) {
+  env <- input$db_env
+  cfg <- DB_ENVIRONMENTS[[env]]
+  if (is.null(cfg)) stop(sprintf("Unknown environment '%s'.", env))
+
+  host_val <- input$db_host
+  port_val <- suppressWarnings(as.integer(input$db_port))
+  if (is.na(port_val)) stop("Port must be a number (e.g. 25060 for prod, 5432 for local).")
+  # sslmode from config; upgrade prefer->require if the host is non-loopback so a
+  # remote host typed under a local preset still gets TLS.
+  ssl_mode <- cfg$sslmode
+  if (ssl_mode == "prefer" &&
+      !grepl("^(host\\.docker\\.internal|localhost|127\\.0\\.0\\.1)$", host_val)) {
+    ssl_mode <- "require"
+  }
 
   # In-container DNS hiccups surface as "could not translate host name ...
   # Temporary failure in name resolution" (EAI_AGAIN). They are transient, so
@@ -1211,18 +1377,14 @@ get_con <- function(input, suffix) {
   transient <- "name resolution|translate host name|EAI_AGAIN|could not connect|server closed the connection|connection timed out"
   attempts  <- 3
   con <- NULL
-  # Enforce TLS for remote (managed) DBs; loopback dev/staging containers do not
-  # serve SSL, so fall back to 'prefer' only for local hosts.
-  host_val  <- input[[paste0("db_host", suffix)]]
-  ssl_mode  <- if (grepl("^(host\\.docker\\.internal|localhost|127\\.0\\.0\\.1)$", host_val)) "prefer" else "require"
   for (i in seq_len(attempts)) {
     con <- tryCatch(
       dbConnect(RPostgres::Postgres(),
-        dbname   = db_string,
+        dbname   = cfg$dbname,
         host     = host_val,
-        port     = as.integer(input[[paste0("db_port", suffix)]]),
-        user     = input[[paste0("db_user", suffix)]],
-        password = input[[paste0("db_pass", suffix)]],
+        port     = port_val,
+        user     = input$db_user,
+        password = input$db_pass,
         sslmode  = ssl_mode,
         connect_timeout = 10
       ),
@@ -1241,22 +1403,17 @@ get_con <- function(input, suffix) {
   con
 }
 
-# ─── Helper: wire up env-switcher for a given suffix ───
-setup_env_switcher <- function(input, session, suffix) {
-  observeEvent(input[[paste0("db_env", suffix)]], {
-    env <- input[[paste0("db_env", suffix)]]
-    if (env == "Production") {
-      updateTextInput(session, paste0("db_host", suffix),
-                      value = Sys.getenv("PROD_DB_HOST", ""))
-      updateTextInput(session, paste0("db_port", suffix), value = Sys.getenv("PROD_DB_PORT", "25060"))
-      updateTextInput(session, paste0("db_user", suffix), value = Sys.getenv("PROD_DB_USER", ""))
-      updateTextInput(session, paste0("db_pass", suffix), value = Sys.getenv("PROD_DB_PASSWORD", ""))
-    } else {
-      updateTextInput(session, paste0("db_host", suffix), value = "host.docker.internal")
-      updateTextInput(session, paste0("db_port", suffix), value = "5432")
-      updateTextInput(session, paste0("db_user", suffix), value = "postgres")
-      updateTextInput(session, paste0("db_pass", suffix), value = Sys.getenv("DB_PASSWORD", ""))
-    }
+# ─── Helper: wire up the ONE global env-switcher ───
+# Fills the shared host/port/user/password fields from DB_ENVIRONMENTS whenever
+# the environment changes (and once on load). Called a single time in server().
+setup_env_switcher <- function(input, session) {
+  observeEvent(input$db_env, {
+    cfg <- DB_ENVIRONMENTS[[input$db_env]]
+    if (is.null(cfg)) return()
+    updateTextInput(session, "db_host", value = cfg$host)
+    updateNumericInput(session, "db_port", value = suppressWarnings(as.integer(cfg$port)))
+    updateTextInput(session, "db_user", value = cfg$user)
+    updateTextInput(session, "db_pass", value = Sys.getenv(cfg$pass_env, ""))
   })
 }
 
@@ -1338,18 +1495,38 @@ server <- function(input, output, session) {
   # page shows a grey overlay and needs one manual reload instead of
   # auto-resuming. Re-enable only if the segfaults are truly gone.
 
+  # ── Shared connection (one form in the navbar header for the whole app) ──
+  # The env switcher and a single validating connect observer live here; every
+  # tab's own Connect logic also listens to input$connect_btn, so one click sets
+  # up all tabs. Enter the password once.
+  setup_env_switcher(input, session)
+  status_msgConn <- reactiveVal("Ready. Pick an environment and click Connect (top right).")
+  output$statusMessageConn <- renderText({ status_msgConn() })
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgConn("Enter the password, then Connect."); return() }
+    status_msgConn(sprintf("Connecting to %s ...", input$db_env))
+    tryCatch({
+      con <- get_con(input)
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      cfg <- DB_ENVIRONMENTS[[input$db_env]]
+      status_msgConn(sprintf("Connected to %s (%s@%s/%s). Now Generate on any tab.",
+                             input$db_env, input$db_user, input$db_host, cfg$dbname))
+    }, error = function(e) status_msgConn(paste("Connection failed:", e$message)))
+    # ignoreInit: do NOT fire on page load (before the password auto-populates),
+    # otherwise the empty-password guard leaves a misleading status on screen.
+  }, priority = 100, ignoreInit = TRUE)
+
   # ── TRANSITION: Reactive values ──
   app_dataT <- reactiveVal(NULL)
   status_msgT <- reactiveVal("Ready")
   output$statusMessageT <- renderText({ status_msgT() })
-  setup_env_switcher(input, session, "T")
 
   # ── TRANSITION: Connect ──
-  observeEvent(input$connect_btnT, {
-    if (input$db_passT == "") { status_msgT("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgT("Error: Password is not set."); return() }
     status_msgT("Connecting...")
     tryCatch({
-      con <- get_con(input, "T")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals         <- dbGetQuery(con, "SELECT DISTINCT id FROM scoring.return_cluster_lag_viability ORDER BY 1")
       past_fib_vals   <- dbGetQuery(con, "SELECT DISTINCT fibonacci_lag_value FROM scoring.return_cluster_lag_viability ORDER BY 1")
@@ -1363,7 +1540,7 @@ server <- function(input, output, session) {
 
   # ── TRANSITION: Execute ──
   observeEvent(input$execute_T, {
-    if (input$db_passT == "") { status_msgT("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgT("Error: Password is not set."); return() }
     if (input$id_valT == "" || input$past_fib_lagT == "" || input$future_fib_lagT == "") {
       status_msgT("Error: Select filters first."); return()
     }
@@ -1404,7 +1581,7 @@ server <- function(input, output, session) {
       ORDER BY past_excess_return_z_bucket_num;",
       input$past_fib_lagT, input$future_fib_lagT, input$id_valT, actionable_clause)
     tryCatch({
-      con <- get_con(input, "T")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       res <- dbGetQuery(con, query)
       for(col in names(res)) { if(!(col %in% c("signal","alpha_signal","recommendation"))) res[[col]] <- as.numeric(res[[col]]) }
@@ -1589,16 +1766,15 @@ server <- function(input, output, session) {
                  nrow(initial_hist), length(unique(initial_hist$run_at)))
   )
   output$statusMessageQ <- renderText({ status_msgQ() })
-  setup_env_switcher(input, session, "Q")
 
   qa_schemasQ <- reactiveVal(NULL)
 
   # ── DATA QA: Connect — load list of schemas that have tables with a ticker column ──
-  observeEvent(input$connect_btnQ, {
-    if (input$db_passQ == "") { status_msgQ("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgQ("Error: Password is not set."); return() }
     status_msgQ("Loading schemas...")
     tryCatch({
-      con <- get_con(input, "Q")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       schemas <- dbGetQuery(con, "
         SELECT table_schema, COUNT(*) AS n_tables
@@ -1635,13 +1811,13 @@ server <- function(input, output, session) {
 
   # ── DATA QA: Execute ──
   observeEvent(input$execute_Q, {
-    if (input$db_passQ == "") { status_msgQ("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgQ("Error: Password is not set."); return() }
 
     # First click: load schemas and show checkboxes, then stop and wait for user
     if (is.null(qa_schemasQ())) {
       status_msgQ("Loading schemas...")
       schemas <- tryCatch({
-        con <- get_con(input, "Q")
+        con <- get_con(input)
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
         dbGetQuery(con, "
           SELECT table_schema, COUNT(*) AS n_tables
@@ -1666,7 +1842,7 @@ server <- function(input, output, session) {
     }
     status_msgQ("Scanning tables...")
     tryCatch({
-      con <- get_con(input, "Q")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
 
       placeholders <- paste(as.character(DBI::dbQuoteString(con, selected)), collapse = ",")
@@ -1876,14 +2052,13 @@ server <- function(input, output, session) {
   app_dataV <- reactiveVal(NULL)
   status_msgV <- reactiveVal("Ready")
   output$statusMessageV <- renderText({ status_msgV() })
-  setup_env_switcher(input, session, "V")
 
   # ── COVERAGE: Connect — just smoke-test the query source ──
-  observeEvent(input$connect_btnV, {
-    if (input$db_passV == "") { status_msgV("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgV("Error: Password is not set."); return() }
     status_msgV("Connecting...")
     tryCatch({
-      con <- get_con(input, "V")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       n <- dbGetQuery(con,
         "SELECT COUNT(DISTINCT ticker) AS n FROM cdm.ingest_combined")$n[1]
@@ -1893,10 +2068,10 @@ server <- function(input, output, session) {
 
   # ── COVERAGE: Execute — load min/max date per ticker ──
   observeEvent(input$execute_V, {
-    if (input$db_passV == "") { status_msgV("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgV("Error: Password is not set."); return() }
     status_msgV("Loading coverage...")
     tryCatch({
-      con <- get_con(input, "V")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
         SELECT ticker,
@@ -1973,13 +2148,12 @@ server <- function(input, output, session) {
   app_dataK   <- reactiveVal(NULL)
   status_msgK <- reactiveVal("Not connected.")
   output$statusMessageK <- renderText({ status_msgK() })
-  setup_env_switcher(input, session, "K")
 
-  observeEvent(input$connect_btnK, {
-    if (input$db_passK == "") { status_msgK("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgK("Error: Password is not set."); return() }
     status_msgK("Connecting...")
     tryCatch({
-      con <- get_con(input, "K")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       n <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM analysis.ticker_cluster_segments")$n[1]
       status_msgK(sprintf("Connected — %s tickers clustered.", n))
@@ -1987,10 +2161,10 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$execute_K, {
-    if (input$db_passK == "") { status_msgK("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgK("Error: Password is not set."); return() }
     status_msgK("Loading clusters...")
     tryCatch({
-      con <- get_con(input, "K")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
         SELECT s.ticker,
@@ -2072,14 +2246,13 @@ server <- function(input, output, session) {
   cluster_ic_metaP <- reactiveVal(NULL)
   status_msgP <- reactiveVal("Ready")
   output$statusMessageP <- renderText({ status_msgP() })
-  setup_env_switcher(input, session, "P")
 
   # ── TOP PICKS: Connect ──
-  observeEvent(input$connect_btnP, {
-    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgP("Error: Password is not set."); return() }
     status_msgP("Connecting...")
     tryCatch({
-      con <- get_con(input, "P")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
         "SELECT DISTINCT id FROM serving.return_cluster_ticker_summary_current ORDER BY 1")
@@ -2090,7 +2263,7 @@ server <- function(input, output, session) {
 
   # ── TOP PICKS: Execute ──
   observeEvent(input$execute_P, {
-    if (input$db_passP == "") { status_msgP("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgP("Error: Password is not set."); return() }
     if (input$id_valP == "") { status_msgP("Error: Select a cluster first."); return() }
     status_msgP("Running query...")
 
@@ -2147,7 +2320,7 @@ server <- function(input, output, session) {
       input$id_valP, input$top_n_valP, input$id_valP)
 
     tryCatch({
-      con <- get_con(input, "P")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       res <- dbGetQuery(con, query)
       res$agg_rank <- as.integer(res$agg_rank)
@@ -2283,13 +2456,12 @@ server <- function(input, output, session) {
   app_dataRS_meta     <- reactiveVal(NULL)
   status_msgRS <- reactiveVal("Ready")
   output$statusMessageRS <- renderText({ status_msgRS() })
-  setup_env_switcher(input, session, "RS")
 
-  observeEvent(input$connect_btnRS, {
-    if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgRS("Error: Password is not set."); return() }
     status_msgRS("Connecting...")
     tryCatch({
-      con <- get_con(input, "RS")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
         "SELECT DISTINCT id FROM validation.walk_forward_pctile_summary ORDER BY id")
@@ -2316,7 +2488,7 @@ server <- function(input, output, session) {
     if (is.null(id_sel) || id_sel == "" || id_sel == "ALL") {
       updateSliderInput(session, "top_n_valRS", value = 20); return()
     }
-    con <- tryCatch(get_con(input, "RS"), error = function(e) NULL)
+    con <- tryCatch(get_con(input), error = function(e) NULL)
     # register cleanup BEFORE the early return so a half-open connection
     # can't leak when con is NULL-but-partially-created
     on.exit({ if (!is.null(con) && DBI::dbIsValid(con)) try(dbDisconnect(con), silent = TRUE) }, add = TRUE)
@@ -2334,7 +2506,7 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   observeEvent(input$execute_RS, {
-    if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgRS("Error: Password is not set."); return() }
     if (is.null(input$id_valRS) || input$id_valRS == "") {
       status_msgRS("Error: Select a cluster (or 'All clusters') first."); return()
     }
@@ -2428,7 +2600,7 @@ server <- function(input, output, session) {
     }
 
     tryCatch({
-      con <- get_con(input, "RS")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       slot_df <- dbGetQuery(con, slot_query)
       slot_df$rank_within_cluster <- as.integer(slot_df$rank_within_cluster)
@@ -2624,10 +2796,10 @@ server <- function(input, output, session) {
   app_dataRS_allIds <- reactiveVal(NULL)
 
   observeEvent(input$execute_all_RS, {
-    if (input$db_passRS == "") { status_msgRS("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgRS("Error: Password is not set."); return() }
     status_msgRS("Querying all ids...")
     tryCatch({
-      con <- get_con(input, "RS")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       df <- dbGetQuery(con, "
         SELECT id, pctile_bin, fut_lag, mean_return, median_return, hit_rate, sharpe_like, n_obs
@@ -2853,13 +3025,12 @@ server <- function(input, output, session) {
   app_dataMV_forest <- reactiveVal(NULL)
   status_msgMV <- reactiveVal("Ready")
   output$statusMessageMV <- renderText({ status_msgMV() })
-  setup_env_switcher(input, session, "MV")
 
-  observeEvent(input$connect_btnMV, {
-    if (input$db_passMV == "") { status_msgMV("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgMV("Error: Password is not set."); return() }
     status_msgMV("Connecting...")
     tryCatch({
-      con <- get_con(input, "MV")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       id_vals <- dbGetQuery(con,
         "SELECT DISTINCT id FROM validation.cell_credibility
@@ -2882,12 +3053,12 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$execute_MV, {
-    if (input$db_passMV == "") { status_msgMV("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgMV("Error: Password is not set."); return() }
     status_msgMV("Running queries...")
     id_filter <- if (is.null(input$id_valMV) || input$id_valMV %in% c("", "ALL")) "" else
       sprintf("AND id = %d", as.integer(input$id_valMV))
     tryCatch({
-      con <- get_con(input, "MV")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
 
       ic_df <- dbGetQuery(con, "
@@ -3162,7 +3333,6 @@ server <- function(input, output, session) {
   wf_cutoffsBL <- reactiveVal(NULL)      # all distinct backtest cutoffs (desc) for the bundle picker
   status_msgBL <- reactiveVal("Ready")
   output$statusMessageBL <- renderText({ status_msgBL() })
-  setup_env_switcher(input, session, "BL")
 
   # As-of date from the three-mode control. Modes map 1:1 onto the resolver's
   # existing ranges: today -> latest snapshot (>= b[2] => current), ledger ->
@@ -3322,7 +3492,7 @@ server <- function(input, output, session) {
     if (!identical(m, prev_m)) return()        # date/mode flip: date observer handles it
     if (identical(v, prev_v)) return()         # no real change
     if (m %in% c("wf", "ledger") &&
-        !is.null(input$db_passBL) && nzchar(input$db_passBL) &&
+        !is.null(input$db_pass) && nzchar(input$db_pass) &&
         !is.null(ledger_boundsBL())) bump_genBL()
   })
 
@@ -3465,11 +3635,11 @@ server <- function(input, output, session) {
     }
   })
 
-  observeEvent(input$connect_btnBL, {
-    if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgBL("Error: Password is not set."); return() }
     status_msgBL("Connecting...")
     tryCatch({
-      con <- get_con(input, "BL")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       n <- dbGetQuery(con, "
         SELECT COUNT(*) AS n
@@ -3518,16 +3688,42 @@ server <- function(input, output, session) {
   # The pre-first-cutoff branch is gone (the backtest picker only offers real
   # cutoffs) and so is the "(no newer cutoff yet)" note (the newest choice is
   # tagged "(newest)" in the dropdown itself).
+  # In Recorded-day mode the picks/ladder views cannot honor day precision:
+  # they snap to the newest walk-forward cutoff <= the day, which is the SAME
+  # cutoff for every recorded day. This block replaces the daily picker there.
+  output$ledger_anchorBL <- renderUI({
+    cuts <- wf_cutoffsBL()
+    anchor <- if (length(cuts) > 0) format(max(as.Date(cuts)), "%Y-%m-%d")
+              else "the last walk-forward cutoff"
+    div(style = paste0("background:rgba(255,255,255,0.03); border:1px solid ",
+                       "rgba(255,255,255,0.08); border-radius:6px; padding:0.5rem ",
+                       "0.65rem; margin-bottom:0.6rem;"),
+      tags$p(sprintf(paste("This view is anchored to cutoff %s and is identical",
+                           "for every recorded day."), anchor),
+             style = "color:#94a3b8; font-size:0.72rem; margin:0 0 0.25rem;"),
+      tags$p(paste("Use 'Backtest cutoff' to move the anchor, or the BUY list",
+                   "view for day-by-day changes."),
+             style = "color:#64748b; font-size:0.7rem; margin:0;"))
+  })
+
   output$wf_resolvedBL <- renderUI({
     mode <- input$date_modeBL
     d <- asof_dateBL()
     if (is.null(mode) || is.null(d) || length(d) != 1 || is.na(d)) return(NULL)
     sty <- "color:#64748b; font-size:0.7rem; margin:-0.4rem 0 0.75rem;"
+    # ledger mode reads differently per view: only the BUY list is daily
+    ledger_msg <- if (!is.null(input$bl_viewBL) && input$bl_viewBL != "buys") {
+      cuts <- wf_cutoffsBL()
+      anchor <- if (length(cuts) > 0) format(max(as.Date(cuts)), "%Y-%m-%d") else "?"
+      sprintf("Anchored to cutoff %s - same for every recorded day.", anchor)
+    } else {
+      sprintf(paste("Snapshot for %s (weekend/holiday dates resolve",
+                    "to the latest snapshot on or before)."),
+              format(d, "%Y-%m-%d"))
+    }
     msg <- switch(mode,
       today  = "Live data - the model as of right now.",
-      ledger = sprintf(paste("Snapshot for %s (weekend/holiday dates resolve",
-                             "to the latest snapshot on or before)."),
-                       format(d, "%Y-%m-%d")),
+      ledger = ledger_msg,
       backtest = sprintf(paste("Backtest state at cutoff %s - the same for",
                                "every date this bundle covers."),
                          format(d, "%Y-%m-%d")),
@@ -3557,12 +3753,12 @@ server <- function(input, output, session) {
     a <- asof_dateBL()
     if (identical(a, last_asof_genBL())) return()
     last_asof_genBL(a)
-    if (!is.null(input$db_passBL) && nzchar(input$db_passBL) &&
+    if (!is.null(input$db_pass) && nzchar(input$db_pass) &&
         !is.null(ledger_boundsBL())) bump_genBL()
   }, ignoreInit = TRUE)
 
   observeEvent(gen_triggerBL(), {
-    if (input$db_passBL == "") { status_msgBL("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgBL("Error: Password is not set."); return() }
     status_msgBL("Running query...")
     b <- ledger_boundsBL()
     asof <- asof_dateBL()
@@ -3583,7 +3779,7 @@ server <- function(input, output, session) {
       # is missing (first build lands with the next walk-forward) or has no
       # cutoff early enough, fall through to the full ranking replay below.
       handled <- tryCatch({
-        con <- get_con(input, "BL")
+        con <- get_con(input)
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
         has_picks <- isTRUE(tryCatch(dbGetQuery(con, "
           SELECT EXISTS (SELECT 1 FROM information_schema.tables
@@ -3739,7 +3935,7 @@ server <- function(input, output, session) {
         ORDER BY m.id, r.rank_within_cluster;",
         format(asof, "%Y-%m-%d"), hz, hz, hz, hz)
       tryCatch({
-        con <- get_con(input, "BL")
+        con <- get_con(input)
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
         # delisting metadata is display-only enrichment; a DB without the
         # table (env dropdown on dev) degrades to plain 'delisted'. Injected
@@ -3851,7 +4047,7 @@ server <- function(input, output, session) {
         __METAJOIN__
         ORDER BY excess_vs_spy_pct DESC NULLS LAST;",
         format(asof, "%Y-%m-%d"))
-        con <- get_con(input, "BL")
+        con <- get_con(input)
         on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
         # same display-only delisting enrichment as the wf branch (gsub
         # tokens, not sprintf - see the %% note above)
@@ -3888,7 +4084,7 @@ server <- function(input, output, session) {
     # payoff evidence fixed to fut_lag <= 12 (matched short horizons)
     fut_cap <- 12L
     tryCatch({
-      con <- get_con(input, "BL")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       # evidence_status ships with the Phase A dbt deploy; the query adapts so
       # the dashboard works BEFORE and AFTER the column lands on prod
@@ -4955,7 +5151,6 @@ server <- function(input, output, session) {
   fc_ledger    <- reactiveVal(NULL)
   fc_ledseries <- reactiveVal(NULL)
   output$statusMessageFC <- renderText({ status_msgFC() })
-  setup_env_switcher(input, session, "FC")
 
   # The valid cluster ids depend on which cutoff the History-start resolves to
   # (id 4 exists at the Dec-2024 cutoff but not at Jun-2024), so the checkboxes
@@ -4990,12 +5185,12 @@ server <- function(input, output, session) {
     updateCheckboxGroupInput(session, "idsFC", choices = ids, selected = ids, inline = TRUE)
   }
 
-  observeEvent(input$connect_btnFC, {
-    if (input$db_passFC == "") { status_msgFC("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgFC("Error: Password is not set."); return() }
     status_msgFC("Connecting...")
     fc_curve(NULL); fc_ledger(NULL); fc_ledseries(NULL)  # invalidate caches on (re)connect
     tryCatch({
-      con <- get_con(input, "FC")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       n <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM monitoring.prediction_ledger")$n[1]
       cim <- dbGetQuery(con, "SELECT DISTINCT train_cutoff_date AS cutoff, id FROM validation.walk_forward_top_picks ORDER BY 1, 2")
@@ -5056,12 +5251,12 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$execute_FC, {
-    if (input$db_passFC == "") { status_msgFC("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgFC("Error: Password is not set."); return() }
     anchor <- asof_dateFC()
     if (is.null(anchor) || is.na(anchor)) { status_msgFC("Pick an as-of date first."); return() }
     status_msgFC(sprintf("Loading selected set + Benchmark from %s to today...", format(anchor, "%b %Y")))
     tryCatch({
-      con <- get_con(input, "FC")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       DBI::dbExecute(con, "SET statement_timeout = '120s'")
       ids_sel <- as.integer(input$idsFC)
@@ -5400,14 +5595,18 @@ server <- function(input, output, session) {
   # horizon/snapshot-count changes without re-querying.
   app_dataLC   <- reactiveVal(NULL)
   status_msgLC <- reactiveVal("Ready")
+  # whether the id checkboxes have delivered a value since the last Generate:
+  # distinguishes "not rendered yet" (NULL -> show all) from a real
+  # deselect-all (NULL -> show nothing)
+  ids_seenLC   <- reactiveVal(FALSE)
+  observeEvent(input$idsLC, ids_seenLC(TRUE), ignoreNULL = TRUE)
   output$statusMessageLC <- renderText({ status_msgLC() })
-  setup_env_switcher(input, session, "LC")
 
-  observeEvent(input$connect_btnLC, {
-    if (input$db_passLC == "") { status_msgLC("Error: Password is not set."); return() }
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgLC("Error: Password is not set."); return() }
     status_msgLC("Connecting...")
     tryCatch({
-      con <- get_con(input, "LC")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
       b <- dbGetQuery(con, "
         SELECT COUNT(*) AS n, COUNT(DISTINCT prediction_date) AS d,
@@ -5419,56 +5618,180 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$execute_LC, {
-    if (input$db_passLC == "") { status_msgLC("Error: Password is not set."); return() }
+    if (input$db_pass == "") { status_msgLC("Error: Password is not set."); return() }
     status_msgLC("Loading the signal record...")
     tryCatch({
-      con <- get_con(input, "LC")
+      con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      led <- dbGetQuery(con, "
+      # Floored at LEDGER_EPOCH: pre-epoch BUYs came from the retired gate, and
+      # letting them into the walk would start maturity clocks (and therefore
+      # "matured"/"sell" states) from entries the current model never made.
+      led <- dbGetQuery(con, gsub("__EPOCH__", LEDGER_EPOCH, "
         SELECT prediction_date::text AS d, ticker, global_action
         FROM monitoring.prediction_ledger
-        ORDER BY ticker, prediction_date")
+        WHERE prediction_date >= '__EPOCH__'
+        ORDER BY ticker, prediction_date", fixed = TRUE))
       if (nrow(led) == 0) { status_msgLC("No recorded snapshots yet."); return() }
       gate <- dbGetQuery(con, "
-        SELECT DISTINCT ticker, global_action AS gate_today
+        SELECT ticker, global_action AS gate_today, id
         FROM serving.return_cluster_ticker_global_action_current")
-      # split-safe grading per ledger row (both price legs from the CURRENT
-      # series); we join it on the ENTRY row of each position in the derive step
-      scored <- tryCatch(dbGetQuery(con, "
-        SELECT prediction_date::text AS d, ticker,
-               ROUND(ticker_return::numeric, 1)  AS ret_pct,
-               ROUND(excess_vs_spy::numeric, 1)  AS excess_pct,
-               days_held
-        FROM monitoring.prediction_ledger_scored
-        WHERE global_action = 'BUY'"), error = function(e) NULL)
       # raw.ticker_metadata holds ONLY delisted names -> presence = delisted
       meta <- tryCatch(dbGetQuery(con, "
         SELECT ticker, name AS company_name, delisting_category,
                delisted_utc::date::text AS delisted_date
         FROM raw.ticker_metadata"), error = function(e) NULL)
-      app_dataLC(list(led = led, gate = gate, scored = scored, meta = meta))
-      status_msgLC(sprintf("Loaded - %d series across %d snapshots.",
-                           length(unique(led$ticker[led$global_action == "BUY"])),
-                           length(unique(led$d))))
+      # shortlist evidence PER HORIZON: the ticker's walk-forward rank bin at
+      # the latest cutoff and that bin's realized win rate - the SAME rule as
+      # the Shortlist tab (>= 55% win on >= 100 graded observations). One row
+      # per (ticker, fut_lag); DISTINCT ON keeps the best-evidence bin when a
+      # ticker sits in two clusters.
+      sl <- tryCatch(dbGetQuery(con, "
+        WITH mx AS (
+            SELECT fut_lag, MAX(train_cutoff_date) AS cut
+            FROM validation.walk_forward_ticker_rank
+            WHERE fut_lag IN (1,2,4,7,12,20,33)
+            GROUP BY fut_lag
+        ), wfbin AS (
+            SELECT r.fut_lag, m.id AS eid, r.ticker,
+                   NTILE(20) OVER (PARTITION BY r.fut_lag, m.id
+                     ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                   )::int AS wf_bin
+            FROM validation.walk_forward_ticker_rank r
+            JOIN mx ON mx.fut_lag = r.fut_lag AND mx.cut = r.train_cutoff_date
+            JOIN validation.walk_forward_cluster_id_map m
+              ON m.train_cutoff_date = r.train_cutoff_date
+             AND m.cluster_id       = r.cluster_id
+            WHERE r.ticker_score IS NOT NULL AND r.ticker_score <> 0
+        )
+        SELECT DISTINCT ON (w.ticker, w.fut_lag) w.ticker, w.fut_lag,
+               ROUND(ps.hit_rate::numeric * 100, 1) AS bin_win_pct,
+               ps.n_obs::int AS bin_n
+        FROM wfbin w
+        LEFT JOIN validation.walk_forward_pctile_summary ps
+          ON ps.id = w.eid AND ps.fut_lag = w.fut_lag AND ps.pctile_bin = w.wf_bin
+        ORDER BY w.ticker, w.fut_lag, ps.hit_rate DESC NULLS LAST"),
+        error = function(e) NULL)
+      # the model's own historical entry record: at each quarterly walk-forward
+      # cutoff inside the longest hold window, the top vingtile per LONG id
+      # (wf_bin = 1, eid <= 12) whose bin evidence passes the Shortlist rule.
+      # All 7 horizons load at once; derivedLC filters fut_lag == hz so the
+      # hold-length selector re-derives without re-querying.
+      coh <- tryCatch(dbGetQuery(con, "
+        WITH wfbin AS (
+            SELECT r.train_cutoff_date, r.fut_lag, m.id AS eid, r.ticker,
+                   NTILE(20) OVER (PARTITION BY r.train_cutoff_date, r.fut_lag, m.id
+                     ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                   )::int AS wf_bin
+            FROM validation.walk_forward_ticker_rank r
+            JOIN validation.walk_forward_cluster_id_map m
+              ON m.train_cutoff_date = r.train_cutoff_date
+             AND m.cluster_id       = r.cluster_id
+            WHERE r.fut_lag IN (1,2,4,7,12,20,33)
+              AND r.ticker_score IS NOT NULL AND r.ticker_score <> 0
+              AND r.train_cutoff_date >= (CURRENT_DATE - INTERVAL '33 months')::date
+        )
+        SELECT w.train_cutoff_date::text AS d, w.fut_lag, w.ticker, w.eid AS id,
+               ROUND(ps.hit_rate::numeric * 100, 1) AS bin_win_pct,
+               ps.n_obs::int AS bin_n
+        FROM wfbin w
+        JOIN validation.walk_forward_pctile_summary ps
+          ON ps.id = w.eid AND ps.fut_lag = w.fut_lag AND ps.pctile_bin = w.wf_bin
+        WHERE w.wf_bin = 1 AND w.eid <= 12
+          AND ps.hit_rate >= 0.55 AND ps.n_obs >= 100
+          -- the WF ranking covers the full universe incl. delisted names (the
+          -- survivorship fix); a buyable cohort must drop names already dead
+          -- at the cutoff
+          AND NOT EXISTS (SELECT 1 FROM raw.ticker_metadata tm
+                          WHERE tm.ticker = w.ticker
+                            AND tm.delisted_utc::date <= w.train_cutoff_date)"),
+        error = function(e) NULL)
+      # qualstream qualitative grades: latest non-vetoed scorecard per ticker
+      # from the semi-annual rubric grader (qualstream repo writes
+      # qual.ticker_scorecards; overall is 0-100). Absent table or no rows ->
+      # dormant; once grades exist the board marks the top-20 with an orange +.
+      # qualstream grades: pinned to the LIVE series (buy_decision_v1 -- other
+      # rubric_versions score on different scales and must not mix into one
+      # ranking) and bounded by freshness (150d ~ the 4-month cadence + slack)
+      # so an orange + can expire instead of living forever.
+      qs <- tryCatch(dbGetQuery(con, "
+        SELECT DISTINCT ON (ticker) ticker,
+               overall AS grade, as_of::text AS as_of,
+               graded_at::date::text AS graded_at
+        FROM qual.ticker_scorecards
+        WHERE NOT veto
+          AND rubric_version = 'buy_decision_v1'
+          AND as_of >= CURRENT_DATE - 150
+        ORDER BY ticker, as_of DESC, graded_at DESC"),
+        error = function(e) NULL)
+      # descriptive qualstream comparison series (LC_QS_COMPARE_SQL): current
+      # BUYs qualstream graded vs the >= 68 subset vs SPY, equal-weight from the
+      # current 4-month window start = the last Jan/May/Sep checkpoint.
+      ck_all <- as.Date(sprintf("%d-%02d-01",
+                  rep(as.integer(format(Sys.Date(), "%Y")) + c(-1, 0, 1), each = 3),
+                  c(1, 5, 9)))
+      qs_anchor <- max(ck_all[ck_all <= Sys.Date()])
+      qscmp <- tryCatch(coerce_numeric_cols(
+        dbGetQuery(con, gsub("__ANCHOR__", format(qs_anchor, "%Y-%m-%d"),
+                             LC_QS_COMPARE_SQL, fixed = TRUE)),
+        c("graded_pct", "passed_pct", "spy_pct")), error = function(e) NULL)
+      ids_seenLC(FALSE)   # id checkboxes re-render fresh with the new universe
+      app_dataLC(list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
+                      qs = qs, qscmp = qscmp, qscmp_anchor = qs_anchor))
+      status_msgLC(sprintf(
+        "Loaded - %d proven cohort picks across %d quarterly cutoffs + %d live series across %d snapshots.",
+        if (is.null(coh)) 0L else nrow(coh),
+        if (is.null(coh)) 0L else length(unique(coh$d)),
+        length(unique(led$ticker[led$global_action == "BUY"])),
+        length(unique(led$d))))
     }, error = function(e) { status_msgLC(paste("Error:", e$message)) })
   })
 
-  # State machine + summary, re-derived live on horizon / snapshot changes
+  # State machine + summary, re-derived live on horizon changes without
+  # re-querying. The snapshot stream at horizon hz is the model's own record:
+  # quarterly walk-forward cohort picks (fut_lag == hz) followed by the daily
+  # live ledger. The walk is unchanged; only the inputs got deeper.
   derivedLC <- reactive({
     d <- app_dataLC(); req(d)
     hz <- suppressWarnings(as.integer(input$holdLC)); if (is.na(hz)) hz <- 12L
     led <- d$led
-    dates <- sort(unique(led$d))
-    tickers <- sort(unique(led$ticker[led$global_action == "BUY"]))
+    ch  <- if (!is.null(d$coh) && nrow(d$coh) > 0)
+             d$coh[d$coh$fut_lag == hz, , drop = FALSE]
+           else NULL
+    coh_dates <- if (!is.null(ch) && nrow(ch) > 0) sort(unique(ch$d)) else character(0)
+    dates <- sort(unique(c(coh_dates, led$d)))
+    tickers <- sort(unique(c(led$ticker[led$global_action == "BUY"],
+                             if (!is.null(ch)) ch$ticker else character(0))))
     if (length(tickers) == 0) return(NULL)
-    act  <- setNames(led$global_action, paste(led$ticker, led$d))
+    # ledger actions first; cohort picks add a BUY at their cutoff date unless
+    # the ledger already recorded that (ticker, date) - the recorded call wins.
+    act <- setNames(led$global_action, paste(led$ticker, led$d))
+    if (!is.null(ch) && nrow(ch) > 0) {
+      ck <- paste(ch$ticker, ch$d)
+      ck <- ck[!(ck %in% names(act))]
+      if (length(ck)) act <- c(act, setNames(rep("BUY", length(ck)), ck))
+    }
     dl   <- if (!is.null(d$meta) && nrow(d$meta) > 0)
               setNames(suppressWarnings(as.Date(d$meta$delisted_date)), d$meta$ticker)
             else setNames(as.Date(character(0)), character(0))
+    # proven-at-hz evidence (today's rank bin at the latest cutoff, this lag):
+    # the Shortlist rule that gates the board's buy section
+    slh <- if (!is.null(d$sl) && nrow(d$sl) > 0 && "fut_lag" %in% names(d$sl))
+             d$sl[d$sl$fut_lag == hz, , drop = FALSE]
+           else NULL
+    prov_of <- if (!is.null(slh) && nrow(slh) > 0)
+                 setNames(!is.na(slh$bin_win_pct) & slh$bin_win_pct >= 55 &
+                          !is.na(slh$bin_n)       & slh$bin_n >= 100, slh$ticker)
+               else setNames(logical(0), character(0))
+    wpct <- if (!is.null(slh) && nrow(slh) > 0)
+              setNames(as.numeric(slh$bin_win_pct), slh$ticker) else numeric(0)
+    provf <- function(t) t %in% names(prov_of) && isTRUE(prov_of[[t]])
     M <- matrix("", nrow = length(tickers), ncol = length(dates),
                 dimnames = list(tickers, dates))
     entry_of <- setNames(rep(NA_character_, length(tickers)), tickers)
+    exit_of  <- setNames(rep(NA_character_, length(tickers)), tickers)
     reason_of <- setNames(rep("", length(tickers)), tickers)
+    src_of  <- setNames(rep(NA_character_, length(tickers)), tickers)
+    mat_of  <- setNames(rep(as.Date(NA), length(tickers)), tickers)
     for (t in tickers) {
       open <- FALSE; sold <- FALSE; entry_d <- NA_character_; mat_d <- as.Date(NA)
       dl_d <- if (t %in% names(dl)) dl[[t]] else as.Date(NA)
@@ -5479,79 +5802,436 @@ server <- function(input, output, session) {
             open <- TRUE; entry_d <- D
             mat_d <- seq(as.Date(D), by = paste(hz, "months"), length.out = 2)[2]
             M[t, j] <- "buy"; reason_of[[t]] <- "new signal"
+            src_of[[t]] <- if (D %in% coh_dates) "cohort" else "ledger"
           }
         } else if (open && !sold) {                 # held: check exit triggers
           if (!is.na(a) && a == "SELL") {
-            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"; reason_of[[t]] <- "gate flipped"
-          } else if (!is.na(dl_d) && dl_d <= as.Date(D)) {
-            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"; reason_of[[t]] <- "delisted"
-          } else if (as.Date(D) >= mat_d) {
-            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"; reason_of[[t]] <- "matured"
+            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
+            reason_of[[t]] <- "gate flipped"; exit_of[[t]] <- D
+          } else if ((!is.na(dl_d) && dl_d <= as.Date(D)) || as.Date(D) >= mat_d) {
+            # both can have elapsed between sparse snapshots: earlier event wins
+            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
+            reason_of[[t]] <- if (!is.na(dl_d) && dl_d <= as.Date(D) && dl_d <= mat_d)
+              "delisted" else "matured"
+            exit_of[[t]] <- D
+          } else if (!is.na(a) && a == "BUY") {
+            M[t, j] <- "buy"; reason_of[[t]] <- "signal continuing"   # gate still says BUY
           } else {
-            M[t, j] <- "hold"
-            reason_of[[t]] <- if (!is.na(a) && a == "BUY") "signal continuing" else "maturing"
+            M[t, j] <- "hold"; reason_of[[t]] <- "maturing"          # washed to SKIP, still held
           }
         } else {                                    # sold: sticky until re-entry
           if (!is.na(a) && a == "BUY") {
             open <- TRUE; sold <- FALSE; entry_d <- D
             mat_d <- seq(as.Date(D), by = paste(hz, "months"), length.out = 2)[2]
-            M[t, j] <- "buy"; reason_of[[t]] <- "re-entry"
+            M[t, j] <- "buy"; reason_of[[t]] <- "re-entry"; exit_of[[t]] <- NA_character_
+            src_of[[t]] <- if (D %in% coh_dates) "cohort" else "ledger"
           } else M[t, j] <- "sell"
         }
       }
       entry_of[[t]] <- entry_d
+      mat_of[[t]]   <- mat_d
     }
+    # current-decision bucket (the board's truth), 4 states as of TODAY:
+    #   sell   - action item: matured/delisted/gate-flipped within ~a month
+    #   buy    - proven rank slot backed by the MAJORITY of the last month's
+    #            recorded runs (rolling monthly evaluation: one off-day cannot
+    #            demote a durable rec, one on-day cannot promote a flicker)
+    #   hold   - open position below the monthly majority
+    #   closed - the exit is > 30 days old; history, not an action item
+    today <- Sys.Date()
+    led_dd <- as.Date(led$d)
+    d30 <- sort(unique(led_dd[led_dd >= today - 30]))
+    b30 <- led[led_dd >= today - 30 & led$global_action == "BUY", , drop = FALSE]
+    share_of <- if (nrow(b30) > 0) {
+      fb <- tapply(as.Date(b30$d), b30$ticker, min)   # first BUY inside window
+      nb <- tapply(b30$d, b30$ticker, length)
+      # denominator starts at the name's first window appearance so a fresh
+      # entrant (3/3 runs) qualifies while a long flicker (8/21) does not
+      setNames(mapply(function(n, f) n / max(1L, sum(d30 >= f)), nb, fb),
+               names(nb))
+    } else setNames(numeric(0), character(0))
+    majf <- function(t) t %in% names(share_of) && share_of[[t]] >= 0.5
+    gate_now <- setNames(as.character(d$gate$gate_today), d$gate$ticker)
+    fin <- M[, ncol(M)]
+    state_now <- setNames(rep("hold", length(tickers)), tickers)
+    why_now   <- setNames(rep("washed out to SKIP", length(tickers)), tickers)
+    for (t in tickers) {
+      e <- as.Date(entry_of[[t]])
+      mat_d <- mat_of[[t]]
+      dl_d <- if (t %in% names(dl)) dl[[t]] else as.Date(NA)
+      g <- if (t %in% names(gate_now)) gate_now[[t]] else NA_character_
+      if (fin[[t]] == "sell") {                     # recorded exit in the walk
+        r <- reason_of[[t]]
+        # date the exit really happened: true maturity/delist date, not the
+        # (possibly much later) snapshot that first observed it
+        ref_d <- if (r == "matured") mat_d
+                 else if (r == "delisted" && !is.na(dl_d)) dl_d
+                 else suppressWarnings(as.Date(exit_of[[t]]))
+        stale <- !is.na(ref_d) && as.numeric(today - ref_d) > 30
+        state_now[[t]] <- if (stale) "closed" else "sell"
+        why_now[[t]]   <- if (is.na(ref_d)) r else sprintf("%s %s", r, format(ref_d))
+        next
+      }
+      if (!is.na(dl_d) && dl_d <= today) {          # open but delisted by now
+        state_now[[t]] <- if (as.numeric(today - dl_d) > 30) "closed" else "sell"
+        why_now[[t]]   <- sprintf("delisted %s", format(dl_d))
+      } else if (!is.na(mat_d) && today >= mat_d) { # open but horizon elapsed
+        state_now[[t]] <- if (as.numeric(today - mat_d) > 30) "closed" else "sell"
+        why_now[[t]]   <- sprintf("matured %s", format(mat_d))
+      } else if (!is.na(g) && g == "SELL") {
+        state_now[[t]] <- "sell"; why_now[[t]] <- "gate flipped (today)"
+      } else if (majf(t) && provf(t)) {
+        state_now[[t]] <- "buy"
+        why_now[[t]] <- if (!is.na(e) && as.numeric(today - e) <= 7) "new entry"
+                        else sprintf("held since %s", entry_of[[t]])
+      } else {                                      # hold: open, below majority
+        d2m <- if (is.na(mat_d)) NA_real_ else as.numeric(mat_d - today)
+        why_now[[t]] <- if (!is.na(d2m) && d2m <= 30)
+            sprintf("matures %s", format(mat_d))
+          else if (majf(t)) "signal live (unproven slot)"
+          else if (!is.na(g) && g == "BUY") "flickering (below monthly majority)"
+          else "washed out to SKIP"
+      }
+    }
+    # board membership: cohort entries earned their slot at entry; ledger names
+    # must be proven at this horizon today. Everything else is table-only.
+    board_ok <- setNames(
+      vapply(tickers, function(t)
+        identical(src_of[[t]], "cohort") || provf(t), logical(1)),
+      tickers)
+    # signal persistence over the review window (trailing 4 months of daily
+    # runs, floored at the regime epoch): on how many recorded runs was this name
+    # a BUY? The period's real buy recs are the durable ones - this ranks the buy
+    # section and rides on every chip, so a day-one flicker can't outrank a name
+    # endorsed all period. The floor matters HERE most of all: 686 names held
+    # pre-epoch BUY runs, and unfloored they bank persistence the current model
+    # never awarded them. It cut both ways - CARR/HWM/NXT read 25% (10/40) while
+    # the live gate has not bought them once (0/24), and genuinely durable names
+    # were held down (ICHR 88% -> 100%, PENG 83% -> 96%).
+    win_lo <- max(today - 122, as.Date(LEDGER_EPOCH))
+    in_win <- as.Date(led$d) >= win_lo
+    runs_tot <- length(unique(led$d[in_win]))
+    pb <- led[in_win & led$global_action == "BUY", ]
+    runs_of <- table(factor(pb$ticker, levels = tickers))
+    runs_of <- setNames(as.integer(runs_of), names(runs_of))
     list(M = M, dates = dates, tickers = tickers,
-         entry_of = entry_of, reason_of = reason_of, hz = hz)
+         entry_of = entry_of, exit_of = exit_of, reason_of = reason_of, hz = hz,
+         state_now = state_now, why_now = why_now,
+         mat_of = mat_of, src_of = src_of, prov_of = prov_of, wpct = wpct,
+         board_ok = board_ok, coh_dates = coh_dates,
+         coh_n = if (is.null(ch)) 0L else nrow(ch),
+         runs_of = runs_of, runs_tot = runs_tot)
   })
 
-  output$chipsLC <- renderUI({
-    dv <- derivedLC(); if (is.null(dv)) return(NULL)
-    fin <- dv$M[, ncol(dv$M)]
-    chip <- function(lab, n, col) span(
-      style = sprintf("background:%s22; color:%s; border:1px solid %s55; border-radius:6px; padding:4px 12px; margin-right:8px; font-weight:600;", col, col, col),
-      sprintf("%d %s", n, lab))
-    n_mat <- sum(fin == "sell" & dv$reason_of == "matured")
-    div(style = "margin-bottom:0.75rem;",
-      chip("buy",  sum(fin == "buy"),  "#10b981"),
-      chip("hold", sum(fin == "hold"), "#eab308"),
-      chip("sell", sum(fin == "sell"), "#dc2626"),
-      span(sprintf("of the sells, %d matured (horizon %dmo). Latest snapshot %s.",
-                   n_mat, dv$hz, dv$dates[length(dv$dates)]),
-           style = "color:#64748b; font-size:0.75rem;"))
+  # The decision board: three name sections ordered by action (exit list first,
+  # then today's endorsed buys, then the maturing holds). Every ticker is
+  # readable directly; the table below adds detail, filters, and CSV.
+  # cluster-id filter (mirrors the Predictions tab): checkboxes for the ids
+  # present in the loaded universe, all on by default; uncheck to narrow. The
+  # board and the table both read input$idsLC.
+  output$idFilterLC <- renderUI({
+    d <- app_dataLC(); if (is.null(d) || is.null(d$gate$id)) return(NULL)
+    ids <- sort(unique(stats::na.omit(c(
+      as.integer(d$gate$id),
+      if (!is.null(d$coh)) as.integer(d$coh$id)))))
+    if (!length(ids)) return(NULL)
+    div(style = "margin-bottom:0.6rem;",
+      tags$label("Cluster id filter (all on; uncheck to narrow)",
+                 style = paste0("color:#94a3b8; font-size:0.72rem; font-weight:600;",
+                                " display:block; margin-bottom:0.3rem;")),
+      checkboxGroupInput("idsLC", NULL, choices = ids, selected = ids, inline = TRUE),
+      # buttons, not links: same control pair as the Predictions/Forecast tabs
+      actionButton("idsAllLC", "Select all",
+                   style = "padding:2px 10px; font-size:0.72rem; margin-right:0.35rem;"),
+      actionButton("idsNoneLC", "Deselect all",
+                   style = "padding:2px 10px; font-size:0.72rem;"))
+  })
+  observeEvent(input$idsAllLC, {
+    d <- app_dataLC(); req(d)
+    # as.character: checkbox values are strings client-side; integers can miss
+    updateCheckboxGroupInput(session, "idsLC",
+      selected = as.character(sort(unique(stats::na.omit(as.integer(d$gate$id))))))
+  })
+  observeEvent(input$idsNoneLC, {
+    updateCheckboxGroupInput(session, "idsLC", selected = character(0))
   })
 
-  output$matrixLC <- DT::renderDT({
+  output$boardLC <- renderUI({
+    dv <- derivedLC(); if (is.null(dv)) return(div(
+      style = "color:#64748b; padding:1rem; font-size:0.85rem;",
+      "Connect and Generate to load the signal record."))
+    d <- app_dataLC()
+    del_ticks <- if (!is.null(d$meta)) d$meta$ticker else character(0)
+    st <- dv$state_now; why <- dv$why_now; hz <- dv$hz
+    col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
+    # qualstream grades per ticker (latest non-vetoed); the top-20 AMONG THE
+    # BUY SECTION get an orange +. Resolved after the buy set is known below;
+    # empty until the qualstream table exists and holds grades.
+    qs_grade <- if (!is.null(d$qs) && nrow(d$qs) > 0 &&
+                    all(c("ticker", "grade") %in% names(d$qs)))
+      setNames(suppressWarnings(as.numeric(d$qs$grade)), d$qs$ticker)
+    else setNames(numeric(0), character(0))
+    qs_top <- character(0)
+    chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE) span(
+      style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
+                             " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
+                             " margin:2px; font-size:0.78rem; font-weight:600;%s"),
+                      colr, colr, colr,
+                      if (strike) " text-decoration:line-through; opacity:0.7;" else ""),
+      if (nzchar(note)) sprintf("%s · %s", t, note) else t,
+      if (plus) span("+", style = "color:#fb923c; font-weight:800; margin-left:3px;"))
+    section <- function(title, colr, ticks, notes, max_h = NA) {
+      div(style = "margin-bottom:1rem;",
+        div(style = sprintf("color:%s; font-weight:700; margin-bottom:0.35rem;", colr),
+            sprintf("%s (%d)", title, length(ticks))),
+        div(style = if (!is.na(max_h))
+              sprintf("display:flex; flex-wrap:wrap; max-height:%dpx; overflow-y:auto;", max_h)
+            else "display:flex; flex-wrap:wrap;",
+          mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks,
+                                      plus = t %in% qs_top),
+                 ticks, notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)))
+    }
+    note_line <- function(txt) div(
+      style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;", txt)
+    # board universe: cohort entries + proven-at-hz ledger names; the unproven
+    # rest of the gate lives in the table below, flagged
+    bt <- names(st)[dv$board_ok[names(st)]]
+    # cluster-id filter: keep only selected ids; names with no current cluster
+    # (delisted, ~1%) always show. NULL before the checkboxes first render
+    # keeps everything; NULL after that is a real deselect-all -> empty board.
+    id_of <- if (!is.null(d$gate$id))
+               setNames(suppressWarnings(as.integer(d$gate$id)), d$gate$ticker)
+             else setNames(integer(0), character(0))
+    if (!is.null(d$coh) && nrow(d$coh) > 0) {   # cohort id fills gate gaps
+      ex <- d$coh[!(d$coh$ticker %in% names(id_of)), c("ticker", "id")]
+      ex <- ex[!duplicated(ex$ticker), , drop = FALSE]
+      if (nrow(ex)) id_of <- c(id_of, setNames(as.integer(ex$id), ex$ticker))
+    }
+    sel_id <- input$idsLC
+    keep_id <- function(v) {
+      if (is.null(sel_id))
+        return(if (isTRUE(ids_seenLC())) v[FALSE] else v)
+      v[is.na(id_of[v]) | id_of[v] %in% as.integer(sel_id)]
+    }
+    bt <- keep_id(bt)
+    sells  <- sort(bt[st[bt] == "sell"])
+    buys   <- bt[st[bt] == "buy"]
+    holds  <- bt[st[bt] == "hold"]
+    closed <- sort(bt[st[bt] == "closed"])
+    # buys = the period's surviving recs: ordered by signal persistence over
+    # the review window (BUY on how many recorded runs), then win rate. The
+    # chip carries both, so a day-one flicker reads differently from a name
+    # endorsed the entire period.
+    wp <- dv$wpct
+    rn <- dv$runs_of; rt <- max(1L, dv$runs_tot)
+    rb <- ifelse(is.na(rn[buys]), 0L, rn[buys])
+    buys <- buys[order(-rb, -ifelse(is.na(wp[buys]), 0, wp[buys]), buys)]
+    b_note <- sprintf("%.0f%% · %d/%d runs", wp[buys],
+                      ifelse(is.na(rn[buys]), 0L, rn[buys]), rt)
+    b_note <- ifelse(why[buys] == "new entry", paste0(b_note, " · new"), b_note)
+    # orange + = qualstream's endorsement within the buy section: a GRADE
+    # THRESHOLD, not a fixed top-N. A rank cut splits ties arbitrarily (grades
+    # are coarse -- 11 names once tied on 62, so head(.., 20) marked 5 of them
+    # and dropped 6 identical ones on alphabetical order), and a fixed N always
+    # marks N names however weak the crop. The cap is only a backstop against a
+    # future re-calibration inflating every grade.
+    qs_min <- 68L; qs_cap <- 25L
+    bg <- qs_grade[buys]
+    qs_ok <- buys[!is.na(bg) & bg >= qs_min]
+    qs_top <- utils::head(qs_ok[order(-qs_grade[qs_ok], qs_ok)], qs_cap)
+    holds <- holds[order(dv$entry_of[holds], holds)]
+    hz_days <- round(hz * 30.44)
+    h_pct <- pmin(100L, as.integer(round(100 *
+               as.numeric(Sys.Date() - as.Date(dv$entry_of[holds])) / hz_days)))
+    h_note <- ifelse(grepl("^matures", why[holds]), unname(why[holds]),
+                     sprintf("%s · %d%%", dv$entry_of[holds], h_pct))
+    # checkpoint calendar: qualstream runs every 4 months (Jan/May/Sep 1, in
+    # sync with the qual_scorecards_4monthly DAG); the buy/prune window is the
+    # few days right AFTER the run, so grades inform the prune. Amber while
+    # the window is open, grey while waiting.
+    ck_all <- as.Date(sprintf("%d-%02d-01",
+                rep(as.integer(format(Sys.Date(), "%Y")) + c(-1, 0, 1), each = 3),
+                c(1, 5, 9)))
+    ck_last <- max(ck_all[ck_all <= Sys.Date()])
+    ck_next <- min(ck_all[ck_all > Sys.Date()])
+    ck_open <- Sys.Date() <= ck_last + 4
+    # Did qualstream ACTUALLY run? Read MAX(as_of) from the loaded grades rather
+    # than asserting it from the calendar -- a silently failed DAG must not be
+    # announced as a completed run.
+    qs_ran <- if (!is.null(d$qs) && nrow(d$qs) > 0 && "as_of" %in% names(d$qs))
+                suppressWarnings(max(as.Date(d$qs$as_of))) else as.Date(NA)
+    ck_note <- if (ck_open && !is.na(qs_ran) && qs_ran >= ck_last) div(
+        style = "color:#fbbf24; font-size:0.78rem; font-weight:700; margin:0.15rem 0 0.6rem;",
+        sprintf(paste("CHECKPOINT WINDOW OPEN - qualstream ran %s: prune",
+                      "(matured / vetoed / washed-out) and buy the new cohort by %s.",
+                      "Sells in the red section never wait for this window."),
+                format(qs_ran), format(ck_last + 4)))
+      else if (ck_open) div(
+        style = "color:#f87171; font-size:0.78rem; font-weight:700; margin:0.15rem 0 0.6rem;",
+        sprintf(paste("CHECKPOINT WINDOW OPEN - but NO qualstream grades recorded",
+                      "for %s (latest grades: %s). Check the qual_scorecards_4monthly",
+                      "DAG before pruning; sells in the red section never wait."),
+                format(ck_last),
+                if (is.na(qs_ran)) "none" else format(qs_ran)))
+      else note_line(sprintf(paste(
+        "Next checkpoint: qualstream runs %s (in %d days); buy/prune window %s",
+        "to %s - act after the run so its grades inform the prune. Gate flips,",
+        "delistings and maturities in the sell section do not wait.%s"),
+        format(ck_next), as.integer(ck_next - Sys.Date()),
+        format(ck_next + 1), format(ck_next + 4),
+        if (is.na(qs_ran)) "" else sprintf(" Latest recorded grades: %s.", format(qs_ran))))
+    # honesty notes: where the record is thin, say so instead of implying signal
+    gap_lo <- if (length(dv$coh_dates)) max(dv$coh_dates) else NULL
+    led_lo <- min(d$led$d)
+    notes <- tagList(
+      ck_note,
+      if (dv$coh_n == 0) note_line(sprintf(paste(
+        "No %d-month rank slot has ever passed the evidence gate (win rate >=",
+        "55%% on >= 100 graded picks), so there are no historical entries at",
+        "this horizon - the model's proven horizons are 12 months and shorter."),
+        hz)),
+      if (!is.null(gap_lo)) note_line(sprintf(paste(
+        "Entry record: quarterly walk-forward cohorts to %s, then a gap with",
+        "no recorded signals until the daily ledger, read from %s."),
+        gap_lo, led_lo))
+      else note_line(sprintf(
+        "Entry record: daily ledger only, read from %s.", led_lo)),
+      note_line(sprintf(paste(
+        "The ledger physically starts 2026-06-16, but everything above is read",
+        "from %s: the BUY gate was replaced on 2026-07-02 after the old one was",
+        "measured anti-correlated with realized returns and had stopped emitting",
+        "buys entirely. Pre-epoch rows are kept as history and excluded from run",
+        "counts, entries and the ledger-vs-benchmark chart, so nothing here",
+        "averages two different systems together."), led_lo)),
+      if (length(qs_top)) note_line(sprintf(paste(
+        "Orange + = qualstream grade >= %d among the buys (%d of %d graded).",
+        "A threshold, not a top-N: it never splits a tie, and in a weak period",
+        "fewer names qualify."), qs_min, length(qs_top), sum(!is.na(bg)))),
+      if (length(qs_top)) note_line(tagList(
+        span("+", style = "color:#fb923c; font-weight:800;"),
+        sprintf(" passed qualstream: %s.",
+          paste(sprintf("%s %d", qs_top,
+                        as.integer(round(qs_grade[qs_top]))), collapse = ", ")))))
+    tagList(
+      notes,
+      section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
+      section(sprintf(
+                "buy - the period's standing recs: proven %d-month slots backed by the last month of runs (win%% · runs on list)",
+                hz),
+              col_of[["buy"]], buys, b_note),
+      section("hold - the period's dropped recs, still open (entry · % of horizon)",
+              col_of[["hold"]], holds, h_note, max_h = 220),
+      div(style = "color:#64748b; font-weight:600; font-size:0.85rem; margin-bottom:0.5rem;",
+          sprintf("closed - exited over a month ago (%d) · detail in the table below",
+                  length(closed)))
+    )
+  })
+
+  # Does the qualstream marking help? Equal-weight return of the current BUYs
+  # qualstream graded vs the >= 68 (orange +) subset vs SPY, over the current
+  # 4-month window. Descriptive only: see the caption + LC_QS_COMPARE_SQL.
+  output$qsCompareLC <- renderPlotly({
+    req(app_dataLC())
+    d <- app_dataLC(); cmp <- d$qscmp
+    if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
+      return(empty_plot("No qualstream-graded buys in range - run qualstream to populate this."))
+    cmp$d <- as.Date(cmp$d)
+    buys_gate <- unique(d$gate$ticker[d$gate$gate_today == "BUY"])
+    qs_g <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
+    n_g  <- if (!is.null(d$qs)) length(intersect(d$qs$ticker, buys_gate)) else 0L
+    n_p  <- if (!is.null(d$qs)) length(intersect(d$qs$ticker[qs_g >= 68], buys_gate)) else 0L
+    has_pass <- any(!is.na(cmp$passed_pct))
+    fig <- plot_ly()
+    fig <- add_trace(fig, x = cmp$d, y = cmp$spy_pct, type = "scatter", mode = "lines",
+      name = "Benchmark (SPY)", line = list(color = "#3b82f6", width = 2.5),
+      hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    fig <- add_trace(fig, x = cmp$d, y = cmp$graded_pct, type = "scatter", mode = "lines",
+      name = sprintf("Graded buys (%d)", n_g), line = list(color = "#f59e0b", width = 3),
+      hovertemplate = "Graded buys<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    if (has_pass)
+      fig <- add_trace(fig, x = cmp$d, y = cmp$passed_pct, type = "scatter", mode = "lines",
+        name = sprintf("Passed qualstream ≥ 68 (%d)", n_p),
+        line = list(color = "#10b981", width = 3),
+        hovertemplate = "Passed ≥68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    dark_layout(fig,
+      title = list(text = sprintf(
+          "Does the qualstream marking help? Current buys vs benchmark (from %s, descriptive)",
+          format(d$qscmp_anchor, "%b %d")),
+        font = list(color = "#f8fafc", size = 13), x = 0.5),
+      xaxis = list(title = "", color = "#cbd5e1", type = "date",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
+      yaxis = list(title = "Equal-weight return (%)", color = "#cbd5e1",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
+                   zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%"),
+      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.2),
+      hovermode = "x unified", margin = list(l = 60, r = 20, t = 44, b = 40))
+  })
+
+  # Honesty caption: the comparison is a single-grade-run snapshot with partial
+  # coverage, so it describes this batch, it does not validate qualstream.
+  output$qsCompareNoteLC <- renderUI({
+    req(app_dataLC())
+    d <- app_dataLC()
+    if (is.null(d$qscmp) || nrow(d$qscmp) == 0 || all(is.na(d$qscmp$graded_pct))) return(NULL)
+    buys_gate <- unique(d$gate$ticker[d$gate$gate_today == "BUY"])
+    qs_g  <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
+    n_all <- length(buys_gate)
+    n_g   <- if (!is.null(d$qs)) length(intersect(d$qs$ticker, buys_gate)) else 0L
+    n_p   <- if (!is.null(d$qs)) length(intersect(d$qs$ticker[qs_g >= 68], buys_gate)) else 0L
+    qs_ran <- if (!is.null(d$qs) && nrow(d$qs) > 0 && "as_of" %in% names(d$qs))
+                suppressWarnings(max(as.Date(d$qs$as_of))) else as.Date(NA)
+    div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
+      sprintf(paste("Descriptive, not a walk-forward test: qualstream has a single grade run",
+                    "(as of %s) applied across the whole window. Coverage is partial - of %d current",
+                    "BUYs it graded %d, of which %d passed >= 68. Both baskets are equal-weight, held",
+                    "from %s (the current 4-month buy window). One retroactive grade set cannot yet",
+                    "prove qualstream adds return; that needs several cadence cycles of point-in-time grades."),
+              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_all, n_g, n_p, format(d$qscmp_anchor)))
+  })
+
+  # The full record: every company the model ever entered (cohort or ledger)
+  # with its CURRENT state - including the unproven gate names the board hides
+  # (flagged in the Proven column) and the closed history. Primary reading
+  # surface for detail; the board above is the at-a-glance summary.
+  output$tableLC <- DT::renderDT({
     dv <- derivedLC()
     if (is.null(dv)) return(DT::datatable(
       data.frame(Note = "Connect and Generate to load the signal record."),
       rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
     d <- app_dataLC()
-    show_d <- dv$dates
-    nsnap <- input$nsnapLC
-    if (!is.null(nsnap) && nsnap != "all")
-      show_d <- tail(dv$dates, suppressWarnings(as.integer(nsnap)))
-    hdr <- format(as.Date(show_d), "%b %d")
-    mat <- dv$M[, match(show_d, dv$dates), drop = FALSE]
-    # summary columns: entry + split-safe grading of the ENTRY row + gate today
-    gate_v <- setNames(d$gate$gate_today, d$gate$ticker)
-    sc_key <- if (!is.null(d$scored)) paste(d$scored$ticker, d$scored$d) else character(0)
-    sc_ret <- setNames(if (!is.null(d$scored)) as.numeric(d$scored$ret_pct)    else numeric(0), sc_key)
-    sc_exc <- setNames(if (!is.null(d$scored)) as.numeric(d$scored$excess_pct) else numeric(0), sc_key)
-    ek <- paste(dv$tickers, dv$entry_of)
-    held  <- ifelse(is.na(dv$entry_of), NA,
-                    as.integer(Sys.Date() - as.Date(dv$entry_of)))
+    gate_v <- setNames(as.character(d$gate$gate_today), d$gate$ticker)
+    held <- ifelse(is.na(dv$entry_of), NA,
+                   as.integer(Sys.Date() - as.Date(dv$entry_of)))
     hz_days <- round(dv$hz * 30.44)
-    fin <- dv$M[, ncol(dv$M)]
-    df <- data.frame(Ticker = dv$tickers, stringsAsFactors = FALSE, check.names = FALSE)
-    for (k in seq_along(hdr)) df[[hdr[k]]] <- unname(mat[, k])
-    df$Entry        <- ifelse(is.na(dv$entry_of), "", dv$entry_of)
-    df$`Held (d)`   <- held
-    df$`% horizon`  <- ifelse(is.na(held), NA, pmin(100L, as.integer(round(100 * held / hz_days))))
-    df$`Ret %`      <- ifelse(ek %in% names(sc_ret), sprintf("%+.1f", sc_ret[ek]), "")
-    df$`vs Benchmark %` <- ifelse(ek %in% names(sc_exc), sprintf("%+.1f", sc_exc[ek]), "")
-    df$`Gate today` <- ifelse(dv$tickers %in% names(gate_v), gate_v[dv$tickers], "-")
-    df$Reason       <- unname(dv$reason_of)
+    df <- data.frame(
+      Ticker = dv$tickers,
+      State  = unname(dv$state_now),
+      Entry  = ifelse(is.na(dv$entry_of), "", dv$entry_of),
+      Source = ifelse(is.na(dv$src_of), "", unname(dv$src_of)),
+      `Held (d)` = held,
+      `% of horizon` = ifelse(is.na(held), NA,
+                              pmin(100L, as.integer(round(100 * held / hz_days)))),
+      Matures = ifelse(is.na(dv$mat_of), "", format(dv$mat_of)),
+      Why    = unname(dv$why_now),
+      Proven = ifelse(dv$tickers %in% names(dv$prov_of) & dv$prov_of[dv$tickers],
+                      "yes", "no"),
+      `Gate today` = ifelse(dv$tickers %in% names(gate_v), gate_v[dv$tickers], "-"),
+      stringsAsFactors = FALSE, check.names = FALSE)
+    # the rank slot's realized win rate at THIS horizon (the board's buy gate)
+    df$`Bin win %` <- ifelse(df$Ticker %in% names(dv$wpct),
+                             as.numeric(dv$wpct[df$Ticker]), NA_real_)
+    # signal persistence over the trailing review window (BUY on n of N runs)
+    rr <- ifelse(is.na(dv$runs_of[df$Ticker]), 0L, dv$runs_of[df$Ticker])
+    # not "(4mo)" any more: the window is floored at the regime epoch, so it is
+    # 4 months OR the time since the gate change, whichever is shorter.
+    df$`Runs` <- sprintf("%d/%d", rr, max(1L, dv$runs_tot))
+    # qualstream grade column only once grades exist (dormant until then)
+    has_qs <- !is.null(d$qs) && nrow(d$qs) > 0 &&
+              all(c("ticker", "grade") %in% names(d$qs))
+    if (has_qs) {
+      qi <- match(df$Ticker, d$qs$ticker)
+      df$`QS grade` <- suppressWarnings(as.numeric(d$qs$grade))[qi]
+    }
     # delist coloring on the Ticker column (same pattern as the ledger table)
     df$delisted <- if (!is.null(d$meta)) df$Ticker %in% d$meta$ticker else FALSE
     if (!is.null(d$meta) && nrow(d$meta) > 0) {
@@ -5562,29 +6242,52 @@ server <- function(input, output, session) {
     }
     df <- delist_enrich(df)
     df$del_class[!df$delisted] <- ""
-    keep <- c("Ticker", hdr, "Entry", "Held (d)", "% horizon", "Ret %",
-              "vs Benchmark %", "Gate today", "Reason", "del_class")
-    df <- df[order(factor(fin, levels = c("buy", "hold", "sell")), df$Ticker), keep]
-    n_dates <- length(hdr)
+    # cluster-id filter (same control + semantics as the board); idless names
+    # always show; deselect-all empties the table too
+    sel_id <- input$idsLC
+    if (is.null(sel_id)) {
+      if (isTRUE(ids_seenLC())) df <- df[0, , drop = FALSE]
+    } else if (!is.null(d$gate$id)) {
+      id_of <- setNames(suppressWarnings(as.integer(d$gate$id)), d$gate$ticker)
+      if (!is.null(d$coh) && nrow(d$coh) > 0) {   # cohort id fills gate gaps
+        ex <- d$coh[!(d$coh$ticker %in% names(id_of)), c("ticker", "id")]
+        ex <- ex[!duplicated(ex$ticker), , drop = FALSE]
+        if (nrow(ex)) id_of <- c(id_of, setNames(as.integer(ex$id), ex$ticker))
+      }
+      tid <- id_of[df$Ticker]
+      df <- df[is.na(tid) | tid %in% as.integer(sel_id), , drop = FALSE]
+    }
+    keep <- c("Ticker", "State", "Entry", "Source", "Held (d)", "% of horizon",
+              "Matures", "Why", "Proven", "Gate today", "Bin win %",
+              "Runs", if (has_qs) "QS grade", "del_class")
+    df <- df[order(factor(df$State, levels = c("sell", "buy", "hold", "closed")),
+                   df$Ticker), keep]
+    # 0-based column targets, shifted when the optional QS grade column exists
+    num_t <- c(4, 5, 10, if (has_qs) 12)
+    del_t <- length(keep) - 1L
     DT::datatable(
       df, selection = "none", rownames = FALSE, class = "compact",
-      extensions = "Buttons",
+      extensions = "Buttons", filter = "top",
       options = list(
-        pageLength = 25, lengthMenu = c(10, 25, 50, 100, 500),
-        dom = "Bftip", buttons = c("copy", "csv"),
-        scrollX = TRUE, ordering = FALSE,
+        pageLength = 25, lengthMenu = c(10, 25, 50, 100, 1000),
+        dom = "Bftip", buttons = c("copy", "csv"), ordering = TRUE,
         columnDefs = list(
-          list(className = "dt-right", targets = (n_dates + 1):(n_dates + 5)),
-          list(visible = FALSE, targets = n_dates + 8))
+          list(className = "dt-right", targets = num_t),
+          list(visible = FALSE, targets = del_t))
       )
     ) %>%
-      DT::formatStyle(hdr, fontWeight = "600",
-        color = DT::styleEqual(c("buy", "hold", "sell"),
-                               c("#10b981", "#eab308", "#dc2626"))) %>%
+      DT::formatStyle("State", fontWeight = "600",
+        color = DT::styleEqual(c("buy", "hold", "sell", "closed"),
+                               c("#10b981", "#eab308", "#dc2626", "#64748b"))) %>%
       DT::formatStyle("Ticker", valueColumns = "del_class",
         color = DT::styleEqual(names(DELIST_CLASSES), unname(DELIST_CLASSES)))
   }, server = FALSE)
 }
 
 # Run the application
-runApp(list(ui = ui, server = server), host="0.0.0.0", port=3838)
+# Bind address/port are env-overridable (SHINY_HOST / SHINY_PORT) so the same
+# script serves local and the prod server; defaults keep the historical 0.0.0.0:3838.
+.shiny_port <- suppressWarnings(as.integer(Sys.getenv("SHINY_PORT", "3838")))
+if (is.na(.shiny_port)) .shiny_port <- 3838L
+runApp(list(ui = ui, server = server),
+       host = Sys.getenv("SHINY_HOST", "0.0.0.0"), port = .shiny_port)

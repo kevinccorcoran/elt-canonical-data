@@ -43,7 +43,7 @@ with Diagram("Local Airflow — Split Topology",
     with Cluster("Long-running services\nrestart: unless-stopped",
                  graph_attr={"bgcolor": "#E8F5E9", "pencolor": "#2E7D32", "penwidth": "2.0"}):
         webserver = Airflow("airflow-webserver\n:8080\nhealth: GET /health")
-        shiny     = Airflow("airflow-shiny\n:3838  :3839\n(wait -n on R apps)")
+        shiny     = Airflow("airflow-shiny\n:3838\n(app.R)")
         scheduler = Airflow("airflow-scheduler\nhealth:\nairflow jobs check")
 
     with Cluster("One-shot\nrestart: no",
