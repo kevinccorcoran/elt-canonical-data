@@ -5558,11 +5558,18 @@ server <- function(input, output, session) {
       # from the semi-annual rubric grader (qualstream repo writes
       # qual.ticker_scorecards; overall is 0-100). Absent table or no rows ->
       # dormant; once grades exist the board marks the top-20 with an orange +.
+      # qualstream grades: pinned to the LIVE series (buy_decision_v1 -- other
+      # rubric_versions score on different scales and must not mix into one
+      # ranking) and bounded by freshness (150d ~ the 4-month cadence + slack)
+      # so an orange + can expire instead of living forever.
       qs <- tryCatch(dbGetQuery(con, "
         SELECT DISTINCT ON (ticker) ticker,
-               overall AS grade, graded_at::date::text AS graded_at
+               overall AS grade, as_of::text AS as_of,
+               graded_at::date::text AS graded_at
         FROM qual.ticker_scorecards
         WHERE NOT veto
+          AND rubric_version = 'buy_decision_v1'
+          AND as_of >= CURRENT_DATE - 150
         ORDER BY ticker, as_of DESC, graded_at DESC"),
         error = function(e) NULL)
       ids_seenLC(FALSE)   # id checkboxes re-render fresh with the new universe
@@ -5874,18 +5881,31 @@ server <- function(input, output, session) {
     ck_last <- max(ck_all[ck_all <= Sys.Date()])
     ck_next <- min(ck_all[ck_all > Sys.Date()])
     ck_open <- Sys.Date() <= ck_last + 4
-    ck_note <- if (ck_open) div(
+    # Did qualstream ACTUALLY run? Read MAX(as_of) from the loaded grades rather
+    # than asserting it from the calendar -- a silently failed DAG must not be
+    # announced as a completed run.
+    qs_ran <- if (!is.null(d$qs) && nrow(d$qs) > 0 && "as_of" %in% names(d$qs))
+                suppressWarnings(max(as.Date(d$qs$as_of))) else as.Date(NA)
+    ck_note <- if (ck_open && !is.na(qs_ran) && qs_ran >= ck_last) div(
         style = "color:#fbbf24; font-size:0.78rem; font-weight:700; margin:0.15rem 0 0.6rem;",
         sprintf(paste("CHECKPOINT WINDOW OPEN - qualstream ran %s: prune",
                       "(matured / vetoed / washed-out) and buy the new cohort by %s.",
                       "Sells in the red section never wait for this window."),
-                format(ck_last), format(ck_last + 4)))
+                format(qs_ran), format(ck_last + 4)))
+      else if (ck_open) div(
+        style = "color:#f87171; font-size:0.78rem; font-weight:700; margin:0.15rem 0 0.6rem;",
+        sprintf(paste("CHECKPOINT WINDOW OPEN - but NO qualstream grades recorded",
+                      "for %s (latest grades: %s). Check the qual_scorecards_4monthly",
+                      "DAG before pruning; sells in the red section never wait."),
+                format(ck_last),
+                if (is.na(qs_ran)) "none" else format(qs_ran)))
       else note_line(sprintf(paste(
         "Next checkpoint: qualstream runs %s (in %d days); buy/prune window %s",
         "to %s - act after the run so its grades inform the prune. Gate flips,",
-        "delistings and maturities in the sell section do not wait."),
+        "delistings and maturities in the sell section do not wait.%s"),
         format(ck_next), as.integer(ck_next - Sys.Date()),
-        format(ck_next + 1), format(ck_next + 4)))
+        format(ck_next + 1), format(ck_next + 4),
+        if (is.na(qs_ran)) "" else sprintf(" Latest recorded grades: %s.", format(qs_ran))))
     # honesty notes: where the record is thin, say so instead of implying signal
     gap_lo <- if (length(dv$coh_dates)) max(dv$coh_dates) else NULL
     led_lo <- min(d$led$d)
