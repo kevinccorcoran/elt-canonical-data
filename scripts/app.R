@@ -305,13 +305,22 @@ hr {
 # (previously duplicated across widget defaults, the get_con dbname map, the
 # sslmode host-regex, and the env-switcher). Env vars override each value so the
 # same code serves local dev and the prod server without editing this table;
-# `pass_env` names the env var the password field is seeded from.
+# `pass_env` names the env var(s) the password field is seeded from (first
+# non-empty wins). Production reads the bespoke PROD_DB_* overrides if present,
+# else falls back to the generic DB_* vars that the rest of the stack and the
+# prod server actually set -- so Host/User/Password autopopulate on the server
+# too (it sets only DB_*; that gap left the server's Host + Password blank).
+getenv_any <- function(names, default = "") {
+  for (n in names) { v <- Sys.getenv(n, ""); if (nzchar(v)) return(v) }
+  default
+}
 DB_ENVIRONMENTS <- list(
-  Production = list(host = Sys.getenv("PROD_DB_HOST", ""),
-                    port = Sys.getenv("PROD_DB_PORT", "25060"),
-                    user = Sys.getenv("PROD_DB_USER", "doadmin"),
-                    dbname = Sys.getenv("PROD_DB_NAME", "prod"),
-                    sslmode = "require", pass_env = "PROD_DB_PASSWORD"),
+  Production = list(host = getenv_any(c("PROD_DB_HOST", "DB_HOST")),
+                    port = getenv_any(c("PROD_DB_PORT", "DB_PORT"), "25060"),
+                    user = getenv_any(c("PROD_DB_USER", "DB_USER"), "doadmin"),
+                    dbname = getenv_any(c("PROD_DB_NAME", "DB_DATABASE"), "prod"),
+                    sslmode = "require",
+                    pass_env = c("PROD_DB_PASSWORD", "DB_PASSWORD")),
   Staging    = list(host = Sys.getenv("LOCAL_DB_HOST", "host.docker.internal"),
                     port = Sys.getenv("LOCAL_DB_PORT", "5432"),
                     user = Sys.getenv("LOCAL_DB_USER", "postgres"),
@@ -1418,7 +1427,7 @@ setup_env_switcher <- function(input, session) {
     updateTextInput(session, "db_host", value = cfg$host)
     updateNumericInput(session, "db_port", value = suppressWarnings(as.integer(cfg$port)))
     updateTextInput(session, "db_user", value = cfg$user)
-    updateTextInput(session, "db_pass", value = Sys.getenv(cfg$pass_env, ""))
+    updateTextInput(session, "db_pass", value = getenv_any(cfg$pass_env, ""))
   })
 }
 
