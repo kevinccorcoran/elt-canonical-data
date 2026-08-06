@@ -711,38 +711,40 @@ graded_buys AS (
     -- recs), so the green line undercounted the + (10 shown vs 15 on the board).
     SELECT s.ticker, (s.overall >= 68) AS passed FROM scored s
 ),
-entry AS (
-    SELECT g.ticker, g.passed,
-      (SELECT i.adj_close FROM cdm.ingest_combined i
-       WHERE i.ticker = g.ticker AND i.date >= (SELECT start_d FROM params)
-       ORDER BY i.date LIMIT 1) AS entry_px
-    FROM graded_buys g
+maxd AS (SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'),
+-- one indexed range scan of the basket tickers' prices over the window, reused
+-- for the entry price, the per-day return, and (via SPY) the date grid. The old
+-- shape did a correlated as-of subquery per ticker per day (617ms); this is a
+-- plain join on SPY's trading calendar (~40ms), numerically identical.
+slice AS (
+    SELECT i.ticker, i.date AS d, i.adj_close AS px
+    FROM cdm.ingest_combined i
+    JOIN graded_buys g ON g.ticker = i.ticker
+    WHERE i.date >= (SELECT start_d FROM params) AND i.date <= (SELECT d FROM maxd)
 ),
-dates AS (
-    SELECT DISTINCT date AS d FROM cdm.ingest_combined
-    WHERE ticker = 'SPY' AND date >= (SELECT start_d FROM params)
-      AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker = 'SPY')
-),
-px AS (
-    SELECT e.ticker, e.passed, d.d, e.entry_px,
-      (SELECT i.adj_close FROM cdm.ingest_combined i
-       WHERE i.ticker = e.ticker AND i.date <= d.d ORDER BY i.date DESC LIMIT 1) AS px
-    FROM entry e CROSS JOIN dates d
+entry AS (SELECT DISTINCT ON (ticker) ticker, px AS entry_px FROM slice ORDER BY ticker, d),
+basket AS (
+    SELECT s.d, g.passed, s.px / NULLIF(e.entry_px, 0) - 1 AS ret
+    FROM slice s
+    JOIN graded_buys g ON g.ticker = s.ticker
+    JOIN entry e ON e.ticker = s.ticker
     WHERE e.entry_px > 0
 ),
 spy AS (
-    SELECT d.d,
-      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY' AND date <= d.d ORDER BY date DESC LIMIT 1) AS px,
-      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY' AND date = (SELECT MIN(d) FROM dates)) AS px0
-    FROM dates d
+    SELECT i.date AS d, i.adj_close AS px,
+      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY'
+       AND date >= (SELECT start_d FROM params) ORDER BY date LIMIT 1) AS px0
+    FROM cdm.ingest_combined i
+    WHERE i.ticker = 'SPY' AND i.date >= (SELECT start_d FROM params) AND i.date <= (SELECT d FROM maxd)
 )
-SELECT p.d::text AS d,
-       ROUND((AVG(p.px / NULLIF(p.entry_px, 0) - 1) * 100)::numeric, 2) AS graded_pct,
-       ROUND((AVG(p.px / NULLIF(p.entry_px, 0) - 1) FILTER (WHERE p.passed) * 100)::numeric, 2) AS passed_pct,
-       ROUND(((s.px / s.px0) - 1)::numeric * 100, 2) AS spy_pct
-FROM px p JOIN spy s ON s.d = p.d
-GROUP BY p.d, s.px, s.px0
-ORDER BY p.d;"
+SELECT sp.d::text AS d,
+       ROUND((AVG(b.ret) * 100)::numeric, 2) AS graded_pct,
+       ROUND((AVG(b.ret) FILTER (WHERE b.passed) * 100)::numeric, 2) AS passed_pct,
+       ROUND((((sp.px / sp.px0) - 1) * 100)::numeric, 2) AS spy_pct
+FROM spy sp
+LEFT JOIN basket b ON b.d = sp.d
+GROUP BY sp.d, sp.px, sp.px0
+ORDER BY sp.d;"
 
 # Risk-adjustment series: the EQUAL-WEIGHT buy-and-hold basket value (=$1 -> avg
 # of price/entry over the picks) and SPY value, monthly, over the hold window.
@@ -5608,6 +5610,10 @@ server <- function(input, output, session) {
   # Raw pulls are cached in app_dataLC; the state machine re-derives live on
   # horizon/snapshot-count changes without re-querying.
   app_dataLC   <- reactiveVal(NULL)
+  # every LC query is independent of the hold-length + id filters (those re-derive
+  # in R), so a repeat Generate can reuse the last fetch. Cleared on Connect so an
+  # environment switch or reconnect always re-queries.
+  lc_cache     <- reactiveVal(NULL)
   status_msgLC <- reactiveVal("Ready")
   # whether the id checkboxes have delivered a value since the last Generate:
   # distinguishes "not rendered yet" (NULL -> show all) from a real
@@ -5618,6 +5624,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$connect_btn, {
     if (input$db_pass == "") { status_msgLC("Error: Password is not set."); return() }
+    lc_cache(NULL)   # invalidate the Lifecycle query cache on (re)connect / env switch
     status_msgLC("Connecting...")
     tryCatch({
       con <- get_con(input)
@@ -5633,6 +5640,15 @@ server <- function(input, output, session) {
 
   observeEvent(input$execute_LC, {
     if (input$db_pass == "") { status_msgLC("Error: Password is not set."); return() }
+    # cache hit: reuse this connection's fetch instead of re-querying (~1.7s of
+    # window-function + basket SQL). Cleared on Connect, so this only serves a
+    # repeat Generate against the same environment.
+    cached <- lc_cache()
+    if (!is.null(cached)) {
+      ids_seenLC(FALSE); app_dataLC(cached)
+      status_msgLC("Loaded from this session's cache. Reconnect to pull fresh data.")
+      return()
+    }
     status_msgLC("Loading the signal record...")
     tryCatch({
       con <- get_con(input)
@@ -5749,8 +5765,9 @@ server <- function(input, output, session) {
                              LC_QS_COMPARE_SQL, fixed = TRUE)),
         c("graded_pct", "passed_pct", "spy_pct")), error = function(e) NULL)
       ids_seenLC(FALSE)   # id checkboxes re-render fresh with the new universe
-      app_dataLC(list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
-                      qs = qs, qscmp = qscmp, qscmp_anchor = qs_anchor))
+      dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
+                  qs = qs, qscmp = qscmp, qscmp_anchor = qs_anchor)
+      app_dataLC(dat); lc_cache(dat)   # cache for repeat Generates this session
       status_msgLC(sprintf(
         "Loaded - %d proven cohort picks across %d quarterly cutoffs + %d live series across %d snapshots.",
         if (is.null(coh)) 0L else nrow(coh),
