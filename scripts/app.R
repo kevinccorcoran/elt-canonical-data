@@ -305,13 +305,22 @@ hr {
 # (previously duplicated across widget defaults, the get_con dbname map, the
 # sslmode host-regex, and the env-switcher). Env vars override each value so the
 # same code serves local dev and the prod server without editing this table;
-# `pass_env` names the env var the password field is seeded from.
+# `pass_env` names the env var(s) the password field is seeded from (first
+# non-empty wins). Production reads the bespoke PROD_DB_* overrides if present,
+# else falls back to the generic DB_* vars that the rest of the stack and the
+# prod server actually set -- so Host/User/Password autopopulate on the server
+# too (it sets only DB_*; that gap left the server's Host + Password blank).
+getenv_any <- function(names, default = "") {
+  for (n in names) { v <- Sys.getenv(n, ""); if (nzchar(v)) return(v) }
+  default
+}
 DB_ENVIRONMENTS <- list(
-  Production = list(host = Sys.getenv("PROD_DB_HOST", ""),
-                    port = Sys.getenv("PROD_DB_PORT", "25060"),
-                    user = Sys.getenv("PROD_DB_USER", "doadmin"),
-                    dbname = Sys.getenv("PROD_DB_NAME", "prod"),
-                    sslmode = "require", pass_env = "PROD_DB_PASSWORD"),
+  Production = list(host = getenv_any(c("PROD_DB_HOST", "DB_HOST")),
+                    port = getenv_any(c("PROD_DB_PORT", "DB_PORT"), "25060"),
+                    user = getenv_any(c("PROD_DB_USER", "DB_USER"), "doadmin"),
+                    dbname = getenv_any(c("PROD_DB_NAME", "DB_DATABASE"), "prod"),
+                    sslmode = "require",
+                    pass_env = c("PROD_DB_PASSWORD", "DB_PASSWORD")),
   Staging    = list(host = Sys.getenv("LOCAL_DB_HOST", "host.docker.internal"),
                     port = Sys.getenv("LOCAL_DB_PORT", "5432"),
                     user = Sys.getenv("LOCAL_DB_USER", "postgres"),
@@ -686,16 +695,21 @@ GROUP BY p.d, s.px, s.px0 ORDER BY p.d;", fixed = TRUE)
 LC_QS_COMPARE_SQL <- "
 WITH params AS (SELECT DATE '__ANCHOR__' AS start_d),
 scored AS (
-    SELECT DISTINCT ON (ticker) ticker, overall, veto
+    -- latest NON-VETOED scorecard per ticker: veto filtered BEFORE DISTINCT ON,
+    -- the same rule the board's orange + uses, so chart and board populations
+    -- never diverge once multiple grade runs exist
+    SELECT DISTINCT ON (ticker) ticker, overall
     FROM qual.ticker_scorecards
-    WHERE rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - 150
+    WHERE NOT veto
+      AND rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - 150
     ORDER BY ticker, as_of DESC, graded_at DESC
 ),
 graded_buys AS (
-    SELECT b.ticker, (s.overall >= 68) AS passed
-    FROM (SELECT DISTINCT ticker FROM serving.return_cluster_ticker_global_action_current
-          WHERE global_action = 'BUY') b
-    JOIN scored s ON s.ticker = b.ticker AND NOT s.veto
+    -- basket = qualstream's graded standing-rec buys (the board's buy list = the
+    -- orange + universe), NOT the current-day gate snapshot. The snapshot dropped
+    -- names reading SKIP today that are still board buys (monthly-majority standing
+    -- recs), so the green line undercounted the + (10 shown vs 15 on the board).
+    SELECT s.ticker, (s.overall >= 68) AS passed FROM scored s
 ),
 entry AS (
     SELECT g.ticker, g.passed,
@@ -1413,7 +1427,7 @@ setup_env_switcher <- function(input, session) {
     updateTextInput(session, "db_host", value = cfg$host)
     updateNumericInput(session, "db_port", value = suppressWarnings(as.integer(cfg$port)))
     updateTextInput(session, "db_user", value = cfg$user)
-    updateTextInput(session, "db_pass", value = Sys.getenv(cfg$pass_env, ""))
+    updateTextInput(session, "db_pass", value = getenv_any(cfg$pass_env, ""))
   })
 }
 
@@ -6136,10 +6150,9 @@ server <- function(input, output, session) {
     if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
       return(empty_plot("No qualstream-graded buys in range - run qualstream to populate this."))
     cmp$d <- as.Date(cmp$d)
-    buys_gate <- unique(d$gate$ticker[d$gate$gate_today == "BUY"])
     qs_g <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
-    n_g  <- if (!is.null(d$qs)) length(intersect(d$qs$ticker, buys_gate)) else 0L
-    n_p  <- if (!is.null(d$qs)) length(intersect(d$qs$ticker[qs_g >= 68], buys_gate)) else 0L
+    n_g  <- if (!is.null(d$qs)) length(d$qs$ticker) else 0L
+    n_p  <- if (!is.null(d$qs)) sum(qs_g >= 68, na.rm = TRUE) else 0L
     has_pass <- any(!is.na(cmp$passed_pct))
     fig <- plot_ly()
     fig <- add_trace(fig, x = cmp$d, y = cmp$spy_pct, type = "scatter", mode = "lines",
@@ -6163,8 +6176,8 @@ server <- function(input, output, session) {
       yaxis = list(title = "Equal-weight return (%)", color = "#cbd5e1",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
                    zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%"),
-      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.2),
-      hovermode = "x unified", margin = list(l = 60, r = 20, t = 44, b = 40))
+      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.35),
+      hovermode = "x unified", margin = list(l = 60, r = 20, t = 44, b = 70))
   })
 
   # Honesty caption: the comparison is a single-grade-run snapshot with partial
@@ -6173,20 +6186,21 @@ server <- function(input, output, session) {
     req(app_dataLC())
     d <- app_dataLC()
     if (is.null(d$qscmp) || nrow(d$qscmp) == 0 || all(is.na(d$qscmp$graded_pct))) return(NULL)
-    buys_gate <- unique(d$gate$ticker[d$gate$gate_today == "BUY"])
     qs_g  <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
-    n_all <- length(buys_gate)
-    n_g   <- if (!is.null(d$qs)) length(intersect(d$qs$ticker, buys_gate)) else 0L
-    n_p   <- if (!is.null(d$qs)) length(intersect(d$qs$ticker[qs_g >= 68], buys_gate)) else 0L
+    n_g   <- if (!is.null(d$qs)) length(d$qs$ticker) else 0L
+    n_p   <- if (!is.null(d$qs)) sum(qs_g >= 68, na.rm = TRUE) else 0L
     qs_ran <- if (!is.null(d$qs) && nrow(d$qs) > 0 && "as_of" %in% names(d$qs))
                 suppressWarnings(max(as.Date(d$qs$as_of))) else as.Date(NA)
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
       sprintf(paste("Descriptive, not a walk-forward test: qualstream has a single grade run",
-                    "(as of %s) applied across the whole window. Coverage is partial - of %d current",
-                    "BUYs it graded %d, of which %d passed >= 68. Both baskets are equal-weight, held",
-                    "from %s (the current 4-month buy window). One retroactive grade set cannot yet",
-                    "prove qualstream adds return; that needs several cadence cycles of point-in-time grades."),
-              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_all, n_g, n_p, format(d$qscmp_anchor)))
+                    "(as of %s) applied across the whole window. The basket is qualstream's %d graded",
+                    "standing-rec buys (the board's buy list = the orange + universe); the green line is",
+                    "the %d that scored >= 68. Both are equal-weight, held from %s (the current 4-month",
+                    "window). Membership is retroactive (today's buys applied backward), which flatters",
+                    "both against SPY; the graded-vs-passed comparison is unaffected since both carry the",
+                    "same tilt. One retroactive grade set cannot yet prove qualstream adds return; that",
+                    "needs several cadence cycles of point-in-time grades."),
+              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_g, n_p, format(d$qscmp_anchor)))
   })
 
   # The full record: every company the model ever entered (cohort or ledger)
