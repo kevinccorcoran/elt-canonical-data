@@ -39,7 +39,9 @@ Unsupervised clustering, statistical scoring, and walk-forward validation tables
 
 ## Interactive Analytics Dashboard
 
-An interactive R/Shiny app for exploring the model end to end: data quality, clusters, rankings, walk-forward validation, and how past selections played out against a benchmark. Built with R + Shiny, Plotly, and PostgreSQL, packaged in Docker.
+Ten linked views that walk the model end to end: check the data, find and rank the groups, confirm the ranking holds up, then see how past selections played out against the benchmark. Built with R, Shiny, Plotly, and PostgreSQL, in Docker.
+
+![The ten dashboard views, grouped into four workflow stages](tools/dashboard_tab_map.png?v=1)
 
 ### Transition Range
 
