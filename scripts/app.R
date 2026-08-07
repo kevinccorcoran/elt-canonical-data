@@ -37,6 +37,255 @@ append_qa_history <- function(results, db_name, run_at = Sys.time()) {
   new_rows
 }
 
+# ─── Personal portfolio positions (DCA tracker; same host-mounted dir) ───
+# One row per buy PLAN, not per fill. Persisted as parquet so it survives
+# restarts, exactly like QA history. sold_* are reserved for the Phase-2 sell.
+PORTFOLIO_PATH <- file.path(QA_HISTORY_DIR, "portfolio_positions.parquet")
+
+portfolio_empty <- function() data.frame(
+  id = character(0), ticker = character(0), amount_usd = numeric(0),
+  cadence = character(0), day1 = integer(0), day2 = integer(0),
+  start_date = character(0), end_date = character(0),
+  sold_date = character(0), sold_fraction = numeric(0),
+  mode = character(0), adopted_at = character(0),
+  created_at = character(0), stringsAsFactors = FALSE)
+
+# Older parquets predate mode/adopted_at; default every legacy row to a plain
+# manual DCA plan. Does not rewrite the file - the next save persists the columns.
+migrate_portfolio <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(portfolio_empty())
+  if (!"mode" %in% names(df)) df$mode <- "manual"
+  df$mode[is.na(df$mode) | !nzchar(df$mode)] <- "manual"
+  if (!"adopted_at" %in% names(df)) df$adopted_at <- ""
+  df
+}
+
+load_portfolio <- function() {
+  if (!file.exists(PORTFOLIO_PATH)) return(portfolio_empty())
+  tryCatch(migrate_portfolio(as.data.frame(nanoparquet::read_parquet(PORTFOLIO_PATH))),
+           error = function(e) portfolio_empty())
+}
+
+save_portfolio <- function(df) {
+  if (!dir.exists(QA_HISTORY_DIR)) dir.create(QA_HISTORY_DIR, recursive = TRUE)
+  if (is.null(df) || nrow(df) == 0) {
+    if (file.exists(PORTFOLIO_PATH)) file.remove(PORTFOLIO_PATH)
+  } else nanoparquet::write_parquet(df, PORTFOLIO_PATH)
+  invisible(df)
+}
+
+# Qualstream orange-+ rule, shared by the board's mark AND the portfolio's
+# default seed so the two can never diverge: a current BUY graded >= QS_MIN by
+# qualstream, capped at the top QS_CAP by grade.
+QS_MIN <- 68L
+QS_CAP <- 25L
+
+# Dismissed set: tickers the user explicitly removed, kept so the qualstream
+# auto-seed does not resurrect them on the next Generate. Stored as a one-column
+# parquet next to the positions; empty file is deleted (mirrors save_portfolio).
+PORTFOLIO_DISMISS_PATH <- file.path(QA_HISTORY_DIR, "portfolio_dismissed.parquet")
+load_dismissed <- function() {
+  if (!file.exists(PORTFOLIO_DISMISS_PATH)) return(character(0))
+  tryCatch(unique(toupper(as.character(
+    nanoparquet::read_parquet(PORTFOLIO_DISMISS_PATH)$ticker))),
+    error = function(e) character(0))
+}
+save_dismissed <- function(tickers) {
+  tickers <- unique(toupper(tickers[nzchar(tickers)]))
+  if (!dir.exists(QA_HISTORY_DIR)) dir.create(QA_HISTORY_DIR, recursive = TRUE)
+  if (!length(tickers)) {
+    if (file.exists(PORTFOLIO_DISMISS_PATH)) file.remove(PORTFOLIO_DISMISS_PATH)
+  } else nanoparquet::write_parquet(
+    data.frame(ticker = tickers, stringsAsFactors = FALSE), PORTFOLIO_DISMISS_PATH)
+  invisible(tickers)
+}
+
+# ─── DB-backed portfolio store (portfolio.* schema) ───
+# When the connected DB has the portfolio schema (tools/create_portfolio_schema.sql),
+# it is the authoritative store - one shared copy across the local + server
+# dashboards, and joinable to the model tables. Otherwise the app falls back to
+# the parquet files above. All take an already-open connection; none call get_con.
+pf_db_ready <- function(con) {
+  tryCatch(isTRUE(DBI::dbGetQuery(con,
+    "SELECT to_regclass('portfolio.positions') IS NOT NULL AS ok")$ok[1]),
+    error = function(e) FALSE)
+}
+
+# empty text -> NA so date/timestamp columns receive NULL, not ''
+.pf_nz <- function(x) { x <- as.character(x); x[is.na(x) | !nzchar(x)] <- NA; x }
+
+db_load_positions <- function(con) {
+  df <- tryCatch(DBI::dbGetQuery(con, "
+    SELECT id, ticker, amount_usd, cadence, day1, day2,
+           to_char(start_date,'YYYY-MM-DD')              AS start_date,
+           COALESCE(to_char(end_date,'YYYY-MM-DD'),'')   AS end_date,
+           COALESCE(to_char(sold_date,'YYYY-MM-DD'),'')  AS sold_date,
+           sold_fraction, mode,
+           COALESCE(to_char(adopted_at,'YYYY-MM-DD HH24:MI:SS'),'') AS adopted_at,
+           to_char(created_at,'YYYY-MM-DD HH24:MI:SS')   AS created_at
+    FROM portfolio.positions ORDER BY created_at, ticker"),
+    error = function(e) NULL)
+  if (is.null(df) || !nrow(df)) return(portfolio_empty())
+  df$amount_usd    <- as.numeric(df$amount_usd)
+  df$day1 <- as.integer(df$day1); df$day2 <- as.integer(df$day2)
+  df$sold_fraction <- as.numeric(df$sold_fraction)
+  migrate_portfolio(df)
+}
+
+# Whole-state replace in one transaction: mirrors the parquet "df IS the state"
+# semantics, so the existing observers (which compute a full merged df) need no
+# rework. The table is tiny and single-writer, so truncate+insert is fine.
+db_save_positions <- function(con, df) {
+  DBI::dbWithTransaction(con, {
+    DBI::dbExecute(con, "DELETE FROM portfolio.positions")
+    if (!is.null(df) && nrow(df) > 0)
+      DBI::dbExecute(con, "
+        INSERT INTO portfolio.positions
+          (id,ticker,amount_usd,cadence,day1,day2,start_date,end_date,
+           sold_date,sold_fraction,mode,adopted_at,created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        params = list(
+          as.character(df$id), toupper(as.character(df$ticker)),
+          as.numeric(df$amount_usd), as.character(df$cadence),
+          as.integer(df$day1), as.integer(df$day2),
+          .pf_nz(df$start_date), .pf_nz(df$end_date), .pf_nz(df$sold_date),
+          as.numeric(df$sold_fraction), as.character(df$mode),
+          .pf_nz(df$adopted_at), .pf_nz(df$created_at)))
+  })
+  invisible(df)
+}
+
+db_load_dismissed <- function(con) {
+  tryCatch(unique(toupper(as.character(
+    DBI::dbGetQuery(con, "SELECT ticker FROM portfolio.dismissed")$ticker))),
+    error = function(e) character(0))
+}
+
+db_save_dismissed <- function(con, tickers) {
+  tickers <- unique(toupper(tickers[nzchar(tickers)]))
+  DBI::dbWithTransaction(con, {
+    DBI::dbExecute(con, "DELETE FROM portfolio.dismissed")
+    if (length(tickers))
+      DBI::dbExecute(con, "INSERT INTO portfolio.dismissed (ticker) VALUES ($1)",
+                     params = list(tickers))
+  })
+  invisible(tickers)
+}
+
+# One snapshot per (ticker, as_of, hz): re-Generating the same day refreshes the
+# row, new days accumulate -> the Buy->Hold->Sell trail per position.
+db_upsert_state_history <- function(con, rows) {
+  if (is.null(rows) || !nrow(rows)) return(invisible())
+  DBI::dbExecute(con, "
+    INSERT INTO portfolio.state_history (ticker, as_of, hz, state, why, grade)
+    VALUES ($1,$2::date,$3,$4,$5,$6)
+    ON CONFLICT (ticker, as_of, hz) DO UPDATE
+      SET state = EXCLUDED.state, why = EXCLUDED.why,
+          grade = EXCLUDED.grade, captured_at = now()",
+    params = list(toupper(as.character(rows$ticker)), as.character(rows$as_of),
+                  as.integer(rows$hz), as.character(rows$state),
+                  .pf_nz(rows$why), suppressWarnings(as.numeric(rows$grade))))
+  invisible()
+}
+
+# every month between start and stop on day-of-month `dom` (clamped to 28 so the
+# day exists in every month; weekends/holidays are resolved to the next trading
+# bar by the fill lookup in LC_PORTFOLIO_SQL, so only the calendar date matters).
+schedule_monthly <- function(start, stop_d, dom) {
+  if (is.na(dom) || dom < 1) dom <- as.integer(format(start, "%d"))
+  dom <- min(max(as.integer(dom), 1L), 28L)
+  months <- seq(as.Date(format(start, "%Y-%m-01")),
+                as.Date(format(stop_d, "%Y-%m-01")), by = "month")
+  as.Date(sprintf("%s-%02d", format(months, "%Y-%m"), dom))
+}
+
+# expand saved position rows into (ticker, date, amount) buy events from
+# start_date to `today`, honoring cadence + optional end_date. Returns char dates.
+expand_schedule <- function(positions, today = Sys.Date()) {
+  empty <- data.frame(ticker = character(0), d = character(0),
+                      amount = numeric(0), stringsAsFactors = FALSE)
+  if (is.null(positions) || nrow(positions) == 0) return(empty)
+  out <- list()
+  for (i in seq_len(nrow(positions))) {
+    p <- positions[i, ]
+    start <- suppressWarnings(as.Date(as.character(p$start_date)))
+    if (is.na(start)) next
+    end_raw <- as.character(p$end_date)
+    stop_d <- if (!is.na(p$end_date) && nzchar(end_raw))
+                min(as.Date(end_raw), today) else today
+    if (start > stop_d) next
+    amt <- as.numeric(p$amount_usd); tk <- toupper(trimws(as.character(p$ticker)))
+    if (is.na(amt) || amt <= 0 || !nzchar(tk)) next
+    dates <- switch(as.character(p$cadence),
+      "once"        = start,
+      "monthly"     = schedule_monthly(start, stop_d, p$day1),
+      "semimonthly" = sort(unique(c(schedule_monthly(start, stop_d, p$day1),
+                                    schedule_monthly(start, stop_d, p$day2)))),
+      start)
+    dates <- dates[dates >= start & dates <= stop_d]
+    if (length(dates)) out[[length(out) + 1]] <- data.frame(
+      ticker = tk, d = format(dates, "%Y-%m-%d"), amount = amt,
+      stringsAsFactors = FALSE)
+  }
+  if (!length(out)) return(empty)
+  do.call(rbind, out)
+}
+
+# Wind-down windows per sell reason. n_bars = trading-bar window for the runup
+# distribution AND the ladder's fill horizon; w_days = the calendar deadline.
+LC_WINDDOWN <- list(
+  gate    = list(n_bars = 20L, w_days = 28L),   # gate-flip SELL: 4 weeks
+  matured = list(n_bars = 40L, w_days = 56L))   # matured / washed-out: 8 weeks
+LC_SIGNAL_MAX_AGE <- 10L   # calendar days a BUY run stays actionable
+
+# expand_schedule, but model-linked rows only fire a buy when the model still
+# said BUY around that date: the ticker must have a BUY row on the most recent
+# ledger run on/before the buy date, and that run within LC_SIGNAL_MAX_AGE days.
+# This single filter yields pause (name off the buy list), resume (BUY returns),
+# buy-off during a wind-down, and a fresh accumulation leg after re-entry.
+# Manual rows are unchanged. Model rows need `led`; without it they contribute
+# nothing and their tickers land in attr(out, "model_skipped").
+gated_expand_schedule <- function(positions, led = NULL, today = Sys.Date(),
+                                  epoch = as.Date(LEDGER_EPOCH)) {
+  empty <- data.frame(ticker = character(0), d = character(0),
+                      amount = numeric(0), stringsAsFactors = FALSE)
+  if (is.null(positions) || nrow(positions) == 0) {
+    attr(empty, "model_skipped") <- character(0); return(empty)
+  }
+  mode <- if ("mode" %in% names(positions)) positions$mode else rep("manual", nrow(positions))
+  mode[is.na(mode) | !nzchar(mode)] <- "manual"
+  man <- positions[mode != "model", , drop = FALSE]
+  mod <- positions[mode == "model", , drop = FALSE]
+  out <- expand_schedule(man, today)
+  skipped <- character(0)
+  if (nrow(mod)) {
+    if (is.null(led) || !nrow(led)) {
+      skipped <- unique(toupper(trimws(as.character(mod$ticker))))
+    } else {
+      run_dates <- sort(unique(as.Date(led$d)))
+      buy_keys  <- paste(toupper(led$ticker),
+                         format(as.Date(led$d)))[led$global_action == "BUY"]
+      parts <- list()
+      for (i in seq_len(nrow(mod))) {
+        r <- mod[i, , drop = FALSE]
+        st <- suppressWarnings(as.Date(as.character(r$start_date)))
+        r$start_date <- format(max(c(st, epoch), na.rm = TRUE))
+        cand <- expand_schedule(r, today)
+        if (!nrow(cand)) next
+        cd   <- as.Date(cand$d)
+        idx  <- findInterval(cd, run_dates)                 # latest run <= D (0 if none)
+        keep <- idx >= 1 &
+                as.numeric(cd - run_dates[pmax(idx, 1L)]) <= LC_SIGNAL_MAX_AGE &
+                paste(toupper(cand$ticker), format(run_dates[pmax(idx, 1L)])) %in% buy_keys
+        if (any(keep)) parts[[length(parts) + 1]] <- cand[keep, , drop = FALSE]
+      }
+      if (length(parts)) out <- rbind(out, do.call(rbind, parts))
+    }
+  }
+  attr(out, "model_skipped") <- skipped
+  out
+}
+
 latest_qa_run <- function(history) {
   if (is.null(history) || nrow(history) == 0) return(NULL)
   latest_ts <- max(history$run_at)
@@ -298,6 +547,40 @@ hr {
 .caveat-note    { border-left: 2px solid #64748b; }
 .caveat-info    { border-left: 2px solid #38bdf8; }
 .caveat-warning { border-left: 2px solid #f59e0b; }
+
+/* Portfolio + transition tables: readable body text. No !important on the color
+   so the formatStyle-colored State/Current cells keep their inline green/amber/red. */
+#lcPosTable table.dataTable tbody td,
+#lcTransitionsTable table.dataTable tbody td { color: #e2e8f0; }
+#lcPosTable table.dataTable thead th,
+#lcTransitionsTable table.dataTable thead th { color: #94a3b8 !important; }
+#lcPosTable table.dataTable tbody tr:hover td,
+#lcTransitionsTable table.dataTable tbody tr:hover td { background: rgba(56,189,248,0.08) !important; }
+#lcPosTable table.dataTable tbody tr.selected td { background: rgba(56,189,248,0.22) !important; }
+
+/* Global loading progress bar: an estimated-progress overlay shown whenever
+   Shiny is busy (Connect, Generate, any heavy render), on every tab. Real query
+   progress isn't reported, so the fill trickles toward ~90% over the expected
+   load time, then snaps to 100% on idle. Toggled by the shiny:busy/idle handler. */
+#global-spinner {
+  position: fixed; inset: 0; z-index: 99999;
+  display: none; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; background: rgba(2, 6, 23, 0.55);
+}
+#global-spinner.gs-on { display: flex; }
+#gs-track {
+  width: 320px; max-width: 60vw; height: 8px;
+  background: rgba(148, 163, 184, 0.2); border-radius: 999px; overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.15);
+}
+#gs-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, #38bdf8, #22d3ee);
+  border-radius: 999px; transition: width 0.35s ease-out;
+}
+#gs-label {
+  color: #cbd5e1; font-size: 0.8rem; font-family: 'Inter', sans-serif; letter-spacing: 0.02em;
+}
 "
 
 # ─── Single source of truth for DB endpoints ───
@@ -746,6 +1029,428 @@ LEFT JOIN basket b ON b.d = sp.d
 GROUP BY sp.d, sp.px, sp.px0
 ORDER BY sp.d;"
 
+# Personal DCA portfolio value + return vs a SAME-CASH-FLOW SPY benchmark.
+# __BUYS__ is a VALUES list of (ticker, buy_date, dollars) expanded in R from the
+# saved positions. Each buy fills at the first adj_close on/after its date; the
+# SAME dollars also buy SPY (spy_shares) so the benchmark runs the identical DCA
+# (this is the FORECAST_CURVE_SQL spy_sh trick, not a lump SPY index). Holdings
+# are marked to market monthly (+ today) with the as-of close; return =
+# value/invested - 1. Reuses the FORECAST_LIVE_SQL share-accumulation shape.
+LC_PORTFOLIO_SQL <- "
+WITH buys(ticker, d, amt) AS (VALUES __BUYS__),
+sells(ticker, d, frac, trig_d) AS (__SELLS__),
+maxd AS (SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'),
+fills AS (
+    SELECT b.ticker, b.d::date AS buy_d, b.amt::numeric AS amt,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = b.ticker AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS px,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = 'SPY' AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS spy_px
+    FROM buys b
+),
+lots AS (
+    SELECT ticker, buy_d, amt, amt / NULLIF(px, 0) AS shares,
+           amt / NULLIF(spy_px, 0) AS spy_shares
+    FROM fills WHERE px > 0 AND spy_px > 0
+),
+-- ladder legs: every episode fully exits (backstops + supersede), so shares
+-- held at trigger k = cum bought by k minus cum bought by k-1 (telescoping LAG)
+trig_leg AS (
+    SELECT c.ticker, c.trig_d,
+           c.cum_sh  - COALESCE(LAG(c.cum_sh)  OVER (PARTITION BY c.ticker ORDER BY c.trig_d), 0) AS leg_sh,
+           c.cum_spy - COALESCE(LAG(c.cum_spy) OVER (PARTITION BY c.ticker ORDER BY c.trig_d), 0) AS leg_spy
+    FROM (
+        SELECT sv.ticker, sv.trig_d::date AS trig_d,
+               COALESCE(SUM(l.shares), 0) AS cum_sh, COALESCE(SUM(l.spy_shares), 0) AS cum_spy
+        FROM (SELECT DISTINCT ticker, trig_d FROM sells) sv
+        LEFT JOIN lots l ON l.ticker = sv.ticker AND l.buy_d <= sv.trig_d::date
+        GROUP BY sv.ticker, sv.trig_d::date
+    ) c
+),
+sell_ev AS (
+    SELECT s.ticker, s.d::date AS sell_d,
+           tl.leg_sh  * s.frac::numeric AS sh_sold,
+           tl.leg_spy * s.frac::numeric AS spy_sold,
+           (SELECT i.adj_close FROM cdm.ingest_combined i
+            WHERE i.ticker = s.ticker AND i.date <= s.d::date ORDER BY i.date DESC LIMIT 1) AS px,
+           (SELECT i.adj_close FROM cdm.ingest_combined i
+            WHERE i.ticker = 'SPY' AND i.date <= s.d::date ORDER BY i.date DESC LIMIT 1) AS spy_px
+    FROM sells s JOIN trig_leg tl
+      ON tl.ticker = s.ticker AND tl.trig_d = s.trig_d::date
+),
+vdates AS (
+    SELECT d FROM generate_series(
+        (SELECT MIN(buy_d) FROM lots),
+        (SELECT d FROM maxd), INTERVAL '1 month') AS g(d)
+    UNION SELECT (SELECT d FROM maxd)
+    UNION SELECT sell_d FROM sell_ev
+),
+holdings AS (
+    SELECT v.d AS vdate, l.ticker,
+           SUM(l.shares) AS shares, SUM(l.amt) AS invested,
+           SUM(l.spy_shares) AS spy_shares
+    FROM vdates v JOIN lots l ON l.buy_d <= v.d
+    GROUP BY v.d, l.ticker
+),
+sold_cum AS (
+    SELECT v.d AS vdate, e.ticker,
+           SUM(e.sh_sold) AS sh_sold, SUM(e.spy_sold) AS spy_sold,
+           SUM(e.sh_sold * e.px) AS cash, SUM(e.spy_sold * e.spy_px) AS spy_cash
+    FROM vdates v JOIN sell_ev e ON e.sell_d <= v.d
+    GROUP BY v.d, e.ticker
+),
+valued AS (
+    SELECT h.vdate, SUM(h.invested) AS invested,
+           SUM(GREATEST(h.shares - COALESCE(sc.sh_sold, 0), 0) *
+             (SELECT i.adj_close FROM cdm.ingest_combined i
+              WHERE i.ticker = h.ticker AND i.date <= h.vdate
+              ORDER BY i.date DESC LIMIT 1)) AS mkt,
+           SUM(COALESCE(sc.cash, 0)) AS cash,
+           SUM(GREATEST(h.spy_shares - COALESCE(sc.spy_sold, 0), 0)) AS spy_sh,
+           SUM(COALESCE(sc.spy_cash, 0)) AS spy_cash
+    FROM holdings h
+    LEFT JOIN sold_cum sc ON sc.vdate = h.vdate AND sc.ticker = h.ticker
+    GROUP BY h.vdate
+)
+SELECT vdate::date::text AS d,
+       ROUND(invested::numeric, 2) AS invested,
+       ROUND((mkt + cash)::numeric, 2) AS value,
+       ROUND((100 * ((mkt + cash) / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct,
+       ROUND((spy_sh * (SELECT adj_close FROM cdm.ingest_combined
+         WHERE ticker = 'SPY' AND date <= vdate ORDER BY date DESC LIMIT 1)
+         + spy_cash)::numeric, 2) AS spy_value,
+       ROUND((100 * ((spy_sh * (SELECT adj_close FROM cdm.ingest_combined
+         WHERE ticker = 'SPY' AND date <= vdate ORDER BY date DESC LIMIT 1)
+         + spy_cash) / NULLIF(invested, 0) - 1))::numeric, 2) AS spy_ret_pct
+FROM valued ORDER BY vdate;"
+
+# Per-ROW performance as of today: each position's own accumulated buys valued at
+# the latest close vs the SAME dollars run into SPY. __BUYS__ = VALUES
+# (id, ticker, 'YYYY-MM-DD', amt), one per gated buy, tagged with its position id.
+# Accumulation view (no sell-ladder wind-down) - exact for buy/hold rows; a sold
+# row reads its full accumulated stake, so the sell section is the wind-down truth.
+LC_PORTFOLIO_ROWS_SQL <- "
+WITH buys(id, ticker, d, amt) AS (VALUES __BUYS__),
+maxd AS (SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'),
+spy_last AS (SELECT adj_close AS px FROM cdm.ingest_combined
+             WHERE ticker = 'SPY' AND date <= (SELECT d FROM maxd)
+             ORDER BY date DESC LIMIT 1),
+fills AS (
+    SELECT b.id, b.ticker, b.d::date AS buy_d, b.amt::numeric AS amt,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = b.ticker AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS px,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = 'SPY' AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS spy_px
+    FROM buys b
+),
+last_px AS (
+    SELECT DISTINCT ON (i.ticker) i.ticker, i.adj_close AS px
+    FROM cdm.ingest_combined i
+    WHERE i.ticker IN (SELECT DISTINCT ticker FROM buys)
+      AND i.date <= (SELECT d FROM maxd)
+    ORDER BY i.ticker, i.date DESC
+),
+lots AS (
+    SELECT f.id, f.ticker, f.amt,
+           f.amt / NULLIF(f.px, 0)     AS shares,
+           f.amt / NULLIF(f.spy_px, 0) AS spy_shares
+    FROM fills f WHERE f.px > 0 AND f.spy_px > 0
+)
+SELECT l.id,
+       ROUND(SUM(l.amt)::numeric, 2)                                    AS invested,
+       ROUND(SUM(l.shares * lp.px)::numeric, 2)                         AS value,
+       ROUND(SUM(l.spy_shares * (SELECT px FROM spy_last))::numeric, 2) AS spy_value
+FROM lots l JOIN last_px lp ON lp.ticker = l.ticker
+GROUP BY l.id;"
+
+# Dynamic per-stock sell ladder. __TRIGGERS__ = VALUES ('TICK','YYYY-MM-DD',20)
+# (ticker, trigger date, n_bars in {20,40}). Delisted episodes never reach here.
+# One output row per tranche (stage 1..4): 25% at trigger, then 25% at the first
+# close >= safe/good/best (p40/p60/p80 of the stock's own 3y max-runup over
+# n_bars windows), with deadline + stop-loss backstops. has_hist=FALSE (<60
+# windows) falls back to time-thirds. kind in trigger/level/sched/stop/deadline/pending.
+LC_SELL_LADDER_SQL <- "
+WITH trig(ticker, trig_d, n_bars) AS (VALUES __TRIGGERS__),
+trig2 AS (
+    SELECT ticker, trig_d::date AS trig_d, n_bars::int AS n_bars,
+           (n_bars::int * 7 / 5) AS w_days,
+           LEAD(trig_d::date) OVER (PARTITION BY ticker ORDER BY trig_d::date) AS next_trig_d
+    FROM trig
+),
+px AS (
+    SELECT i.ticker, i.date, i.adj_close,
+           MAX(i.adj_close) OVER (PARTITION BY i.ticker ORDER BY i.date
+             ROWS BETWEEN 1 FOLLOWING AND 20 FOLLOWING) / NULLIF(i.adj_close,0) - 1 AS runup20,
+           MAX(i.adj_close) OVER (PARTITION BY i.ticker ORDER BY i.date
+             ROWS BETWEEN 1 FOLLOWING AND 40 FOLLOWING) / NULLIF(i.adj_close,0) - 1 AS runup40,
+           LEAD(i.date, 20) OVER (PARTITION BY i.ticker ORDER BY i.date) AS lead20_d,
+           LEAD(i.date, 40) OVER (PARTITION BY i.ticker ORDER BY i.date) AS lead40_d
+    FROM cdm.ingest_combined i
+    WHERE i.ticker IN (SELECT DISTINCT ticker FROM trig2)
+      AND i.date >= (SELECT MIN(trig_d) FROM trig2) - INTERVAL '3 years'
+),
+samples AS (
+    SELECT t.ticker, t.trig_d,
+           CASE WHEN t.n_bars = 20 THEN p.runup20 ELSE p.runup40 END AS runup
+    FROM trig2 t JOIN px p ON p.ticker = t.ticker
+    WHERE p.date >= t.trig_d - INTERVAL '3 years'
+      AND CASE WHEN t.n_bars = 20 THEN p.lead20_d ELSE p.lead40_d END <= t.trig_d
+),
+lv AS (
+    SELECT ticker, trig_d, COUNT(*) AS n_win,
+           percentile_cont(0.40) WITHIN GROUP (ORDER BY runup) AS p40,
+           percentile_cont(0.60) WITHIN GROUP (ORDER BY runup) AS p60,
+           percentile_cont(0.80) WITHIN GROUP (ORDER BY runup) AS p80
+    FROM samples GROUP BY ticker, trig_d
+),
+base AS (
+    SELECT t.*, l.n_win, l.p40, l.p60, l.p80,
+           COALESCE(l.n_win, 0) >= 60 AS has_hist,
+           (SELECT i.adj_close FROM cdm.ingest_combined i
+            WHERE i.ticker = t.ticker AND i.date <= t.trig_d
+            ORDER BY i.date DESC LIMIT 1) AS p0_px,
+           (SELECT MAX(i.date) FROM cdm.ingest_combined i WHERE i.ticker = t.ticker) AS max_d,
+           LEAST(t.trig_d + (t.n_bars * 7 / 5), COALESCE(t.next_trig_d, DATE '9999-01-01')) AS win_end
+    FROM trig2 t LEFT JOIN lv l ON l.ticker = t.ticker AND l.trig_d = t.trig_d
+),
+stops AS (
+    SELECT b.*, sd.stop_detect_d, se.stop_exec_d
+    FROM base b
+    LEFT JOIN LATERAL (
+        SELECT MIN(i.date) AS stop_detect_d FROM cdm.ingest_combined i
+        WHERE i.ticker = b.ticker AND i.date > b.trig_d AND i.date <= b.win_end
+          AND i.adj_close <= b.p0_px * 0.90) sd ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT MIN(i.date) AS stop_exec_d FROM cdm.ingest_combined i
+        WHERE i.ticker = b.ticker AND i.date > sd.stop_detect_d AND i.date <= b.win_end) se ON TRUE
+    WHERE b.p0_px IS NOT NULL
+),
+tspec AS (
+    SELECT s.*, st.stage,
+           CASE WHEN s.has_hist THEN s.p0_px * (1 + CASE st.stage
+                WHEN 2 THEN s.p40 WHEN 3 THEN s.p60 ELSE s.p80 END) END AS level_px,
+           CASE WHEN NOT s.has_hist THEN s.trig_d + (s.w_days * (st.stage - 1) / 3) END AS sched_d
+    FROM stops s CROSS JOIN (VALUES (2), (3), (4)) st(stage)
+),
+tfill AS (
+    SELECT ts.*,
+           CASE WHEN ts.level_px IS NOT NULL THEN
+             (SELECT MIN(i.date) FROM cdm.ingest_combined i
+              WHERE i.ticker = ts.ticker AND i.date > ts.trig_d
+                AND i.date <= ts.win_end AND i.adj_close >= ts.level_px)
+           WHEN ts.max_d >= LEAST(ts.sched_d, ts.win_end) THEN
+             (SELECT MAX(i.date) FROM cdm.ingest_combined i
+              WHERE i.ticker = ts.ticker AND i.date > ts.trig_d
+                AND i.date <= LEAST(ts.sched_d, ts.win_end))
+           END AS raw_fill_d
+    FROM tspec ts
+),
+resolved AS (
+    SELECT ticker, trig_d, n_bars, w_days, win_end, n_win, has_hist,
+           p0_px, p40, p60, p80, stop_detect_d, stop_exec_d, max_d,
+           1 AS stage, 0.25 AS frac, 'trigger' AS kind, trig_d AS sell_d,
+           NULL::numeric AS level_px, NULL::date AS sched_d
+    FROM stops
+    UNION ALL
+    SELECT tf.ticker, tf.trig_d, tf.n_bars, tf.w_days, tf.win_end, tf.n_win, tf.has_hist,
+           tf.p0_px, tf.p40, tf.p60, tf.p80, tf.stop_detect_d, tf.stop_exec_d, tf.max_d,
+           tf.stage, 0.25,
+           CASE
+             WHEN tf.raw_fill_d IS NOT NULL
+                  AND (tf.stop_exec_d IS NULL OR tf.raw_fill_d < tf.stop_exec_d)
+               THEN CASE WHEN tf.level_px IS NOT NULL THEN 'level' ELSE 'sched' END
+             WHEN tf.stop_exec_d IS NOT NULL THEN 'stop'
+             WHEN tf.max_d >= tf.win_end THEN 'deadline'
+             ELSE 'pending' END,
+           CASE
+             WHEN tf.raw_fill_d IS NOT NULL
+                  AND (tf.stop_exec_d IS NULL OR tf.raw_fill_d < tf.stop_exec_d)
+               THEN tf.raw_fill_d
+             WHEN tf.stop_exec_d IS NOT NULL THEN tf.stop_exec_d
+             WHEN tf.max_d >= tf.win_end THEN
+               (SELECT MAX(i.date) FROM cdm.ingest_combined i
+                WHERE i.ticker = tf.ticker AND i.date <= tf.win_end)
+             END,
+           tf.level_px, tf.sched_d
+    FROM tfill tf
+)
+SELECT r.ticker, r.trig_d::text AS trig_d, r.n_bars, r.w_days,
+       r.win_end::text AS deadline_d, COALESCE(r.n_win, 0) AS n_win, r.has_hist,
+       ROUND(r.p0_px::numeric, 4)                 AS p0,
+       ROUND((r.p0_px * (1 + r.p40))::numeric, 4) AS level_safe,
+       ROUND((r.p0_px * (1 + r.p60))::numeric, 4) AS level_good,
+       ROUND((r.p0_px * (1 + r.p80))::numeric, 4) AS level_best,
+       r.stage, r.frac, r.kind,
+       r.sell_d::text AS sell_d, r.sched_d::text AS sched_d,
+       ROUND((SELECT i.adj_close FROM cdm.ingest_combined i
+              WHERE i.ticker = r.ticker AND i.date <= r.sell_d
+              ORDER BY i.date DESC LIMIT 1)::numeric, 4) AS fill_px,
+       r.stop_detect_d::text AS stop_detect_d, r.stop_exec_d::text AS stop_exec_d
+FROM resolved r
+ORDER BY r.ticker, r.trig_d, r.stage;"
+
+# Run LC_PORTFOLIO_SQL for the saved positions on an open connection, honoring
+# signal-gated model buys and (optional) ladder sell events. Returns a tidy
+# series (d/invested/value/ret_pct/spy_value/spy_ret_pct) or NULL. Injection-safe:
+# tickers ^[A-Za-z.-]+$, dates ISO, dollars/fractions numeric.
+compute_portfolio_series <- function(con, positions, led = NULL,
+                                     sell_events = NULL, today = Sys.Date()) {
+  sched <- gated_expand_schedule(positions, led, today)
+  skipped <- attr(sched, "model_skipped")
+  if (nrow(sched) == 0) return(NULL)
+  ok <- grepl("^[A-Za-z.-]+$", sched$ticker) &
+        grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", sched$d) & is.finite(sched$amount)
+  sched <- sched[ok, , drop = FALSE]
+  if (nrow(sched) == 0) return(NULL)
+  vals <- paste(sprintf("('%s','%s',%s)", toupper(sched$ticker), sched$d,
+                        format(sched$amount, scientific = FALSE, trim = TRUE)),
+                collapse = ", ")
+  sell_sql <- "SELECT NULL::text, NULL::text, NULL::numeric, NULL::text WHERE FALSE"
+  if (!is.null(sell_events) && nrow(sell_events)) {
+    se <- sell_events[toupper(sell_events$ticker) %in% toupper(sched$ticker), , drop = FALSE]
+    if (nrow(se)) {
+      se$frac <- suppressWarnings(as.numeric(se$frac))
+      ok2 <- grepl("^[A-Za-z.-]+$", se$ticker) &
+             grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", se$sell_d) &
+             grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", se$trig_d) &
+             is.finite(se$frac) & se$frac > 0 & se$frac <= 1
+      se <- se[ok2, , drop = FALSE]
+      if (nrow(se))
+        sell_sql <- paste0("VALUES ", paste(sprintf("('%s','%s',%s,'%s')",
+          toupper(se$ticker), se$sell_d,
+          format(se$frac, scientific = FALSE, trim = TRUE), se$trig_d), collapse = ", "))
+    }
+  }
+  q <- gsub("__BUYS__", vals, LC_PORTFOLIO_SQL, fixed = TRUE)
+  q <- gsub("__SELLS__", sell_sql, q, fixed = TRUE)
+  df <- coerce_numeric_cols(dbGetQuery(con, q),
+    c("invested", "value", "ret_pct", "spy_value", "spy_ret_pct"))
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+  df$d <- as.Date(df$d)
+  attr(df, "model_skipped") <- skipped
+  df
+}
+
+# Turn the board's current sell/closed model tickers into ladder triggers.
+# Uses derivedLC's already-computed state/reason/exit (one episode per name in
+# the current ledger window). reason in gate/matured/delisted -> window sizing.
+sell_triggers_from_dv <- function(dv, led, meta, model_tickers, today = Sys.Date()) {
+  if (is.null(dv) || is.null(dv$state_now)) return(NULL)
+  st <- dv$state_now
+  cand <- intersect(toupper(model_tickers), names(st)[st %in% c("sell", "closed")])
+  if (!length(cand)) return(NULL)
+  dl <- NULL
+  if (!is.null(meta) && nrow(meta))
+    dl <- setNames(suppressWarnings(as.Date(meta$delisted_date)), toupper(meta$ticker))
+  g1 <- function(x, t) if (!is.null(x) && t %in% names(x)) x[[t]] else NA
+  rows <- list()
+  for (t in cand) {
+    rsn  <- tolower(paste(g1(dv$reason_of, t), g1(dv$why_now, t)))
+    exd  <- suppressWarnings(as.Date(g1(dv$exit_of, t)))
+    matd <- suppressWarnings(as.Date(g1(dv$mat_of, t)))
+    is_del <- grepl("delist", rsn) || (!is.null(dl) && t %in% names(dl) && !is.na(dl[[t]]))
+    if (is_del) {
+      reason <- "delisted"
+      trig <- if (!is.null(dl) && t %in% names(dl) && !is.na(dl[[t]])) dl[[t]] else exd
+    } else if (grepl("matur", rsn)) {
+      reason <- "matured"; trig <- if (!is.na(matd)) matd else exd
+    } else { reason <- "gate"; trig <- exd }
+    if (is.na(trig)) trig <- today
+    if (trig > today) trig <- today
+    wd <- switch(reason, gate = LC_WINDDOWN$gate, matured = LC_WINDDOWN$matured, NULL)
+    rows[[length(rows) + 1]] <- data.frame(
+      ticker = t, trig_d = trig, reason = reason,
+      n_bars = if (is.null(wd)) NA_integer_ else wd$n_bars,
+      w_days = if (is.null(wd)) NA_integer_ else wd$w_days, stringsAsFactors = FALSE)
+  }
+  if (!length(rows)) return(NULL)
+  out <- do.call(rbind, rows)
+  out[!duplicated(paste(out$ticker, out$trig_d)), , drop = FALSE]
+}
+
+# Run the ladder query for laddered triggers (delisted -> 100% local event).
+# Returns list(events, meta) or NULL. Capped at 25 triggers/run.
+build_sell_events <- function(con, triggers) {
+  if (is.null(triggers) || !nrow(triggers)) return(NULL)
+  triggers <- triggers[order(triggers$ticker, triggers$trig_d), , drop = FALSE]
+  if (nrow(triggers) > 25L) triggers <- triggers[seq_len(25L), , drop = FALSE]
+  mcols <- c("ticker", "trig_d", "reason", "p0", "level_safe", "level_good",
+             "level_best", "n_win", "has_hist", "deadline_d", "stop_detect_d", "no_price")
+  events <- list(); meta <- list()
+  del <- triggers[triggers$reason == "delisted", , drop = FALSE]
+  lad <- triggers[triggers$reason != "delisted", , drop = FALSE]
+  if (nrow(del)) {
+    events[[length(events) + 1]] <- data.frame(
+      ticker = del$ticker, sell_d = format(del$trig_d), frac = 1.0,
+      trig_d = format(del$trig_d), stage = 1L, kind = "delisted",
+      fill_px = NA_real_, stringsAsFactors = FALSE)
+    meta[[length(meta) + 1]] <- data.frame(
+      ticker = del$ticker, trig_d = format(del$trig_d), reason = "delisted",
+      p0 = NA_real_, level_safe = NA_real_, level_good = NA_real_, level_best = NA_real_,
+      n_win = 0L, has_hist = FALSE, deadline_d = format(del$trig_d),
+      stop_detect_d = NA_character_, no_price = FALSE, stringsAsFactors = FALSE)[, mcols]
+  }
+  if (nrow(lad)) {
+    ok <- grepl("^[A-Za-z.-]+$", lad$ticker) &
+          grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", format(lad$trig_d)) &
+          lad$n_bars %in% c(20L, 40L)
+    lad <- lad[ok, , drop = FALSE]
+    if (nrow(lad)) {
+      vals <- paste(sprintf("('%s','%s',%d)", toupper(lad$ticker),
+                            format(lad$trig_d), as.integer(lad$n_bars)), collapse = ", ")
+      res <- tryCatch(coerce_numeric_cols(
+        dbGetQuery(con, gsub("__TRIGGERS__", vals, LC_SELL_LADDER_SQL, fixed = TRUE)),
+        c("p0", "level_safe", "level_good", "level_best", "frac", "fill_px", "n_win")),
+        error = function(e) NULL)
+      if (!is.null(res) && nrow(res)) {
+        ev <- res[res$kind != "pending" & !is.na(res$sell_d),
+                  c("ticker", "sell_d", "frac", "trig_d", "stage", "kind", "fill_px")]
+        if (nrow(ev)) events[[length(events) + 1]] <- ev
+        m <- res[!duplicated(paste(res$ticker, res$trig_d)),
+                 c("ticker", "trig_d", "p0", "level_safe", "level_good", "level_best",
+                   "n_win", "has_hist", "deadline_d", "stop_detect_d")]
+        m$reason <- lad$reason[match(paste(m$ticker, m$trig_d),
+                                     paste(toupper(lad$ticker), format(lad$trig_d)))]
+        m$no_price <- is.na(m$p0)
+        meta[[length(meta) + 1]] <- m[, mcols]
+      }
+    }
+  }
+  ev_df   <- if (length(events)) do.call(rbind, events) else NULL
+  meta_df <- if (length(meta))   do.call(rbind, meta)   else NULL
+  if (is.null(ev_df) && is.null(meta_df)) return(NULL)
+  list(events = ev_df, meta = meta_df)
+}
+
+# One-line plan/status string for a positions-table row.
+plan_label_for_row <- function(tk, mode, dv, ladder, today = Sys.Date()) {
+  tk <- toupper(trimws(as.character(tk)))
+  if (!identical(as.character(mode), "model")) return("manual DCA")
+  if (is.null(dv)) return("model-linked - Generate to activate")
+  st <- if (!is.null(dv$state_now) && tk %in% names(dv$state_now)) dv$state_now[[tk]] else NA
+  tryCatch({
+    if (!is.null(ladder) && !is.null(ladder$meta) && tk %in% ladder$meta$ticker) {
+      m  <- ladder$meta[ladder$meta$ticker == tk, , drop = FALSE][1, ]
+      ev <- if (!is.null(ladder$events)) ladder$events[ladder$events$ticker == tk, , drop = FALSE] else NULL
+      sold <- if (!is.null(ev) && nrow(ev)) sum(!is.na(ev$sell_d) & as.Date(ev$sell_d) <= today) else 0L
+      if (identical(m$reason, "delisted")) sprintf("delisted - exited %s", m$trig_d)
+      else if (!is.null(ev) && any(ev$kind == "stop", na.rm = TRUE))
+        sprintf("stopped out %s", max(ev$sell_d[ev$kind == "stop"], na.rm = TRUE))
+      else if (sold >= 4L || identical(st, "closed")) sprintf("exited (%d/4)", min(sold, 4L))
+      else {
+        idx <- max(1L, min(3L, sold)); nm <- c("safe", "good", "best")[idx]
+        px  <- c(m$level_safe, m$level_good, m$level_best)[idx]
+        hn  <- if (isTRUE(!m$has_hist)) " (hist-light)" else ""
+        sprintf("SELL %d/4 - next %s%s @ $%.2f - by %s", min(sold, 4L), nm, hn,
+                ifelse(is.na(px), 0, px), m$deadline_d)
+      }
+    } else if (identical(st, "buy")) "buying"
+    else if (isTRUE(st %in% c("sell", "closed"))) "exited"
+    else if (identical(st, "hold")) "paused (off buy list)"
+    else "awaiting first signal"
+  }, error = function(e) "-")
+}
+
 # Risk-adjustment series: the EQUAL-WEIGHT buy-and-hold basket value (=$1 -> avg
 # of price/entry over the picks) and SPY value, monthly, over the hold window.
 # Equal-weight-hold (not DCA) so month-over-month ratios are pure time-weighted
@@ -768,8 +1473,14 @@ FROM vdates v JOIN bv ON bv.d=v.d GROUP BY v.d ORDER BY v.d;"
 # ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
-  # the ONE shared connection, rendered on every tab above its content
-  header = connection_bar(),
+  # the ONE shared connection, rendered on every tab above its content, plus the
+  # global loading overlay (toggled by the shiny:busy/idle handler in head)
+  header = tagList(
+    connection_bar(),
+    tags$div(id = "global-spinner",
+      tags$div(id = "gs-track", tags$div(id = "gs-fill")),
+      tags$div(id = "gs-label", "Loading..."))
+  ),
   tags$head(
     tags$style(HTML(custom_css)),
     # Auto-heal Shiny's grey disconnect overlay. Forced reconnect stays OFF
@@ -790,7 +1501,50 @@ ui <- navbarPage(
           if (n >= MAX) return;               // likely down; stop reloading, leave overlay
           try { sessionStorage.setItem(KEY, n + 1); } catch (e) {}
           var delay = Math.min(1500 * Math.pow(1.6, n), 10000);
-          setTimeout(function(){ location.reload(); }, delay);
+          // Reload only once the server actually answers 200. Reloading into a
+          // still-booting / segfault-restarting process adds reconnect churn,
+          // which is itself a segfault trigger - so poll readiness first.
+          setTimeout(function ready(){
+            fetch('/', { method: 'GET', cache: 'no-store' })
+              .then(function(r){ if (r && r.ok) { location.reload(); } else { setTimeout(ready, 2000); } })
+              .catch(function(){ setTimeout(ready, 2000); });
+          }, delay);
+        });
+      })();
+    ")),
+    # Global estimated-progress bar: on any tab, whenever Shiny is busy (Connect,
+    # Generate, heavy render). Real query progress isn't reported, so the fill
+    # trickles asymptotically toward 90% over the expected load time and snaps to
+    # 100% on idle. A 150ms delay skips the flash on trivial updates.
+    tags$script(HTML("
+      (function(){
+        var startT = null, trickle = null, pct = 0, active = false;
+        function ov(){ return document.getElementById('global-spinner'); }
+        function paint(){
+          var f = document.getElementById('gs-fill'); if(f) f.style.width = pct + '%';
+          var l = document.getElementById('gs-label'); if(l) l.textContent = 'Loading... ' + Math.round(pct) + '%';
+        }
+        function start(){
+          active = true; pct = 8; paint();
+          var o = ov(); if(o) o.classList.add('gs-on');
+          clearInterval(trickle);
+          trickle = setInterval(function(){
+            if(!active) return;
+            pct += Math.max((90 - pct) * 0.06, 0.4);   // shrinking step -> approaches ~90%
+            if(pct > 90) pct = 90;
+            paint();
+          }, 400);
+        }
+        function done(){
+          active = false; clearInterval(trickle);
+          pct = 100; paint();
+          setTimeout(function(){ var o = ov(); if(o) o.classList.remove('gs-on'); pct = 0; paint(); }, 260);
+        }
+        $(document).on('shiny:busy', function(){ clearTimeout(startT); startT = setTimeout(start, 150); });
+        $(document).on('shiny:idle', function(){
+          clearTimeout(startT);
+          var o = ov();
+          if(active || (o && o.classList.contains('gs-on'))) done();
         });
       })();
     "))
@@ -1352,14 +2106,58 @@ ui <- navbarPage(
         uiOutput("idFilterLC")
       )),
       mainPanel(div(class = "main-card",
-        uiOutput("boardLC"),
-        plotlyOutput("qsCompareLC", height = "320px"),
+        # Benchmark comparison up top for visibility: does the qualstream + add return?
+        plotlyOutput("qsCompareLC", height = "380px"),
         uiOutput("qsCompareNoteLC"),
-        tags$hr(style = "border-color:#1e293b; margin:1.1rem 0 0.8rem;"),
-        tags$div(style = "color:#94a3b8; font-size:0.8rem; margin-bottom:0.5rem;",
-                 paste("Same companies with detail: entry, days held, % of horizon, why.",
-                       "Filter the State column or search; the CSV button exports the lot.")),
-        DT::DTOutput("tableLC")
+        tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1rem;"),
+        # --- My portfolio: strategy follower (model-linked DCA + ladder sells) ---
+        tags$details(open = NA,
+          style = "border:1px solid #1e293b; border-radius:8px; padding:0.6rem 0.9rem; margin-bottom:1rem;",
+          tags$summary("My portfolio - strategy follower",
+            uiOutput("lcPortSummary", inline = TRUE)),
+          div(
+            div(style = "color:#64748b; font-size:0.72rem; margin-bottom:0.6rem;",
+                paste("Starts with every current BUY that passes qualstream (the board's",
+                      "orange +), auto-added as a $100/monthly plan on Generate. Remove any",
+                      "you don't want and it stays removed; Clear all resets to the current",
+                      "qualstream defaults. Add your own manual plans below.",
+                      "Model-linked buys pause when a name leaves the buy list and resume",
+                      "if it returns; a sell state winds the position down on a per-stock ladder",
+                      "(safe/good/best levels from the stock's own history). Simulated fills at",
+                      "daily closes; the SPY benchmark mirrors every buy and sell; sale proceeds",
+                      "sit in cash on both legs.")),
+            uiOutput("lcAdoptRow"),
+            div(style = "color:#94a3b8; font-size:0.72rem; margin:0.5rem 0 0.15rem; font-weight:600;",
+                "Or add a manual plan"),
+            fluidRow(
+              column(2, textInput("lcPosTicker", "Ticker", "")),
+              column(2, numericInput("lcPosAmt", "$ per buy", value = 100, min = 1)),
+              column(3, selectInput("lcPosCadence", "Cadence",
+                       choices = c("Monthly" = "monthly", "One-off" = "once"),
+                       selected = "monthly")),
+              column(2, numericInput("lcPosDay", "Day of month", value = 1, min = 1, max = 28)),
+              column(3, dateInput("lcPosStart", "Start date", value = Sys.Date() - 365))
+            ),
+            div(style = "margin:0.1rem 0 0.6rem;",
+              actionButton("lcPosAdd", "Add manual", class = "btn-primary", style = "margin-right:0.4rem;"),
+              actionButton("lcPosRemove", "Remove selected", style = "margin-right:0.4rem;"),
+              actionButton("lcPosClear", "Clear all")),
+            div(style = "color:#64748b; font-size:0.7rem; margin:0.1rem 0 0.35rem;",
+                paste("id = cluster. Double-click a $/buy cell to change that row's amount.",
+                      "Invested / Value / P&L / Return are that row's own accumulated buys;",
+                      "vs SPY is the same dollars run into SPY (pp = percentage-point edge).")),
+            DT::DTOutput("lcPosTable"),
+            plotlyOutput("lcPortfolioChart", height = "320px"),
+            uiOutput("lcPortfolioNote"),
+            div(style = "color:#94a3b8; font-size:0.72rem; margin:0.8rem 0 0.15rem; font-weight:600;",
+                "Transition history - each position's Buy → Hold → Sell path over time"),
+            DT::DTOutput("lcTransitionsTable")
+          )
+        ),
+        uiOutput("boardLC")
+        # qsCompareLC benchmark graph moved to the top of this panel for
+        # visibility. "Same companies with detail" table removed from view
+        # (still computed; re-add hr + caption + DT::DTOutput("tableLC") to restore).
       ))
     )
   )
@@ -1391,7 +2189,13 @@ get_con <- function(input) {
   # retry a few times before surfacing a raw error to the user. Non-transient
   # failures (bad password, refused) are raised immediately.
   transient <- "name resolution|translate host name|EAI_AGAIN|could not connect|server closed the connection|connection timed out"
-  attempts  <- 3
+  # The connect runs on the single-threaded event loop and burns NO CPU while it
+  # blocks, so the watchdog's CPU-progress guard can't tell a stuck connect from a
+  # hang. Bound the total connect budget hard: 2 attempts x 5s connect_timeout +
+  # one short pause = ~10.3s worst case, well under the watchdog window, so a slow
+  # SSL path can't stack into a self-inflicted kill (esp. with the portfolio
+  # reactives each opening a connection per Generate).
+  attempts  <- 2
   con <- NULL
   for (i in seq_len(attempts)) {
     con <- tryCatch(
@@ -1402,11 +2206,11 @@ get_con <- function(input) {
         user     = input$db_user,
         password = input$db_pass,
         sslmode  = ssl_mode,
-        connect_timeout = 10
+        connect_timeout = 5
       ),
       error = function(e) {
         if (i < attempts && grepl(transient, e$message, ignore.case = TRUE)) {
-          Sys.sleep(1.5)   # let the resolver / DB recover, then retry
+          Sys.sleep(0.3)   # brief; connect_timeout already bounds the real wait
           return(NULL)
         }
         stop(e)            # non-transient, or out of retries
@@ -1414,8 +2218,11 @@ get_con <- function(input) {
     )
     if (!is.null(con)) break
   }
-  # Hard cap so a slow or stuck query can never freeze the single-threaded app
-  DBI::dbExecute(con, "SET statement_timeout = '60s'")
+  # Hard cap BELOW the watchdog window so a stuck query self-aborts before the
+  # process watchdog could ever fire. Wrapped so a failed SET (SSL drop right
+  # after connect) disconnects instead of leaking the open socket.
+  tryCatch(DBI::dbExecute(con, "SET statement_timeout = '25s'"),
+           error = function(e) { try(dbDisconnect(con), silent = TRUE); stop(e) })
   con
 }
 
@@ -5274,7 +6081,7 @@ server <- function(input, output, session) {
     tryCatch({
       con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      DBI::dbExecute(con, "SET statement_timeout = '120s'")
+      DBI::dbExecute(con, "SET statement_timeout = '60s'")  # heavy forecast query; still < watchdog window
       ids_sel <- as.integer(input$idsFC)
       # empty OR every available id checked (the default) => no filter, "all ids"
       all_on  <- length(ids_sel) == 0 || (!is.null(avail_idsFC()) && setequal(ids_sel, avail_idsFC()))
@@ -5622,6 +6429,427 @@ server <- function(input, output, session) {
   observeEvent(input$idsLC, ids_seenLC(TRUE), ignoreNULL = TRUE)
   output$statusMessageLC <- renderText({ status_msgLC() })
 
+  # ── Personal portfolio: strategy follower (model DCA + ladder sells) ──────
+  lc_pos <- reactiveVal(load_portfolio())
+  lc_dismissed <- reactiveVal(load_dismissed())
+  lc_backend <- reactiveVal("parquet")   # flips to "db" once a portfolio-schema DB is seen
+
+  # Route a positions/dismissed save to the DB (authoritative, shared) when the
+  # connected DB has the portfolio schema, else to the local parquet files. The
+  # observers below compute a full merged df and call these, unchanged otherwise.
+  persist_positions <- function(df) {
+    if (!identical(lc_backend(), "db")) { save_portfolio(df); return(invisible(TRUE)) }
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) {
+      showNotification("DB unreachable - change not saved.", type = "error"); return(invisible(FALSE)) }
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    tryCatch({ db_save_positions(con, df); invisible(TRUE) },
+      error = function(e) {
+        showNotification(paste("Save failed:", e$message), type = "error"); invisible(FALSE) })
+  }
+  persist_dismissed <- function(v) {
+    if (!identical(lc_backend(), "db")) { save_dismissed(v); return(invisible(TRUE)) }
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) return(invisible(FALSE))
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    tryCatch({ db_save_dismissed(con, v); invisible(TRUE) }, error = function(e) invisible(FALSE))
+  }
+
+  # Default the table to the qualstream orange-+ buys: on every Generate, each
+  # current BUY graded >= 68 (dv$qs_buys, the exact board + set) is auto-added as
+  # a model-linked $100/monthly plan unless it is already tracked or was
+  # explicitly removed (dismissed). Idempotent: once seeded, qs_buys is a subset
+  # of tracked+dismissed, so `toAdd` is empty and no further write fires (the
+  # self-trigger on lc_pos() settles after one no-op pass).
+  observe({
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    if (is.null(dv) || is.null(dv$qs_buys) || !length(dv$qs_buys)) return()
+    cur <- lc_pos(); dis <- lc_dismissed()
+    toAdd <- setdiff(dv$qs_buys, union(toupper(cur$ticker), dis))
+    if (!length(toAdd)) return()
+    now <- format(Sys.time())
+    rows <- do.call(rbind, lapply(seq_along(toAdd), function(i) {
+      tk <- toAdd[i]
+      data.frame(
+        id = paste0(tk, "-seed", i, "-", format(Sys.time(), "%Y%m%d%H%M%S")),
+        ticker = tk, amount_usd = 100, cadence = "monthly",
+        day1 = 1L, day2 = NA_integer_, start_date = format(Sys.Date()),
+        end_date = "", sold_date = "", sold_fraction = NA_real_,
+        mode = "model", adopted_at = now, created_at = now,
+        stringsAsFactors = FALSE)
+    }))
+    merged <- rbind(cur, rows)
+    persist_positions(merged); lc_pos(merged)
+  })
+
+  # Transition log: on each Generate, snapshot every tracked ticker's current
+  # state (buy/hold/sell/closed) to portfolio.state_history, upserted per
+  # (ticker, as_of, hz). Same-day re-Generate refreshes; new days accumulate ->
+  # the Buy->Hold->Sell trail per position. DB-backend only (needs the schema).
+  observe({
+    if (!identical(lc_backend(), "db")) return()
+    dv <- tryCatch(derivedLC(), error = function(e) NULL); if (is.null(dv)) return()
+    p <- lc_pos(); if (is.null(p) || !nrow(p)) return()
+    ticks <- toupper(unique(p$ticker))
+    st <- dv$state_now; wy <- dv$why_now; gr <- dv$qs_grade
+    getv <- function(m, t, d) if (!is.null(m) && t %in% names(m)) unname(m[[t]]) else d
+    rows <- data.frame(
+      ticker = ticks, as_of = format(Sys.Date()), hz = dv$hz,
+      state = vapply(ticks, function(t) getv(st, t, NA_character_), character(1)),
+      why   = vapply(ticks, function(t) getv(wy, t, NA_character_), character(1)),
+      grade = vapply(ticks, function(t) as.numeric(getv(gr, t, NA_real_)), numeric(1)),
+      stringsAsFactors = FALSE)
+    rows <- rows[!is.na(rows$state) & nzchar(rows$state), , drop = FALSE]  # only what the board knows
+    if (!nrow(rows)) return()
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return()
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    tryCatch(db_upsert_state_history(con, rows), error = function(e) NULL)
+  })
+
+  observeEvent(input$lcPosAdd, {
+    tk <- input$lcPosTicker; if (is.null(tk)) tk <- ""
+    tk <- toupper(trimws(tk))
+    amt <- suppressWarnings(as.numeric(input$lcPosAmt))
+    if (!nzchar(tk) || !grepl("^[A-Z.-]+$", tk)) {
+      showNotification("Enter a valid ticker (letters, dot, dash).", type = "warning"); return() }
+    if (is.na(amt) || amt <= 0) {
+      showNotification("Enter a positive dollar amount.", type = "warning"); return() }
+    cur <- lc_pos()
+    if (tk %in% toupper(cur$ticker[cur$mode == "model"])) {
+      showNotification(sprintf("%s is model-linked already; remove that row first.", tk),
+                       type = "warning"); return() }
+    day <- suppressWarnings(as.integer(input$lcPosDay)); if (is.na(day)) day <- 1L
+    day <- min(max(day, 1L), 28L)
+    sd <- suppressWarnings(as.Date(input$lcPosStart)); if (is.na(sd)) sd <- Sys.Date()
+    newrow <- data.frame(
+      id = paste0(tk, "-", format(Sys.time(), "%Y%m%d%H%M%OS2")),
+      ticker = tk, amount_usd = amt, cadence = input$lcPosCadence,
+      day1 = day, day2 = NA_integer_, start_date = format(sd), end_date = "",
+      sold_date = "", sold_fraction = NA_real_, mode = "manual", adopted_at = "",
+      created_at = format(Sys.time()), stringsAsFactors = FALSE)
+    merged <- rbind(cur, newrow)
+    persist_positions(merged); lc_pos(merged)
+    if (tk %in% lc_dismissed()) {            # an explicit add overrides a removal
+      nd <- setdiff(lc_dismissed(), tk); persist_dismissed(nd); lc_dismissed(nd) }
+    updateTextInput(session, "lcPosTicker", value = "")
+  })
+
+  # Adopt-from-model controls: only the board's current BUY tickers not yet tracked
+  output$lcAdoptRow <- renderUI({
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    if (is.null(dv) || is.null(dv$state_now))
+      return(div(style = "color:#64748b; font-size:0.72rem;",
+        "Generate the board to adopt the model's BUY names. Manual plans work without it."))
+    buys    <- names(dv$state_now)[dv$state_now == "buy"]
+    choices <- sort(setdiff(buys, toupper(lc_pos()$ticker)))
+    if (!length(choices))
+      return(div(style = "color:#64748b; font-size:0.72rem;",
+        "No new model BUYs to adopt (all current buys already tracked)."))
+    fluidRow(
+      column(3, selectInput("lcAdoptTicker", "Adopt model BUY", choices = choices)),
+      column(2, numericInput("lcAdoptAmt", "$ per buy", value = 100, min = 1)),
+      column(3, selectInput("lcAdoptCadence", "Cadence",
+               choices = c("Monthly" = "monthly", "One-off" = "once"), selected = "monthly")),
+      column(2, numericInput("lcAdoptDay", "Day", value = 1, min = 1, max = 28)),
+      column(2, div(style = "margin-top:1.6rem;",
+               actionButton("lcAdoptBtn", "Adopt", class = "btn-primary"))))
+  })
+
+  observeEvent(input$lcAdoptBtn, {
+    tk <- toupper(trimws(as.character(input$lcAdoptTicker)))
+    if (!nzchar(tk)) return()
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    st <- if (!is.null(dv) && !is.null(dv$state_now) && tk %in% names(dv$state_now))
+            dv$state_now[[tk]] else NA
+    if (!identical(st, "buy")) {
+      showNotification("That ticker is no longer a model BUY.", type = "warning"); return() }
+    if (tk %in% toupper(lc_pos()$ticker)) {
+      showNotification(sprintf("%s is already tracked.", tk), type = "warning"); return() }
+    amt <- suppressWarnings(as.numeric(input$lcAdoptAmt))
+    if (is.na(amt) || amt <= 0) {
+      showNotification("Enter a positive dollar amount.", type = "warning"); return() }
+    day <- suppressWarnings(as.integer(input$lcAdoptDay)); if (is.na(day)) day <- 1L
+    day <- min(max(day, 1L), 28L)
+    newrow <- data.frame(
+      id = paste0(tk, "-", format(Sys.time(), "%Y%m%d%H%M%OS2")),
+      ticker = tk, amount_usd = amt, cadence = input$lcAdoptCadence,
+      day1 = day, day2 = NA_integer_, start_date = format(Sys.Date()), end_date = "",
+      sold_date = "", sold_fraction = NA_real_, mode = "model",
+      adopted_at = format(Sys.time()), created_at = format(Sys.time()),
+      stringsAsFactors = FALSE)
+    merged <- rbind(lc_pos(), newrow)
+    persist_positions(merged); lc_pos(merged)
+    if (tk %in% lc_dismissed()) {            # adopting overrides a prior removal
+      nd <- setdiff(lc_dismissed(), tk); persist_dismissed(nd); lc_dismissed(nd) }
+  })
+
+  observeEvent(input$lcPosRemove, {
+    sel <- input$lcPosTable_rows_selected; cur <- lc_pos()
+    if (is.null(sel) || is.null(cur) || !nrow(cur)) return()
+    removed <- toupper(cur$ticker[sel])
+    merged <- cur[setdiff(seq_len(nrow(cur)), sel), , drop = FALSE]
+    persist_positions(merged); lc_pos(merged)
+    # remember the removal so the qualstream auto-seed won't re-add it next Generate
+    nd <- union(lc_dismissed(), removed); persist_dismissed(nd); lc_dismissed(nd)
+  })
+  # Clear all = reset to defaults: wipe positions AND dismissals, so the next
+  # Generate re-seeds the current qualstream orange-+ buys from scratch.
+  observeEvent(input$lcPosClear, {
+    persist_positions(portfolio_empty()); lc_pos(portfolio_empty())
+    persist_dismissed(character(0)); lc_dismissed(character(0))
+  })
+
+  # sell triggers for tracked model rows: pure R, cheap; NULL unless a model
+  # position is currently in a sell/closed board state with buys behind it.
+  lc_sell_triggers <- reactive({
+    p <- lc_pos(); if (is.null(p) || !nrow(p)) return(NULL)
+    mt <- if ("mode" %in% names(p)) toupper(p$ticker[p$mode == "model"]) else character(0)
+    mt <- mt[nzchar(mt)]; if (!length(mt)) return(NULL)
+    d <- app_dataLC(); if (is.null(d)) return(NULL)
+    dv <- tryCatch(derivedLC(), error = function(e) NULL); if (is.null(dv)) return(NULL)
+    tr <- sell_triggers_from_dv(dv, d$led, d$meta, mt)
+    if (is.null(tr) || !nrow(tr)) return(NULL)
+    sched <- gated_expand_schedule(p, d$led)
+    keep <- vapply(seq_len(nrow(tr)), function(i)
+      any(sched$ticker == tr$ticker[i] & as.Date(sched$d) <= tr$trig_d[i]), logical(1))
+    tr <- tr[keep, , drop = FALSE]
+    if (nrow(tr)) tr else NULL
+  })
+
+  # ladder query is the expensive step (~0.4s/ticker): cache on the trigger
+  # signature so holdLC toggles / re-Generates with the same triggers are free.
+  lc_ladder_env <- new.env(parent = emptyenv())   # plain memo cache (not reactive)
+  lc_sell_events <- reactive({
+    tr <- lc_sell_triggers(); if (is.null(tr)) return(NULL)
+    key <- paste(sprintf("%s|%s|%s|%s", tr$ticker, tr$trig_d, tr$reason, tr$n_bars),
+                 collapse = ";")
+    if (!is.null(lc_ladder_env$key) && identical(lc_ladder_env$key, key))
+      return(lc_ladder_env$val)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    val <- tryCatch(build_sell_events(con, tr), error = function(e) NULL)
+    lc_ladder_env$key <- key; lc_ladder_env$val <- val
+    val
+  })
+
+  lc_port_series <- reactive({
+    p <- lc_pos()
+    if (is.null(p) || nrow(p) == 0) return(NULL)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    d  <- app_dataLC()
+    ev <- lc_sell_events()
+    sold <- if (!is.null(ev) && !is.null(ev$events))
+              ev$events[!is.na(ev$events$sell_d), , drop = FALSE] else NULL
+    tryCatch(compute_portfolio_series(con, p, led = if (!is.null(d)) d$led else NULL,
+                                      sell_events = sold), error = function(e) NULL)
+  })
+
+  # Per-row performance as of today: each position's own accumulated buys valued
+  # vs the SAME dollars into SPY. Expanded per position (id preserved), gated for
+  # model rows exactly like the portfolio series.
+  lc_row_perf <- reactive({
+    p <- lc_pos(); if (is.null(p) || !nrow(p)) return(NULL)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    d <- app_dataLC(); led <- if (!is.null(d)) d$led else NULL
+    parts <- lapply(seq_len(nrow(p)), function(i) {
+      s <- tryCatch(gated_expand_schedule(p[i, , drop = FALSE], led), error = function(e) NULL)
+      if (is.null(s) || !nrow(s)) return(NULL)
+      data.frame(id = p$id[i], ticker = toupper(s$ticker), d = s$d,
+                 amt = s$amount, stringsAsFactors = FALSE)
+    })
+    buys <- do.call(rbind, parts)
+    if (is.null(buys) || !nrow(buys)) return(NULL)
+    vals <- sprintf("('%s','%s','%s',%s)",
+                    gsub("'", "''", buys$id, fixed = TRUE), buys$ticker, buys$d,
+                    format(buys$amt, scientific = FALSE, trim = TRUE))
+    sql <- gsub("__BUYS__", paste(vals, collapse = ","), LC_PORTFOLIO_ROWS_SQL, fixed = TRUE)
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    tryCatch(dbGetQuery(con, sql), error = function(e) NULL)
+  })
+
+  output$lcPosTable <- DT::renderDT({
+    p <- lc_pos()
+    if (is.null(p) || nrow(p) == 0)
+      return(DT::datatable(
+        data.frame(Note = "No positions yet - Generate to auto-load the qualstream buys, or adopt a model BUY / add a manual plan above."),
+        rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
+    dv  <- tryCatch(derivedLC(), error = function(e) NULL)
+    d   <- app_dataLC()
+    perf <- tryCatch(lc_row_perf(), error = function(e) NULL)
+    id_of <- if (!is.null(d) && !is.null(d$gate$id))
+      setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker)) else integer(0)
+    states <- vapply(seq_len(nrow(p)), function(i) {
+      if (!identical(p$mode[i], "model")) return("-")
+      tk <- toupper(p$ticker[i])
+      s <- if (!is.null(dv) && tk %in% names(dv$state_now)) dv$state_now[[tk]] else ""
+      if (is.null(s) || is.na(s)) "" else s
+    }, character(1))
+    pcol <- function(col) if (is.null(perf) || !nrow(perf)) rep(NA_real_, nrow(p)) else
+      as.numeric(perf[[col]])[match(p$id, perf$id)]
+    invested <- pcol("invested"); value <- pcol("value"); spyv <- pcol("spy_value")
+    ret  <- 100 * (value / invested - 1)
+    spyr <- 100 * (spyv  / invested - 1)
+    pnl  <- value - invested
+    vspp <- ret - spyr
+    usd  <- function(x) ifelse(is.na(x), "-", paste0("$", formatC(round(x), format = "d", big.mark = ",")))
+    susd <- function(x) ifelse(is.na(x), "-", sprintf("%s$%s", ifelse(x < 0, "-", "+"),
+                        formatC(abs(round(x)), format = "d", big.mark = ",")))
+    spct <- function(x) ifelse(is.na(x), "-", sprintf("%+.1f%%", x))
+    spp  <- function(x) ifelse(is.na(x), "-", sprintf("%+.1fpp", x))
+    tick <- toupper(p$ticker)
+    cid  <- id_of[tick]
+    show <- data.frame(
+      id       = ifelse(is.na(cid), "-", as.character(cid)),
+      Ticker   = tick,
+      State    = states,
+      `$/buy`  = round(as.numeric(p$amount_usd), 2),
+      Cadence  = p$cadence,
+      Start    = p$start_date,
+      Invested = usd(invested),
+      Value    = usd(value),
+      `P&L $`  = susd(pnl),
+      Return   = spct(ret),
+      `vs SPY` = spp(vspp),
+      check.names = FALSE, stringsAsFactors = FALSE)
+    editcol <- which(names(show) == "$/buy") - 1L   # 0-based; only this col editable
+    DT::datatable(show, rownames = FALSE, selection = "single", class = "compact",
+      editable = list(target = "cell",
+        disable = list(columns = setdiff(seq_len(ncol(show)) - 1L, editcol))),
+      options = list(dom = "t", ordering = FALSE, pageLength = 50)) %>%
+      DT::formatStyle("State", fontWeight = "600",
+        color = DT::styleEqual(c("buy", "hold", "sell", "closed"),
+                               c("#10b981", "#eab308", "#dc2626", "#64748b")))
+  }, server = FALSE)
+
+  # Inline edit of $/buy (the only editable column): validate, persist, and the
+  # perf columns + chart recompute off the new amount.
+  observeEvent(input$lcPosTable_cell_edit, {
+    info <- input$lcPosTable_cell_edit
+    i <- info$row; v <- suppressWarnings(as.numeric(info$value))
+    p <- lc_pos(); if (is.null(p) || is.null(i) || i < 1 || i > nrow(p)) return()
+    if (is.na(v) || v <= 0) { showNotification("Enter a positive $ amount.", type = "warning"); return() }
+    p$amount_usd[i] <- v
+    persist_positions(p); lc_pos(p)
+  })
+
+  # Buy -> Hold -> Sell transition timeline, read from portfolio.state_history
+  # (the per-Generate snapshots). One row per ticker, consecutive same-states
+  # collapsed into the change points, so the trail reads as the position's path.
+  output$lcTransitionsTable <- DT::renderDT({
+    note <- function(txt) DT::datatable(data.frame(Note = txt), rownames = FALSE,
+      selection = "none", options = list(dom = "t", ordering = FALSE))
+    if (!identical(lc_backend(), "db"))
+      return(note("Transitions record to the DB - connect to a portfolio-schema DB and Generate."))
+    p <- lc_pos(); if (is.null(p) || !nrow(p)) return(note("No positions yet."))
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    hz <- if (!is.null(dv)) dv$hz else 12L
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) return(note("DB unreachable."))
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    h <- tryCatch(dbGetQuery(con, "
+        SELECT ticker, to_char(as_of,'YYYY-MM-DD') AS as_of, state
+        FROM portfolio.state_history WHERE hz = $1 ORDER BY ticker, as_of",
+        params = list(as.integer(hz))), error = function(e) NULL)
+    if (is.null(h) || !nrow(h))
+      return(note("No snapshots yet - re-Generate over the coming days to build each trail."))
+    parts <- lapply(split(seq_len(nrow(h)), h$ticker), function(ix) {
+      g <- h[ix, , drop = FALSE]
+      keep <- c(TRUE, g$state[-1] != g$state[-nrow(g)])   # change points only
+      ch <- g[keep, , drop = FALSE]
+      data.frame(Ticker = g$ticker[1],
+        Trail   = paste(sprintf("%s (%s)", ch$state, ch$as_of), collapse = "  →  "),
+        Current = g$state[nrow(g)], Since = ch$as_of[nrow(ch)],
+        stringsAsFactors = FALSE)
+    })
+    out <- do.call(rbind, parts)
+    ord <- c(sell = 1, hold = 2, buy = 3, closed = 4)
+    out <- out[order(ord[out$Current], out$Ticker), , drop = FALSE]
+    DT::datatable(out, rownames = FALSE, selection = "none", class = "compact",
+      options = list(dom = "t", ordering = FALSE, pageLength = 50)) %>%
+      DT::formatStyle("Current", fontWeight = "600",
+        color = DT::styleEqual(c("buy", "hold", "sell", "closed"),
+                               c("#10b981", "#eab308", "#dc2626", "#64748b")))
+  }, server = FALSE)
+
+  output$lcPortfolioChart <- renderPlotly({
+    p <- lc_pos()
+    if (is.null(p) || nrow(p) == 0)
+      return(empty_plot("Adopt a model BUY or add a manual plan to see your value vs SPY."))
+    if (is.null(input$db_pass) || input$db_pass == "")
+      return(empty_plot("Connect to price your portfolio."))
+    ser <- lc_port_series()
+    if (is.null(ser) || nrow(ser) == 0)
+      return(empty_plot("No priced history yet for these tickers/dates."))
+    fig <- plot_ly()
+    fig <- add_trace(fig, x = ser$d, y = ser$value, type = "scatter", mode = "lines",
+      name = "My portfolio", line = list(color = "#f59e0b", width = 3),
+      hovertemplate = "Mine<br>%{x|%b %d %Y}: $%{y:,.0f}<extra></extra>")
+    fig <- add_trace(fig, x = ser$d, y = ser$spy_value, type = "scatter", mode = "lines",
+      name = "Same-cash SPY", line = list(color = "#3b82f6", width = 2.5),
+      hovertemplate = "SPY<br>%{x|%b %d %Y}: $%{y:,.0f}<extra></extra>")
+    fig <- add_trace(fig, x = ser$d, y = ser$invested, type = "scatter", mode = "lines",
+      name = "Invested", line = list(color = "#64748b", width = 1.5, dash = "dot"),
+      hovertemplate = "Invested<br>%{x|%b %d %Y}: $%{y:,.0f}<extra></extra>")
+    ev <- tryCatch(lc_sell_events(), error = function(e) NULL)
+    if (!is.null(ev) && !is.null(ev$events)) {
+      so <- ev$events[!is.na(ev$events$sell_d), , drop = FALSE]
+      mi <- match(so$sell_d, format(ser$d)); ok <- !is.na(mi)
+      if (any(ok)) fig <- add_trace(fig, x = as.Date(so$sell_d[ok]), y = ser$value[mi[ok]],
+        type = "scatter", mode = "markers", name = "Ladder sells",
+        marker = list(symbol = "triangle-down", size = 9, color = "#dc2626"),
+        hovertext = sprintf("%s %s: sell %.0f%% (%s)", so$ticker[ok], so$sell_d[ok],
+                            100 * so$frac[ok], so$kind[ok]), hoverinfo = "text")
+    }
+    dark_layout(fig,
+      title = list(text = "My strategy value vs same-cash-flow SPY",
+                   font = list(color = "#f8fafc", size = 13), x = 0.5),
+      xaxis = list(title = "", color = "#cbd5e1", type = "date",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
+      yaxis = list(title = "Value (USD)", color = "#cbd5e1",
+                   gridcolor = "rgba(148,163,184,0.10)"),
+      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.25),
+      hovermode = "x unified", margin = list(l = 64, r = 20, t = 44, b = 60))
+  })
+
+  output$lcPortfolioNote <- renderUI({
+    ser <- lc_port_series()
+    if (is.null(ser) || nrow(ser) == 0) return(NULL)
+    last <- ser[nrow(ser), ]
+    extra <- ""
+    sk <- attr(ser, "model_skipped")
+    if (!is.null(sk) && length(sk))
+      extra <- paste0(extra, sprintf(" Model rows (%s) price after Generate.",
+                                     paste(sk, collapse = ", ")))
+    lad <- tryCatch(lc_sell_events(), error = function(e) NULL)
+    if (!is.null(lad) && !is.null(lad$meta) &&
+        any(!lad$meta$has_hist & lad$meta$reason != "delisted", na.rm = TRUE))
+      extra <- paste0(extra, " Some ladders use a time-based fallback (thin history).")
+    div(style = "color:#94a3b8; font-size:0.78rem; margin:0.3rem 0 0.2rem;",
+      sprintf(paste0("Invested $%s, now $%s (%+.1f%%). Same-cash SPY $%s (%+.1f%%). ",
+                     "Edge %+.1fpp. Simulated fills at daily closes.%s"),
+        format(round(last$invested), big.mark = ","),
+        format(round(last$value), big.mark = ","), last$ret_pct,
+        format(round(last$spy_value), big.mark = ","), last$spy_ret_pct,
+        last$ret_pct - last$spy_ret_pct, extra))
+  })
+
+  output$lcPortSummary <- renderUI({
+    p <- lc_pos(); n <- if (is.null(p)) 0L else nrow(p)
+    ser <- tryCatch(lc_port_series(), error = function(e) NULL)
+    txt <- if (is.null(ser) || !nrow(ser)) sprintf(" - %d position%s", n, if (n == 1) "" else "s")
+      else { last <- ser[nrow(ser), ]
+        sprintf(" - %d pos, $%s (%+.1f%%), %+.1fpp vs SPY", n,
+                format(round(last$value), big.mark = ","), last$ret_pct,
+                last$ret_pct - last$spy_ret_pct) }
+    span(txt, style = "color:#94a3b8; font-weight:400; font-size:0.78rem;")
+  })
+
   observeEvent(input$connect_btn, {
     if (input$db_pass == "") { status_msgLC("Error: Password is not set."); return() }
     lc_cache(NULL)   # invalidate the Lifecycle query cache on (re)connect / env switch
@@ -5653,6 +6881,25 @@ server <- function(input, output, session) {
     tryCatch({
       con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      # Portfolio store: if this DB has the portfolio schema, adopt it as the
+      # authoritative store (one shared copy across dashboards) and migrate any
+      # local/parquet rows into it once, so nothing typed before connecting is
+      # lost. Otherwise the app keeps using the parquet fallback.
+      if (pf_db_ready(con)) {
+        lc_backend("db")
+        dbpos <- db_load_positions(con); dbdis <- db_load_dismissed(con)
+        loc   <- lc_pos()
+        extra <- if (!is.null(loc) && nrow(loc))
+                   loc[!(loc$id %in% dbpos$id), , drop = FALSE] else loc[0, ]
+        merged <- if (!is.null(extra) && nrow(extra)) rbind(dbpos, extra) else dbpos
+        if (!is.null(extra) && nrow(extra))
+          tryCatch(db_save_positions(con, merged), error = function(e) NULL)
+        lc_pos(merged)
+        alldis <- union(dbdis, lc_dismissed())
+        if (length(setdiff(alldis, dbdis)))
+          tryCatch(db_save_dismissed(con, alldis), error = function(e) NULL)
+        lc_dismissed(alldis)
+      }
       # Floored at LEDGER_EPOCH: pre-epoch BUYs came from the retired gate, and
       # letting them into the walk would start maturity clocks (and therefore
       # "matured"/"sell" states) from entries the current model never made.
@@ -5945,13 +7192,27 @@ server <- function(input, output, session) {
     pb <- led[in_win & led$global_action == "BUY", ]
     runs_of <- table(factor(pb$ticker, levels = tickers))
     runs_of <- setNames(as.integer(runs_of), names(runs_of))
+    # qualstream grade per ticker + the orange-+ set (board-universe BUYs graded
+    # >= QS_MIN, top QS_CAP by grade), resolved HERE so the board mark and the
+    # portfolio default-seed share one definition. Deliberately independent of the
+    # board's transient cluster-id view filter, so narrowing the view never
+    # shrinks the seeded portfolio.
+    qs_grade <- if (!is.null(d$qs) && nrow(d$qs) > 0 &&
+                    all(c("ticker", "grade") %in% names(d$qs)))
+                  setNames(suppressWarnings(as.numeric(d$qs$grade)), d$qs$ticker)
+                else setNames(numeric(0), character(0))
+    buy_univ <- tickers[board_ok[tickers] & state_now[tickers] == "buy"]
+    bg_all   <- qs_grade[buy_univ]
+    qs_ok    <- buy_univ[!is.na(bg_all) & bg_all >= QS_MIN]
+    qs_buys  <- utils::head(qs_ok[order(-qs_grade[qs_ok], qs_ok)], QS_CAP)
     list(M = M, dates = dates, tickers = tickers,
          entry_of = entry_of, exit_of = exit_of, reason_of = reason_of, hz = hz,
          state_now = state_now, why_now = why_now,
          mat_of = mat_of, src_of = src_of, prov_of = prov_of, wpct = wpct,
          board_ok = board_ok, coh_dates = coh_dates,
          coh_n = if (is.null(ch)) 0L else nrow(ch),
-         runs_of = runs_of, runs_tot = runs_tot)
+         runs_of = runs_of, runs_tot = runs_tot,
+         qs_grade = qs_grade, qs_buys = qs_buys)
   })
 
   # The decision board: three name sections ordered by action (exit list first,
@@ -6066,7 +7327,7 @@ server <- function(input, output, session) {
     # and dropped 6 identical ones on alphabetical order), and a fixed N always
     # marks N names however weak the crop. The cap is only a backstop against a
     # future re-calibration inflating every grade.
-    qs_min <- 68L; qs_cap <- 25L
+    qs_min <- QS_MIN; qs_cap <- QS_CAP
     bg <- qs_grade[buys]
     qs_ok <- buys[!is.na(bg) & bg >= qs_min]
     qs_top <- utils::head(qs_ok[order(-qs_grade[qs_ok], qs_ok)], qs_cap)
@@ -6231,11 +7492,21 @@ server <- function(input, output, session) {
       rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
     d <- app_dataLC()
     gate_v <- setNames(as.character(d$gate$gate_today), d$gate$ticker)
+    # cluster id per ticker (stable 1-19 key; gate + cohort fallback)
+    id_map <- if (!is.null(d$gate$id)) {
+      setNames(suppressWarnings(as.integer(d$gate$id)), d$gate$ticker)
+    } else setNames(integer(0), character(0))
+    if (!is.null(d$coh) && nrow(d$coh) > 0) {
+      ex2 <- d$coh[!(d$coh$ticker %in% names(id_map)), c("ticker", "id")]
+      ex2 <- ex2[!duplicated(ex2$ticker), , drop = FALSE]
+      if (nrow(ex2)) id_map <- c(id_map, setNames(as.integer(ex2$id), ex2$ticker))
+    }
     held <- ifelse(is.na(dv$entry_of), NA,
                    as.integer(Sys.Date() - as.Date(dv$entry_of)))
     hz_days <- round(dv$hz * 30.44)
     df <- data.frame(
       Ticker = dv$tickers,
+      id     = unname(id_map[dv$tickers]),
       State  = unname(dv$state_now),
       Entry  = ifelse(is.na(dv$entry_of), "", dv$entry_of),
       Source = ifelse(is.na(dv$src_of), "", unname(dv$src_of)),
@@ -6288,13 +7559,14 @@ server <- function(input, output, session) {
       tid <- id_of[df$Ticker]
       df <- df[is.na(tid) | tid %in% as.integer(sel_id), , drop = FALSE]
     }
-    keep <- c("Ticker", "State", "Entry", "Source", "Held (d)", "% of horizon",
-              "Matures", "Why", "Proven", "Gate today", "Bin win %",
+    keep <- c("Ticker", "id", "State", "Entry", "% of horizon",
+              "Why", "Proven", "Gate today", "Bin win %",
               "Runs", if (has_qs) "QS grade", "del_class")
     df <- df[order(factor(df$State, levels = c("sell", "buy", "hold", "closed")),
                    df$Ticker), keep]
-    # 0-based column targets, shifted when the optional QS grade column exists
-    num_t <- c(4, 5, 10, if (has_qs) 12)
+    # right-align targets resolved BY NAME so column trims can't misalign them
+    num_t <- match(c("% of horizon", "Bin win %", if (has_qs) "QS grade"), keep) - 1L
+    num_t <- num_t[!is.na(num_t)]
     del_t <- length(keep) - 1L
     DT::datatable(
       df, selection = "none", rownames = FALSE, class = "compact",
