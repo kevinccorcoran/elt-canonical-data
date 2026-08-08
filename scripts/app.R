@@ -1199,7 +1199,8 @@ vdates AS (
     UNION SELECT (SELECT d FROM maxd)
 ),
 tk AS (
-    SELECT v.d AS vdate, l.ticker, SUM(l.shares) AS shares, SUM(l.amt) AS invested
+    SELECT v.d AS vdate, l.ticker, SUM(l.shares) AS shares, SUM(l.amt) AS invested,
+           SUM(l.spy_shares) AS spy_shares
     FROM vdates v JOIN lots l ON l.buy_d <= v.d
     GROUP BY v.d, l.ticker
 ),
@@ -1207,7 +1208,10 @@ tk_val AS (
     SELECT vdate, ticker, invested,
            shares * (SELECT i.adj_close FROM cdm.ingest_combined i
              WHERE i.ticker = tk.ticker AND i.date <= tk.vdate
-             ORDER BY i.date DESC LIMIT 1) AS value
+             ORDER BY i.date DESC LIMIT 1) AS value,
+           spy_shares * (SELECT adj_close FROM cdm.ingest_combined
+             WHERE ticker = 'SPY' AND date <= tk.vdate
+             ORDER BY date DESC LIMIT 1) AS spy_value
     FROM tk
 ),
 spy AS (
@@ -1215,14 +1219,20 @@ spy AS (
     FROM vdates v JOIN lots l ON l.buy_d <= v.d
     GROUP BY v.d
 )
+-- per-ticker rows carry ret_pct (chart) AND invested/value/spy_value (the table
+-- reads the latest row per ticker); the '__SPY__' row is the chart benchmark.
 SELECT vdate::text AS d, ticker,
-       ROUND((100 * (value / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct
+       ROUND((100 * (value / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct,
+       ROUND(invested::numeric, 2)  AS invested,
+       ROUND(value::numeric, 2)     AS value,
+       ROUND(spy_value::numeric, 2) AS spy_value
 FROM tk_val
 UNION ALL
 SELECT vdate::text AS d, '__SPY__' AS ticker,
        ROUND((100 * ((spy_sh * (SELECT adj_close FROM cdm.ingest_combined
                 WHERE ticker = 'SPY' AND date <= spy.vdate ORDER BY date DESC LIMIT 1))
-              / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct
+              / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct,
+       NULL::numeric AS invested, NULL::numeric AS value, NULL::numeric AS spy_value
 FROM spy
 ORDER BY ticker, d;"
 
@@ -6720,28 +6730,23 @@ server <- function(input, output, session) {
                                       sell_events = sold), error = function(e) NULL)
   })
 
-  # Per-row performance as of today: each position's own accumulated buys valued
-  # vs the SAME dollars into SPY. Expanded per position (id preserved), gated for
-  # model rows exactly like the portfolio series.
+  # Per-row performance as of today, DERIVED from lc_ticker_series (one shared
+  # query feeds both the table and the chart - no second connection). Take the
+  # latest priced row per ticker and map ticker -> position id via lc_pos. Returns
+  # (id, invested, value, spy_value) or NULL.
   lc_row_perf <- reactive({
     p <- lc_pos(); if (is.null(p) || !nrow(p)) return(NULL)
-    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
-    d <- app_dataLC(); led <- if (!is.null(d)) d$led else NULL
-    parts <- lapply(seq_len(nrow(p)), function(i) {
-      s <- tryCatch(gated_expand_schedule(p[i, , drop = FALSE], led), error = function(e) NULL)
-      if (is.null(s) || !nrow(s)) return(NULL)
-      data.frame(id = p$id[i], ticker = toupper(s$ticker), d = s$d,
-                 amt = s$amount, stringsAsFactors = FALSE)
-    })
-    buys <- do.call(rbind, parts)
-    if (is.null(buys) || !nrow(buys)) return(NULL)
-    vals <- sprintf("('%s','%s','%s',%s)",
-                    gsub("'", "''", buys$id, fixed = TRUE), buys$ticker, buys$d,
-                    format(buys$amt, scientific = FALSE, trim = TRUE))
-    sql <- gsub("__BUYS__", paste(vals, collapse = ","), LC_PORTFOLIO_ROWS_SQL, fixed = TRUE)
-    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
-    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    tryCatch(dbGetQuery(con, sql), error = function(e) NULL)
+    ser <- tryCatch(lc_ticker_series(), error = function(e) NULL)
+    if (is.null(ser) || !nrow(ser)) return(NULL)
+    ser <- ser[ser$ticker != "__SPY__" & !is.na(ser$invested), , drop = FALSE]
+    if (!nrow(ser)) return(NULL)
+    ser$d <- as.Date(ser$d)
+    ser <- ser[order(ser$ticker, ser$d), , drop = FALSE]
+    last <- ser[!duplicated(ser$ticker, fromLast = TRUE), , drop = FALSE]  # latest per ticker
+    tick2id <- setNames(as.character(p$id), toupper(as.character(p$ticker)))
+    data.frame(id = unname(tick2id[last$ticker]),
+               invested = as.numeric(last$invested), value = as.numeric(last$value),
+               spy_value = as.numeric(last$spy_value), stringsAsFactors = FALSE)
   })
 
   # Per-ticker cumulative-return series for the holdings chart. Same gated buy
@@ -6802,9 +6807,9 @@ server <- function(input, output, session) {
     spp  <- function(x) ifelse(is.na(x), "-", sprintf("%+.1fpp", x))
     tick <- toupper(p$ticker)
     cid  <- id_of[tick]
-    # per-row checkbox (col 0). data-row is the 1-based position index; the
-    # callback JS collects the checked ones into input$lcPosChecked, and injects
-    # a select-all box into the header. ordering=FALSE so display order == p order.
+    # per-row checkbox (col 0). data-row is the 1-based position index into p and
+    # rides with the row through any sort; the callback JS collects the checked
+    # ones into input$lcPosChecked and injects a select-all box into the header.
     sel_box <- sprintf('<input type="checkbox" class="pfrow" data-row="%d" aria-label="select row">',
                        seq_len(nrow(p)))
     show <- data.frame(
@@ -6846,8 +6851,15 @@ server <- function(input, output, session) {
       editable = list(target = "cell",
         disable = list(columns = setdiff(seq_len(ncol(show)) - 1L, editcol))),
       callback = pf_js,
-      options = list(dom = "t", ordering = FALSE, pageLength = 50,
-        columnDefs = list(list(targets = 0, orderable = FALSE, className = "dt-center pf-sel")))) %>%
+      # sortable, default sorted by cluster id ascending. data-row / cell_edit both
+      # key on the data index (stable under sort), so the checkbox->chart map and
+      # the $/buy edit stay correct however the user orders the rows.
+      options = list(dom = "t", ordering = TRUE, pageLength = 50,
+        order = list(list(1, "asc")),
+        columnDefs = list(
+          list(targets = 0, orderable = FALSE, className = "dt-center pf-sel"),
+          list(targets = 1, className = "dt-center", render = DT::JS(
+            "function(data,type,row){if(type==='sort'||type==='type'){var n=parseInt(data,10);return isNaN(n)?9999:n;}return data;}"))))) %>%
       DT::formatStyle("State", fontWeight = "600",
         color = DT::styleEqual(c("buy", "hold", "sell", "closed"),
                                c("#10b981", "#eab308", "#dc2626", "#64748b")))
