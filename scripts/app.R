@@ -250,8 +250,15 @@ LC_SIGNAL_MAX_AGE <- 10L   # calendar days a BUY run stays actionable
 # buy-off during a wind-down, and a fresh accumulation leg after re-entry.
 # Manual rows are unchanged. Model rows need `led`; without it they contribute
 # nothing and their tickers land in attr(out, "model_skipped").
+# model_start picks the tracking basis for MODEL rows only:
+#   "epoch"  - strategy view: track from the regime epoch regardless of stored
+#              start, so a holding shows the model's real multi-week record.
+#   "stored" - personal view: from the stored (add) date, clamped to the epoch,
+#              so a holding shows only the user's own cash flows.
 gated_expand_schedule <- function(positions, led = NULL, today = Sys.Date(),
-                                  epoch = as.Date(LEDGER_EPOCH)) {
+                                  epoch = as.Date(LEDGER_EPOCH),
+                                  model_start = c("epoch", "stored")) {
+  model_start <- match.arg(model_start)
   empty <- data.frame(ticker = character(0), d = character(0),
                       amount = numeric(0), stringsAsFactors = FALSE)
   if (is.null(positions) || nrow(positions) == 0) {
@@ -273,11 +280,12 @@ gated_expand_schedule <- function(positions, led = NULL, today = Sys.Date(),
       parts <- list()
       for (i in seq_len(nrow(mod))) {
         r <- mod[i, , drop = FALSE]
-        # Model rows always track from the regime epoch (the earliest date the
-        # signals are comparable), regardless of the stored start. So a holding
-        # shows the strategy's real multi-week curve however/whenever it was
-        # added - no re-seed needed to un-flatten an existing today-dated row.
-        r$start_date <- format(epoch)
+        if (model_start == "epoch") {
+          r$start_date <- format(epoch)
+        } else {
+          st <- suppressWarnings(as.Date(as.character(r$start_date)))
+          r$start_date <- format(max(c(st, epoch), na.rm = TRUE))
+        }
         cand <- expand_schedule(r, today)
         if (!nrow(cand)) next
         cd   <- as.Date(cand$d)
@@ -1135,49 +1143,10 @@ SELECT vdate::date::text AS d,
          + spy_cash) / NULLIF(invested, 0) - 1))::numeric, 2) AS spy_ret_pct
 FROM valued ORDER BY vdate;"
 
-# Per-ROW performance as of today: each position's own accumulated buys valued at
-# the latest close vs the SAME dollars run into SPY. __BUYS__ = VALUES
-# (id, ticker, 'YYYY-MM-DD', amt), one per gated buy, tagged with its position id.
-# Accumulation view (no sell-ladder wind-down) - exact for buy/hold rows; a sold
-# row reads its full accumulated stake, so the sell section is the wind-down truth.
-LC_PORTFOLIO_ROWS_SQL <- "
-WITH buys(id, ticker, d, amt) AS (VALUES __BUYS__),
-maxd AS (SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'),
-spy_last AS (SELECT adj_close AS px FROM cdm.ingest_combined
-             WHERE ticker = 'SPY' AND date <= (SELECT d FROM maxd)
-             ORDER BY date DESC LIMIT 1),
-fills AS (
-    SELECT b.id, b.ticker, b.d::date AS buy_d, b.amt::numeric AS amt,
-      (SELECT i.adj_close FROM cdm.ingest_combined i
-       WHERE i.ticker = b.ticker AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS px,
-      (SELECT i.adj_close FROM cdm.ingest_combined i
-       WHERE i.ticker = 'SPY' AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS spy_px
-    FROM buys b
-),
-last_px AS (
-    SELECT DISTINCT ON (i.ticker) i.ticker, i.adj_close AS px
-    FROM cdm.ingest_combined i
-    WHERE i.ticker IN (SELECT DISTINCT ticker FROM buys)
-      AND i.date <= (SELECT d FROM maxd)
-    ORDER BY i.ticker, i.date DESC
-),
-lots AS (
-    SELECT f.id, f.ticker, f.amt,
-           f.amt / NULLIF(f.px, 0)     AS shares,
-           f.amt / NULLIF(f.spy_px, 0) AS spy_shares
-    FROM fills f WHERE f.px > 0 AND f.spy_px > 0
-)
-SELECT l.id,
-       ROUND(SUM(l.amt)::numeric, 2)                                    AS invested,
-       ROUND(SUM(l.shares * lp.px)::numeric, 2)                         AS value,
-       ROUND(SUM(l.spy_shares * (SELECT px FROM spy_last))::numeric, 2) AS spy_value
-FROM lots l JOIN last_px lp ON lp.ticker = l.ticker
-GROUP BY l.id;"
-
 # Per-TICKER return series for the holdings chart: one weekly cumulative-return
 # line per ticker (100 * value/invested - 1) plus a single same-cash SPY line
-# labelled '__SPY__'. __BUYS__ = VALUES (id, ticker, 'YYYY-MM-DD', amt) exactly
-# as LC_PORTFOLIO_ROWS_SQL. Accumulation view (no sell wind-down); each ticker's
+# labelled '__SPY__'. __BUYS__ = VALUES (id, ticker, 'YYYY-MM-DD', amt), one per
+# gated buy. Accumulation view (no sell wind-down); each ticker's
 # line starts at 0% on its first buy. Weekly vdates keep it light but smooth; a
 # brand-new position yields a single point (rendered as a marker in R).
 LC_PORTFOLIO_TICKER_SQL <- "
@@ -1371,8 +1340,9 @@ ORDER BY r.ticker, r.trig_d, r.stage;"
 # series (d/invested/value/ret_pct/spy_value/spy_ret_pct) or NULL. Injection-safe:
 # tickers ^[A-Za-z.-]+$, dates ISO, dollars/fractions numeric.
 compute_portfolio_series <- function(con, positions, led = NULL,
-                                     sell_events = NULL, today = Sys.Date()) {
-  sched <- gated_expand_schedule(positions, led, today)
+                                     sell_events = NULL, today = Sys.Date(),
+                                     model_start = "epoch") {
+  sched <- gated_expand_schedule(positions, led, today, model_start = model_start)
   skipped <- attr(sched, "model_skipped")
   if (nrow(sched) == 0) return(NULL)
   ok <- grepl("^[A-Za-z.-]+$", sched$ticker) &
@@ -2195,9 +2165,10 @@ ui <- navbarPage(
           div(
             div(style = "color:#64748b; font-size:0.72rem; margin-bottom:0.6rem;",
                 paste("Starts with every current BUY that passes qualstream (the board's",
-                      "orange +), auto-added as a $100/monthly plan on Generate, dated from the",
-                      "model's current-regime epoch so each holding shows its real track record,",
-                      "not a flat line from today. Remove any",
+                      "orange +), auto-added as a $100/monthly plan on Generate. By default",
+                      "model holdings show the strategy's track record since the regime epoch;",
+                      "flip the radio by the chart to 'My money since I added' to see only your",
+                      "own cash flows. Remove any",
                       "you don't want and it stays removed; Clear all resets to the current",
                       "qualstream defaults. Add your own manual plans below.",
                       "Model-linked buys pause when a name leaves the buy list and resume",
@@ -6555,12 +6526,11 @@ server <- function(input, output, session) {
       data.frame(
         id = paste0(tk, "-seed", i, "-", format(Sys.time(), "%Y%m%d%H%M%S")),
         ticker = tk, amount_usd = 100, cadence = "monthly",
-        # Start from the model's current-regime epoch, not today: model buys are
-        # clamped to the epoch anyway, and starting there gives a fresh seed the
-        # strategy's real multi-week track record instead of a flat 0% line from
-        # today. schedule_monthly fires the first buy on the start date.
-        day1 = as.integer(format(as.Date(LEDGER_EPOCH), "%d")),
-        day2 = NA_integer_, start_date = LEDGER_EPOCH,
+        # Stored start = the day it was actually added (the personal truth used
+        # by the "since I added" basis); the epoch basis ignores it and tracks
+        # from the regime epoch inside gated_expand_schedule.
+        day1 = as.integer(format(Sys.Date(), "%d")),
+        day2 = NA_integer_, start_date = format(Sys.Date()),
         end_date = "", sold_date = "", sold_fraction = NA_real_,
         mode = "model", adopted_at = now, created_at = now,
         stringsAsFactors = FALSE)
@@ -6597,13 +6567,15 @@ server <- function(input, output, session) {
     tk <- input$lcPosTicker; if (is.null(tk)) tk <- ""
     tk <- toupper(trimws(tk))
     amt <- suppressWarnings(as.numeric(input$lcPosAmt))
-    if (!nzchar(tk) || !grepl("^[A-Z.-]+$", tk)) {
-      showNotification("Enter a valid ticker (letters, dot, dash).", type = "warning"); return() }
+    if (!nzchar(tk) || !grepl("^[A-Z.-]{1,10}$", tk)) {
+      showNotification("Enter a valid ticker (1-10 letters, dot, dash).", type = "warning"); return() }
     if (is.na(amt) || amt <= 0) {
       showNotification("Enter a positive dollar amount.", type = "warning"); return() }
     cur <- lc_pos()
-    if (tk %in% toupper(cur$ticker[cur$mode == "model"])) {
-      showNotification(sprintf("%s is model-linked already; remove that row first.", tk),
+    # one ticker = one row = one chart line: the per-ticker series and the
+    # row-perf ticker->id map both collapse duplicates, so block them here.
+    if (tk %in% toupper(cur$ticker)) {
+      showNotification(sprintf("%s is already tracked - edit its $/buy or remove it first.", tk),
                        type = "warning"); return() }
     day <- suppressWarnings(as.integer(input$lcPosDay)); if (is.na(day)) day <- 1L
     day <- min(max(day, 1L), 28L)
@@ -6689,6 +6661,14 @@ server <- function(input, output, session) {
     persist_dismissed(character(0)); lc_dismissed(character(0))
   })
 
+  # Tracking basis for MODEL rows (radio next to the chart filter): "epoch" =
+  # the strategy's record since the regime epoch (default); "stored" = only the
+  # user's own cash flows since each row was added. Threaded into every
+  # gated_expand_schedule call so table, chart, note and sells stay consistent.
+  lc_track_basis <- reactive({
+    if (identical(input$lcTrackBasis, "stored")) "stored" else "epoch"
+  })
+
   # sell triggers for tracked model rows: pure R, cheap; NULL unless a model
   # position is currently in a sell/closed board state with buys behind it.
   lc_sell_triggers <- reactive({
@@ -6699,7 +6679,7 @@ server <- function(input, output, session) {
     dv <- tryCatch(derivedLC(), error = function(e) NULL); if (is.null(dv)) return(NULL)
     tr <- sell_triggers_from_dv(dv, d$led, d$meta, mt)
     if (is.null(tr) || !nrow(tr)) return(NULL)
-    sched <- gated_expand_schedule(p, d$led)
+    sched <- gated_expand_schedule(p, d$led, model_start = lc_track_basis())
     keep <- vapply(seq_len(nrow(tr)), function(i)
       any(sched$ticker == tr$ticker[i] & as.Date(sched$d) <= tr$trig_d[i]), logical(1))
     tr <- tr[keep, , drop = FALSE]
@@ -6736,13 +6716,16 @@ server <- function(input, output, session) {
     sold <- if (!is.null(ev) && !is.null(ev$events))
               ev$events[!is.na(ev$events$sell_d), , drop = FALSE] else NULL
     tryCatch(compute_portfolio_series(con, p, led = if (!is.null(d)) d$led else NULL,
-                                      sell_events = sold), error = function(e) NULL)
+                                      sell_events = sold,
+                                      model_start = lc_track_basis()),
+             error = function(e) NULL)
   })
 
   # Per-row performance as of today, DERIVED from lc_ticker_series (one shared
   # query feeds both the table and the chart - no second connection). Take the
   # latest priced row per ticker and map ticker -> position id via lc_pos. Returns
-  # (id, invested, value, spy_value) or NULL.
+  # (id, since, invested, value, spy_value) or NULL; `since` = the first actual
+  # fill date under the active basis (the series starts at each ticker's first buy).
   lc_row_perf <- reactive({
     p <- lc_pos(); if (is.null(p) || !nrow(p)) return(NULL)
     ser <- tryCatch(lc_ticker_series(), error = function(e) NULL)
@@ -6751,9 +6734,11 @@ server <- function(input, output, session) {
     if (!nrow(ser)) return(NULL)
     ser$d <- as.Date(ser$d)
     ser <- ser[order(ser$ticker, ser$d), , drop = FALSE]
-    last <- ser[!duplicated(ser$ticker, fromLast = TRUE), , drop = FALSE]  # latest per ticker
+    last  <- ser[!duplicated(ser$ticker, fromLast = TRUE), , drop = FALSE]  # latest per ticker
+    first <- ser[!duplicated(ser$ticker), , drop = FALSE]                   # first fill per ticker
     tick2id <- setNames(as.character(p$id), toupper(as.character(p$ticker)))
     data.frame(id = unname(tick2id[last$ticker]),
+               since = format(first$d[match(last$ticker, first$ticker)]),
                invested = as.numeric(last$invested), value = as.numeric(last$value),
                spy_value = as.numeric(last$spy_value), stringsAsFactors = FALSE)
   })
@@ -6765,8 +6750,10 @@ server <- function(input, output, session) {
     p <- lc_pos(); if (is.null(p) || !nrow(p)) return(NULL)
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     d <- app_dataLC(); led <- if (!is.null(d)) d$led else NULL
+    basis <- lc_track_basis()
     parts <- lapply(seq_len(nrow(p)), function(i) {
-      s <- tryCatch(gated_expand_schedule(p[i, , drop = FALSE], led), error = function(e) NULL)
+      s <- tryCatch(gated_expand_schedule(p[i, , drop = FALSE], led, model_start = basis),
+                    error = function(e) NULL)
       if (is.null(s) || !nrow(s)) return(NULL)
       data.frame(id = p$id[i], ticker = toupper(s$ticker), d = s$d,
                  amt = s$amount, stringsAsFactors = FALSE)
@@ -6819,8 +6806,12 @@ server <- function(input, output, session) {
     # per-row checkbox (col 0). data-row is the 1-based position index into p and
     # rides with the row through any sort; the callback JS collects the checked
     # ones into input$lcPosChecked and injects a select-all box into the header.
-    sel_box <- sprintf('<input type="checkbox" class="pfrow" data-row="%d" aria-label="select row">',
-                       seq_len(nrow(p)))
+    # Re-renders restore the checked state from lc_checked_ticks (isolate: a
+    # check alone must not re-render the whole table).
+    chk <- isolate(lc_checked_ticks())
+    sel_box <- sprintf('<input type="checkbox" class="pfrow" data-row="%d"%s aria-label="select row">',
+                       seq_len(nrow(p)),
+                       ifelse(toupper(p$ticker) %in% chk, " checked", ""))
     show <- data.frame(
       ` `      = sel_box,
       id       = ifelse(is.na(cid), "-", as.character(cid)),
@@ -6828,9 +6819,12 @@ server <- function(input, output, session) {
       State    = states,
       `$/buy`  = round(as.numeric(p$amount_usd), 2),
       Cadence  = p$cadence,
-      # model rows track from the epoch (see gated_expand_schedule); show that as
-      # the effective start so the table agrees with the chart's first point.
-      Start    = ifelse(p$mode == "model", as.character(as.Date(LEDGER_EPOCH)), p$start_date),
+      # Start = the row's FIRST ACTUAL FILL under the active basis (from the
+      # series, whose first point per ticker is its first buy). Falls back to
+      # the stored plan start while a row has no fills yet.
+      Start    = { s <- if (!is.null(perf) && "since" %in% names(perf))
+                     as.character(perf$since)[match(p$id, perf$id)] else rep(NA_character_, nrow(p))
+                   ifelse(is.na(s), as.character(p$start_date), s) },
       Invested = usd(invested),
       Value    = usd(value),
       `P&L $`  = susd(pnl),
@@ -6926,8 +6920,33 @@ server <- function(input, output, session) {
                                c("#10b981", "#eab308", "#dc2626", "#64748b")))
   }, server = FALSE)
 
-  # By-id filter that sits right above the chart (reuses the board's cluster-id
-  # filter pattern): the holdings' cluster ids, all on, uncheck to narrow.
+  # Chart display state, persisted OUTSIDE the widgets so re-renders (Generate,
+  # a $/buy edit) don't wipe the user's narrowing:
+  #  - lc_chart_ids_sel: NULL = "all" (untouched, or everything selected - keeps
+  #    newly appearing ids auto-included); character(0) = explicit deselect-all
+  #    (chart shows only the SPY benchmark); otherwise the selected id set.
+  #  - lc_checked_ticks: tickers of the checked rows (explicit isolation; wins
+  #    over the id filter). Tickers, not indices, so sorts/removals can't shift
+  #    the meaning.
+  lc_chart_ids_sel <- reactiveVal(NULL)
+  observeEvent(input$lcChartIds, {
+    v <- if (is.null(input$lcChartIds)) character(0) else as.character(input$lcChartIds)
+    allc <- as.character(isolate(lc_holding_cids()))
+    if (length(allc) && setequal(v, allc)) v <- NULL   # full set -> sticky "all"
+    if (!identical(v, lc_chart_ids_sel())) lc_chart_ids_sel(v)
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
+  lc_checked_ticks <- reactiveVal(character(0))
+  observeEvent(input$lcPosChecked, {
+    p <- isolate(lc_pos())
+    v <- suppressWarnings(as.integer(input$lcPosChecked))
+    v <- v[!is.na(v) & v >= 1 & v <= if (is.null(p)) 0L else nrow(p)]
+    tks <- sort(unique(toupper(as.character(p$ticker[v]))))
+    if (!identical(tks, lc_checked_ticks())) lc_checked_ticks(tks)
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
+
+  # By-id filter + tracking-basis radio, sitting right above the chart (reuses
+  # the board's cluster-id filter pattern). Selections survive re-renders via
+  # the reactiveVals above (isolate() so re-render doesn't loop).
   output$lcChartFilter <- renderUI({
     p <- lc_pos(); d <- app_dataLC()
     if (is.null(p) || !nrow(p) || is.null(d)) return(NULL)
@@ -6935,10 +6954,19 @@ server <- function(input, output, session) {
       setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker)) else integer(0)
     cids <- sort(unique(stats::na.omit(unname(id_of[toupper(p$ticker)]))))
     if (!length(cids)) return(NULL)
+    sel_now <- isolate(lc_chart_ids_sel())
+    sel_use <- if (is.null(sel_now)) as.character(cids) else intersect(sel_now, as.character(cids))
+    basis_now <- isolate(if (identical(input$lcTrackBasis, "stored")) "stored" else "epoch")
     div(style = "margin:0.5rem 0 0.1rem;",
-      tags$label("Show cluster ids on chart (all on; uncheck to narrow; or check rows above to isolate)",
+      tags$label("Track model holdings",
+                 style = "color:#94a3b8; font-size:0.72rem; font-weight:600; display:block; margin-bottom:0.15rem;"),
+      radioButtons("lcTrackBasis", NULL,
+        choices = c("Strategy since model epoch" = "epoch",
+                    "My money since I added" = "stored"),
+        selected = basis_now, inline = TRUE),
+      tags$label("Show cluster ids on chart (all on; uncheck to narrow; checked rows above override)",
                  style = "color:#94a3b8; font-size:0.72rem; font-weight:600; display:block; margin-bottom:0.3rem;"),
-      checkboxGroupInput("lcChartIds", NULL, choices = cids, selected = cids, inline = TRUE),
+      checkboxGroupInput("lcChartIds", NULL, choices = cids, selected = sel_use, inline = TRUE),
       actionButton("lcChartIdsAll", "Select all",
                    style = "padding:2px 10px; font-size:0.72rem; margin-right:0.35rem;"),
       actionButton("lcChartIdsNone", "Deselect all",
@@ -6977,16 +7005,18 @@ server <- function(input, output, session) {
     id_of <- if (!is.null(d) && !is.null(d$gate$id))
       setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker)) else integer(0)
     cid_of <- id_of[all_ticks]
-    # by-id filter (all on = uncheck to narrow, like the board's cluster filter):
-    # keep holdings whose cluster id is checked; an uncluster'd holding stays.
-    selids <- input$lcChartIds
-    idkeep <- if (is.null(selids)) rep(TRUE, length(all_ticks)) else
-      (is.na(cid_of) | as.character(cid_of) %in% selids)
-    elig <- all_ticks[idkeep]
-    # checked rows isolate further: if any are checked, show only those.
-    checked <- suppressWarnings(as.integer(input$lcPosChecked))
-    checked <- checked[!is.na(checked) & checked >= 1 & checked <= nrow(p)]
-    sel_ticks <- if (length(checked)) intersect(elig, toupper(p$ticker[checked])) else elig
+    # Explicit row checks WIN (show exactly those, id filter ignored). Otherwise
+    # the id filter applies: NULL = untouched -> all; character(0) = explicit
+    # deselect-all -> only the SPY benchmark; else the checked-id set (narrowing
+    # hides unclustered holdings - reach those via row checks).
+    checked_tk <- intersect(lc_checked_ticks(), all_ticks)
+    if (length(checked_tk)) {
+      sel_ticks <- checked_tk
+    } else {
+      selids <- lc_chart_ids_sel()
+      sel_ticks <- if (is.null(selids)) all_ticks else
+        all_ticks[!is.na(cid_of) & as.character(cid_of) %in% selids]
+    }
     # stable color per ticker across check/uncheck (index into the full set)
     pal <- c("#38bdf8","#34d399","#f59e0b","#f472b6","#a78bfa","#fb7185","#22d3ee",
              "#4ade80","#fbbf24","#e879f9","#60a5fa","#2dd4bf","#facc15","#f87171",
@@ -7015,7 +7045,9 @@ server <- function(input, output, session) {
                 gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE)
     if (length(ad) <= 1) xax$range <- c(as.character(min(ad) - 3), as.character(max(ad) + 2))
     dark_layout(fig,
-      title = list(text = "Each holding's return vs same-cash SPY  (check rows to isolate)",
+      title = list(text = paste0("Each holding's return vs same-cash SPY - ",
+                     if (identical(lc_track_basis(), "stored"))
+                       "your money since you added" else "strategy since model epoch"),
                    font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = xax,
       yaxis = list(title = "Return (%)", color = "#cbd5e1", ticksuffix = "%",
@@ -7041,7 +7073,8 @@ server <- function(input, output, session) {
       extra <- paste0(extra, " Some ladders use a time-based fallback (thin history).")
     div(style = "color:#94a3b8; font-size:0.78rem; margin:0.3rem 0 0.2rem;",
       sprintf(paste0("Invested $%s, now $%s (%+.1f%%). Same-cash SPY $%s (%+.1f%%). ",
-                     "Edge %+.1fpp. Simulated fills at daily closes.%s"),
+                     "Edge %+.1fpp. Simulated fills at daily closes. Rows and chart ",
+                     "are the accumulation view; this line applies the sell ladder.%s"),
         format(round(last$invested), big.mark = ","),
         format(round(last$value), big.mark = ","), last$ret_pct,
         format(round(last$spy_value), big.mark = ","), last$spy_ret_pct,
