@@ -2228,7 +2228,8 @@ ui <- navbarPage(
                       "vs SPY is the same dollars run into SPY (pp = percentage-point edge).",
                       "The chart below draws each holding's cumulative return against the same-cash SPY line.")),
             DT::DTOutput("lcPosTable"),
-            plotlyOutput("lcPortfolioChart", height = "320px"),
+            uiOutput("lcChartFilter"),
+            plotlyOutput("lcPortfolioChart", height = "340px"),
             uiOutput("lcPortfolioNote"),
             div(style = "color:#94a3b8; font-size:0.72rem; margin:0.8rem 0 0.15rem; font-weight:600;",
                 "Transition history - each position's Buy → Hold → Sell path over time"),
@@ -6925,10 +6926,40 @@ server <- function(input, output, session) {
                                c("#10b981", "#eab308", "#dc2626", "#64748b")))
   }, server = FALSE)
 
-  # Checkbox-driven holdings chart: the SPY (same cash) benchmark is ALWAYS drawn;
-  # a cumulative-return line is drawn for each CHECKED row (mapped index->ticker).
-  # With nothing checked, all holdings are shown so it is never blank. Each line
-  # starts at 0% on its first buy; a one-trading-day position is a single marker.
+  # By-id filter that sits right above the chart (reuses the board's cluster-id
+  # filter pattern): the holdings' cluster ids, all on, uncheck to narrow.
+  output$lcChartFilter <- renderUI({
+    p <- lc_pos(); d <- app_dataLC()
+    if (is.null(p) || !nrow(p) || is.null(d)) return(NULL)
+    id_of <- if (!is.null(d$gate$id))
+      setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker)) else integer(0)
+    cids <- sort(unique(stats::na.omit(unname(id_of[toupper(p$ticker)]))))
+    if (!length(cids)) return(NULL)
+    div(style = "margin:0.5rem 0 0.1rem;",
+      tags$label("Show cluster ids on chart (all on; uncheck to narrow; or check rows above to isolate)",
+                 style = "color:#94a3b8; font-size:0.72rem; font-weight:600; display:block; margin-bottom:0.3rem;"),
+      checkboxGroupInput("lcChartIds", NULL, choices = cids, selected = cids, inline = TRUE),
+      actionButton("lcChartIdsAll", "Select all",
+                   style = "padding:2px 10px; font-size:0.72rem; margin-right:0.35rem;"),
+      actionButton("lcChartIdsNone", "Deselect all",
+                   style = "padding:2px 10px; font-size:0.72rem;"))
+  })
+  lc_holding_cids <- reactive({
+    p <- lc_pos(); d <- app_dataLC()
+    if (is.null(p) || !nrow(p) || is.null(d) || is.null(d$gate$id)) return(integer(0))
+    id_of <- setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker))
+    sort(unique(stats::na.omit(unname(id_of[toupper(p$ticker)]))))
+  })
+  observeEvent(input$lcChartIdsAll, {
+    updateCheckboxGroupInput(session, "lcChartIds", selected = as.character(lc_holding_cids()))
+  })
+  observeEvent(input$lcChartIdsNone, {
+    updateCheckboxGroupInput(session, "lcChartIds", selected = character(0))
+  })
+
+  # Holdings chart. SPY (same cash) benchmark is ALWAYS drawn. Which holdings
+  # show = the by-id filter above (all on by default) intersected with any
+  # checked rows (check rows to isolate). Each line starts at 0% on its first buy.
   output$lcPortfolioChart <- renderPlotly({
     p <- lc_pos()
     if (is.null(p) || nrow(p) == 0)
@@ -6941,10 +6972,21 @@ server <- function(input, output, session) {
     ser$d <- as.Date(ser$d); ser$ret_pct <- as.numeric(ser$ret_pct)
     ser <- ser[order(ser$ticker, ser$d), , drop = FALSE]
     all_ticks <- sort(unique(ser$ticker[ser$ticker != "__SPY__"]))
-    # checked rows -> those tickers; none checked -> all. SPY always drawn.
+    # ticker -> cluster id, for the by-id chart filter above the chart.
+    d <- app_dataLC()
+    id_of <- if (!is.null(d) && !is.null(d$gate$id))
+      setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker)) else integer(0)
+    cid_of <- id_of[all_ticks]
+    # by-id filter (all on = uncheck to narrow, like the board's cluster filter):
+    # keep holdings whose cluster id is checked; an uncluster'd holding stays.
+    selids <- input$lcChartIds
+    idkeep <- if (is.null(selids)) rep(TRUE, length(all_ticks)) else
+      (is.na(cid_of) | as.character(cid_of) %in% selids)
+    elig <- all_ticks[idkeep]
+    # checked rows isolate further: if any are checked, show only those.
     checked <- suppressWarnings(as.integer(input$lcPosChecked))
     checked <- checked[!is.na(checked) & checked >= 1 & checked <= nrow(p)]
-    sel_ticks <- if (length(checked)) intersect(all_ticks, toupper(p$ticker[checked])) else all_ticks
+    sel_ticks <- if (length(checked)) intersect(elig, toupper(p$ticker[checked])) else elig
     # stable color per ticker across check/uncheck (index into the full set)
     pal <- c("#38bdf8","#34d399","#f59e0b","#f472b6","#a78bfa","#fb7185","#22d3ee",
              "#4ade80","#fbbf24","#e879f9","#60a5fa","#2dd4bf","#facc15","#f87171",
