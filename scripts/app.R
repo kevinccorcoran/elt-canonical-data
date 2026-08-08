@@ -273,8 +273,11 @@ gated_expand_schedule <- function(positions, led = NULL, today = Sys.Date(),
       parts <- list()
       for (i in seq_len(nrow(mod))) {
         r <- mod[i, , drop = FALSE]
-        st <- suppressWarnings(as.Date(as.character(r$start_date)))
-        r$start_date <- format(max(c(st, epoch), na.rm = TRUE))
+        # Model rows always track from the regime epoch (the earliest date the
+        # signals are comparable), regardless of the stored start. So a holding
+        # shows the strategy's real multi-week curve however/whenever it was
+        # added - no re-seed needed to un-flatten an existing today-dated row.
+        r$start_date <- format(epoch)
         cand <- expand_schedule(r, today)
         if (!nrow(cand)) next
         cd   <- as.Date(cand$d)
@@ -6824,7 +6827,9 @@ server <- function(input, output, session) {
       State    = states,
       `$/buy`  = round(as.numeric(p$amount_usd), 2),
       Cadence  = p$cadence,
-      Start    = p$start_date,
+      # model rows track from the epoch (see gated_expand_schedule); show that as
+      # the effective start so the table agrees with the chart's first point.
+      Start    = ifelse(p$mode == "model", as.character(as.Date(LEDGER_EPOCH)), p$start_date),
       Invested = usd(invested),
       Value    = usd(value),
       `P&L $`  = susd(pnl),
