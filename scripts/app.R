@@ -192,11 +192,16 @@ db_upsert_state_history <- function(con, rows) {
 # day exists in every month; weekends/holidays are resolved to the next trading
 # bar by the fill lookup in LC_PORTFOLIO_SQL, so only the calendar date matters).
 schedule_monthly <- function(start, stop_d, dom) {
+  start <- as.Date(start)
   if (is.na(dom) || dom < 1) dom <- as.integer(format(start, "%d"))
   dom <- min(max(as.integer(dom), 1L), 28L)
   months <- seq(as.Date(format(start, "%Y-%m-01")),
                 as.Date(format(stop_d, "%Y-%m-01")), by = "month")
-  as.Date(sprintf("%s-%02d", format(months, "%Y-%m"), dom))
+  d <- as.Date(sprintf("%s-%02d", format(months, "%Y-%m"), dom))
+  # Always buy on the start date (the first contribution), then on day-of-month
+  # after. Without the start buy, a plan begun mid-month shows nothing until the
+  # dom rolls around next month - so a freshly added position priced empty.
+  sort(unique(c(start, d)))
 }
 
 # expand saved position rows into (ticker, date, amount) buy events from
@@ -6533,7 +6538,10 @@ server <- function(input, output, session) {
       data.frame(
         id = paste0(tk, "-seed", i, "-", format(Sys.time(), "%Y%m%d%H%M%S")),
         ticker = tk, amount_usd = 100, cadence = "monthly",
-        day1 = 1L, day2 = NA_integer_, start_date = format(Sys.Date()),
+        # recurring buy anchors on the start day-of-month; schedule_monthly also
+        # fires the first buy on start_date itself, so a fresh seed prices today.
+        day1 = as.integer(format(Sys.Date(), "%d")),
+        day2 = NA_integer_, start_date = format(Sys.Date()),
         end_date = "", sold_date = "", sold_fraction = NA_real_,
         mode = "model", adopted_at = now, created_at = now,
         stringsAsFactors = FALSE)
