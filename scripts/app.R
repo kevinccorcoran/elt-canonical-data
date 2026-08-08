@@ -1197,6 +1197,7 @@ vdates AS (
     SELECT g::date AS d FROM generate_series(
         (SELECT MIN(buy_d) FROM lots), (SELECT d FROM maxd), INTERVAL '1 week') AS g
     UNION SELECT (SELECT d FROM maxd)
+    UNION SELECT buy_d FROM lots   -- each line starts at 0% on its own first buy
 ),
 tk AS (
     SELECT v.d AS vdate, l.ticker, SUM(l.shares) AS shares, SUM(l.amt) AS invested,
@@ -2191,7 +2192,9 @@ ui <- navbarPage(
           div(
             div(style = "color:#64748b; font-size:0.72rem; margin-bottom:0.6rem;",
                 paste("Starts with every current BUY that passes qualstream (the board's",
-                      "orange +), auto-added as a $100/monthly plan on Generate. Remove any",
+                      "orange +), auto-added as a $100/monthly plan on Generate, dated from the",
+                      "model's current-regime epoch so each holding shows its real track record,",
+                      "not a flat line from today. Remove any",
                       "you don't want and it stays removed; Clear all resets to the current",
                       "qualstream defaults. Add your own manual plans below.",
                       "Model-linked buys pause when a name leaves the buy list and resume",
@@ -6548,10 +6551,12 @@ server <- function(input, output, session) {
       data.frame(
         id = paste0(tk, "-seed", i, "-", format(Sys.time(), "%Y%m%d%H%M%S")),
         ticker = tk, amount_usd = 100, cadence = "monthly",
-        # recurring buy anchors on the start day-of-month; schedule_monthly also
-        # fires the first buy on start_date itself, so a fresh seed prices today.
-        day1 = as.integer(format(Sys.Date(), "%d")),
-        day2 = NA_integer_, start_date = format(Sys.Date()),
+        # Start from the model's current-regime epoch, not today: model buys are
+        # clamped to the epoch anyway, and starting there gives a fresh seed the
+        # strategy's real multi-week track record instead of a flat 0% line from
+        # today. schedule_monthly fires the first buy on the start date.
+        day1 = as.integer(format(as.Date(LEDGER_EPOCH), "%d")),
+        day2 = NA_integer_, start_date = LEDGER_EPOCH,
         end_date = "", sold_date = "", sold_fraction = NA_real_,
         mode = "model", adopted_at = now, created_at = now,
         stringsAsFactors = FALSE)
