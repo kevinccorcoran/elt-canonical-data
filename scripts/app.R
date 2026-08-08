@@ -557,6 +557,9 @@ hr {
 #lcPosTable table.dataTable tbody tr:hover td,
 #lcTransitionsTable table.dataTable tbody tr:hover td { background: rgba(56,189,248,0.08) !important; }
 #lcPosTable table.dataTable tbody tr.selected td { background: rgba(56,189,248,0.22) !important; }
+/* row-select checkboxes: accent-tinted, centered, compact select column */
+#lcPosTable td.pf-sel, #lcPosTable th.pf-sel { width: 30px; text-align: center; padding-left: 4px; padding-right: 4px; }
+#lcPosTable input.pfrow, #lcPosTable input.pfall { accent-color: #38bdf8; cursor: pointer; width: 15px; height: 15px; vertical-align: middle; }
 
 /* Global loading progress bar: an estimated-progress overlay shown whenever
    Shiny is busy (Connect, Generate, any heavy render), on every tab. Real query
@@ -1162,6 +1165,61 @@ SELECT l.id,
        ROUND(SUM(l.spy_shares * (SELECT px FROM spy_last))::numeric, 2) AS spy_value
 FROM lots l JOIN last_px lp ON lp.ticker = l.ticker
 GROUP BY l.id;"
+
+# Per-TICKER return series for the holdings chart: one weekly cumulative-return
+# line per ticker (100 * value/invested - 1) plus a single same-cash SPY line
+# labelled '__SPY__'. __BUYS__ = VALUES (id, ticker, 'YYYY-MM-DD', amt) exactly
+# as LC_PORTFOLIO_ROWS_SQL. Accumulation view (no sell wind-down); each ticker's
+# line starts at 0% on its first buy. Weekly vdates keep it light but smooth; a
+# brand-new position yields a single point (rendered as a marker in R).
+LC_PORTFOLIO_TICKER_SQL <- "
+WITH buys(id, ticker, d, amt) AS (VALUES __BUYS__),
+maxd AS (SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'),
+fills AS (
+    SELECT b.ticker, b.d::date AS buy_d, b.amt::numeric AS amt,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = b.ticker AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS px,
+      (SELECT i.adj_close FROM cdm.ingest_combined i
+       WHERE i.ticker = 'SPY' AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS spy_px
+    FROM buys b
+),
+lots AS (
+    SELECT ticker, buy_d, amt, amt / NULLIF(px, 0) AS shares,
+           amt / NULLIF(spy_px, 0) AS spy_shares
+    FROM fills WHERE px > 0 AND spy_px > 0
+),
+vdates AS (
+    SELECT g::date AS d FROM generate_series(
+        (SELECT MIN(buy_d) FROM lots), (SELECT d FROM maxd), INTERVAL '1 week') AS g
+    UNION SELECT (SELECT d FROM maxd)
+),
+tk AS (
+    SELECT v.d AS vdate, l.ticker, SUM(l.shares) AS shares, SUM(l.amt) AS invested
+    FROM vdates v JOIN lots l ON l.buy_d <= v.d
+    GROUP BY v.d, l.ticker
+),
+tk_val AS (
+    SELECT vdate, ticker, invested,
+           shares * (SELECT i.adj_close FROM cdm.ingest_combined i
+             WHERE i.ticker = tk.ticker AND i.date <= tk.vdate
+             ORDER BY i.date DESC LIMIT 1) AS value
+    FROM tk
+),
+spy AS (
+    SELECT v.d AS vdate, SUM(l.amt) AS invested, SUM(l.spy_shares) AS spy_sh
+    FROM vdates v JOIN lots l ON l.buy_d <= v.d
+    GROUP BY v.d
+)
+SELECT vdate::text AS d, ticker,
+       ROUND((100 * (value / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct
+FROM tk_val
+UNION ALL
+SELECT vdate::text AS d, '__SPY__' AS ticker,
+       ROUND((100 * ((spy_sh * (SELECT adj_close FROM cdm.ingest_combined
+                WHERE ticker = 'SPY' AND date <= spy.vdate ORDER BY date DESC LIMIT 1))
+              / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct
+FROM spy
+ORDER BY ticker, d;"
 
 # Dynamic per-stock sell ladder. __TRIGGERS__ = VALUES ('TICK','YYYY-MM-DD',20)
 # (ticker, trigger date, n_bars in {20,40}). Delisted episodes never reach here.
@@ -2143,9 +2201,11 @@ ui <- navbarPage(
               actionButton("lcPosRemove", "Remove selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosClear", "Clear all")),
             div(style = "color:#64748b; font-size:0.7rem; margin:0.1rem 0 0.35rem;",
-                paste("id = cluster. Double-click a $/buy cell to change that row's amount.",
+                paste("id = cluster. Check rows (or the header box for all), then Remove selected.",
+                      "Double-click a $/buy cell to change that row's amount.",
                       "Invested / Value / P&L / Return are that row's own accumulated buys;",
-                      "vs SPY is the same dollars run into SPY (pp = percentage-point edge).")),
+                      "vs SPY is the same dollars run into SPY (pp = percentage-point edge).",
+                      "The chart below draws each holding's cumulative return against the same-cash SPY line.")),
             DT::DTOutput("lcPosTable"),
             plotlyOutput("lcPortfolioChart", height = "320px"),
             uiOutput("lcPortfolioNote"),
@@ -6584,8 +6644,11 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$lcPosRemove, {
-    sel <- input$lcPosTable_rows_selected; cur <- lc_pos()
-    if (is.null(sel) || is.null(cur) || !nrow(cur)) return()
+    sel <- input$lcPosChecked; cur <- lc_pos()
+    if (is.null(cur) || !nrow(cur)) return()
+    sel <- suppressWarnings(as.integer(sel))
+    sel <- sel[!is.na(sel) & sel >= 1 & sel <= nrow(cur)]
+    if (!length(sel)) { showNotification("Check one or more rows to remove.", type = "message"); return() }
     removed <- toupper(cur$ticker[sel])
     merged <- cur[setdiff(seq_len(nrow(cur)), sel), , drop = FALSE]
     persist_positions(merged); lc_pos(merged)
@@ -6673,6 +6736,33 @@ server <- function(input, output, session) {
     tryCatch(dbGetQuery(con, sql), error = function(e) NULL)
   })
 
+  # Per-ticker cumulative-return series for the holdings chart. Same gated buy
+  # expansion as lc_row_perf, run through LC_PORTFOLIO_TICKER_SQL: tidy
+  # (d, ticker, ret_pct) with a '__SPY__' benchmark line.
+  lc_ticker_series <- reactive({
+    p <- lc_pos(); if (is.null(p) || !nrow(p)) return(NULL)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    d <- app_dataLC(); led <- if (!is.null(d)) d$led else NULL
+    parts <- lapply(seq_len(nrow(p)), function(i) {
+      s <- tryCatch(gated_expand_schedule(p[i, , drop = FALSE], led), error = function(e) NULL)
+      if (is.null(s) || !nrow(s)) return(NULL)
+      data.frame(id = p$id[i], ticker = toupper(s$ticker), d = s$d,
+                 amt = s$amount, stringsAsFactors = FALSE)
+    })
+    buys <- do.call(rbind, parts)
+    if (is.null(buys) || !nrow(buys)) return(NULL)
+    ok <- grepl("^[A-Za-z.-]+$", buys$ticker) &
+          grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", buys$d) & is.finite(buys$amt)
+    buys <- buys[ok, , drop = FALSE]; if (!nrow(buys)) return(NULL)
+    vals <- sprintf("('%s','%s','%s',%s)",
+                    gsub("'", "''", buys$id, fixed = TRUE), buys$ticker, buys$d,
+                    format(buys$amt, scientific = FALSE, trim = TRUE))
+    sql <- gsub("__BUYS__", paste(vals, collapse = ","), LC_PORTFOLIO_TICKER_SQL, fixed = TRUE)
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    tryCatch(dbGetQuery(con, sql), error = function(e) NULL)
+  })
+
   output$lcPosTable <- DT::renderDT({
     p <- lc_pos()
     if (is.null(p) || nrow(p) == 0)
@@ -6704,7 +6794,13 @@ server <- function(input, output, session) {
     spp  <- function(x) ifelse(is.na(x), "-", sprintf("%+.1fpp", x))
     tick <- toupper(p$ticker)
     cid  <- id_of[tick]
+    # per-row checkbox (col 0). data-row is the 1-based position index; the
+    # callback JS collects the checked ones into input$lcPosChecked, and injects
+    # a select-all box into the header. ordering=FALSE so display order == p order.
+    sel_box <- sprintf('<input type="checkbox" class="pfrow" data-row="%d" aria-label="select row">',
+                       seq_len(nrow(p)))
     show <- data.frame(
+      ` `      = sel_box,
       id       = ifelse(is.na(cid), "-", as.character(cid)),
       Ticker   = tick,
       State    = states,
@@ -6718,10 +6814,32 @@ server <- function(input, output, session) {
       `vs SPY` = spp(vspp),
       check.names = FALSE, stringsAsFactors = FALSE)
     editcol <- which(names(show) == "$/buy") - 1L   # 0-based; only this col editable
-    DT::datatable(show, rownames = FALSE, selection = "single", class = "compact",
+    pf_js <- DT::JS(
+      "var el = $(table.table().node());",
+      "var th = el.find('thead th').first();",
+      "if (th.find('input.pfall').length === 0) {",
+      "  th.empty().append('<input type=\"checkbox\" class=\"pfall\" title=\"Select all\" aria-label=\"select all\">');",
+      "}",
+      "function pfsync(){",
+      "  var boxes = el.find('input.pfrow'); var sel = [];",
+      "  boxes.each(function(){ if(this.checked) sel.push(parseInt(this.getAttribute('data-row'),10)); });",
+      "  Shiny.setInputValue('lcPosChecked', sel, {priority:'event'});",
+      "  var all = el.find('input.pfall');",
+      "  all.prop('checked', boxes.length>0 && sel.length===boxes.length);",
+      "  all.prop('indeterminate', sel.length>0 && sel.length<boxes.length);",
+      "}",
+      "el.off('change.pf').on('change.pf', 'input.pfrow', pfsync);",
+      "el.off('change.pfa').on('change.pfa', 'input.pfall', function(){",
+      "  var c=this.checked; el.find('input.pfrow').prop('checked', c); pfsync();",
+      "});",
+      "pfsync();")
+    DT::datatable(show, rownames = FALSE, selection = "none", class = "compact",
+      escape = FALSE,   # render the checkbox column HTML; all cell values are controlled
       editable = list(target = "cell",
         disable = list(columns = setdiff(seq_len(ncol(show)) - 1L, editcol))),
-      options = list(dom = "t", ordering = FALSE, pageLength = 50)) %>%
+      callback = pf_js,
+      options = list(dom = "t", ordering = FALSE, pageLength = 50,
+        columnDefs = list(list(targets = 0, orderable = FALSE, className = "dt-center pf-sel")))) %>%
       DT::formatStyle("State", fontWeight = "600",
         color = DT::styleEqual(c("buy", "hold", "sell", "closed"),
                                c("#10b981", "#eab308", "#dc2626", "#64748b")))
@@ -6777,44 +6895,52 @@ server <- function(input, output, session) {
                                c("#10b981", "#eab308", "#dc2626", "#64748b")))
   }, server = FALSE)
 
+  # One cumulative-return line per holding, plus a bold same-cash SPY benchmark.
+  # Each line starts at 0% on its first buy; a brand-new position shows as a
+  # single marker until it has a second priced week.
   output$lcPortfolioChart <- renderPlotly({
     p <- lc_pos()
     if (is.null(p) || nrow(p) == 0)
-      return(empty_plot("Adopt a model BUY or add a manual plan to see your value vs SPY."))
+      return(empty_plot("Adopt a model BUY or add a manual plan to see each holding vs SPY."))
     if (is.null(input$db_pass) || input$db_pass == "")
-      return(empty_plot("Connect to price your portfolio."))
-    ser <- lc_port_series()
+      return(empty_plot("Connect to price your holdings."))
+    ser <- tryCatch(lc_ticker_series(), error = function(e) NULL)
     if (is.null(ser) || nrow(ser) == 0)
-      return(empty_plot("No priced history yet for these tickers/dates."))
+      return(empty_plot("No priced history yet - a position needs at least one trading day since its first buy. New buys fill in as days pass."))
+    ser$d <- as.Date(ser$d); ser$ret_pct <- as.numeric(ser$ret_pct)
+    ser <- ser[order(ser$ticker, ser$d), , drop = FALSE]
+    pal <- c("#38bdf8","#34d399","#f59e0b","#f472b6","#a78bfa","#fb7185","#22d3ee",
+             "#4ade80","#fbbf24","#e879f9","#60a5fa","#2dd4bf","#facc15","#f87171",
+             "#c084fc","#818cf8","#fca5a5","#5eead4","#fde047","#93c5fd")
+    ticks <- sort(unique(ser$ticker[ser$ticker != "__SPY__"]))
     fig <- plot_ly()
-    fig <- add_trace(fig, x = ser$d, y = ser$value, type = "scatter", mode = "lines",
-      name = "My portfolio", line = list(color = "#f59e0b", width = 3),
-      hovertemplate = "Mine<br>%{x|%b %d %Y}: $%{y:,.0f}<extra></extra>")
-    fig <- add_trace(fig, x = ser$d, y = ser$spy_value, type = "scatter", mode = "lines",
-      name = "Same-cash SPY", line = list(color = "#3b82f6", width = 2.5),
-      hovertemplate = "SPY<br>%{x|%b %d %Y}: $%{y:,.0f}<extra></extra>")
-    fig <- add_trace(fig, x = ser$d, y = ser$invested, type = "scatter", mode = "lines",
-      name = "Invested", line = list(color = "#64748b", width = 1.5, dash = "dot"),
-      hovertemplate = "Invested<br>%{x|%b %d %Y}: $%{y:,.0f}<extra></extra>")
-    ev <- tryCatch(lc_sell_events(), error = function(e) NULL)
-    if (!is.null(ev) && !is.null(ev$events)) {
-      so <- ev$events[!is.na(ev$events$sell_d), , drop = FALSE]
-      mi <- match(so$sell_d, format(ser$d)); ok <- !is.na(mi)
-      if (any(ok)) fig <- add_trace(fig, x = as.Date(so$sell_d[ok]), y = ser$value[mi[ok]],
-        type = "scatter", mode = "markers", name = "Ladder sells",
-        marker = list(symbol = "triangle-down", size = 9, color = "#dc2626"),
-        hovertext = sprintf("%s %s: sell %.0f%% (%s)", so$ticker[ok], so$sell_d[ok],
-                            100 * so$frac[ok], so$kind[ok]), hoverinfo = "text")
+    for (k in seq_along(ticks)) {
+      sub <- ser[ser$ticker == ticks[k], , drop = FALSE]
+      col <- pal[(k - 1) %% length(pal) + 1]
+      fig <- add_trace(fig, x = sub$d, y = sub$ret_pct, type = "scatter",
+        mode = if (nrow(sub) <= 1) "markers" else "lines+markers",
+        name = ticks[k], legendgroup = ticks[k],
+        line = list(color = col, width = 1.6), marker = list(color = col, size = 5),
+        hovertemplate = paste0(ticks[k], "<br>%{x|%b %d %Y}: %{y:+.1f}%<extra></extra>"))
     }
+    sp <- ser[ser$ticker == "__SPY__", , drop = FALSE]
+    if (nrow(sp)) fig <- add_trace(fig, x = sp$d, y = sp$ret_pct, type = "scatter",
+      mode = if (nrow(sp) <= 1) "markers" else "lines+markers",
+      name = "SPY (same cash)", legendgroup = "SPY",
+      line = list(color = "#e2e8f0", width = 3, dash = "dash"),
+      marker = list(color = "#e2e8f0", size = 6),
+      hovertemplate = "SPY (same cash)<br>%{x|%b %d %Y}: %{y:+.1f}%<extra></extra>")
     dark_layout(fig,
-      title = list(text = "My strategy value vs same-cash-flow SPY",
+      title = list(text = "Each holding's return vs same-cash SPY",
                    font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
-      yaxis = list(title = "Value (USD)", color = "#cbd5e1",
-                   gridcolor = "rgba(148,163,184,0.10)"),
-      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.25),
-      hovermode = "x unified", margin = list(l = 64, r = 20, t = 44, b = 60))
+      yaxis = list(title = "Return (%)", color = "#cbd5e1", ticksuffix = "%",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
+                   zerolinecolor = "rgba(148,163,184,0.28)"),
+      legend = list(font = list(color = "#e2e8f0", size = 10), orientation = "h",
+                    x = 0, y = -0.2),
+      hovermode = "closest", margin = list(l = 56, r = 20, t = 44, b = 72))
   })
 
   output$lcPortfolioNote <- renderUI({
