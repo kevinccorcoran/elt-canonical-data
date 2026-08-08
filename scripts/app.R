@@ -6903,9 +6903,10 @@ server <- function(input, output, session) {
                                c("#10b981", "#eab308", "#dc2626", "#64748b")))
   }, server = FALSE)
 
-  # One cumulative-return line per holding, plus a bold same-cash SPY benchmark.
-  # Each line starts at 0% on its first buy; a brand-new position shows as a
-  # single marker until it has a second priced week.
+  # Checkbox-driven holdings chart: the SPY (same cash) benchmark is ALWAYS drawn;
+  # a cumulative-return line is drawn for each CHECKED row (mapped index->ticker).
+  # With nothing checked, all holdings are shown so it is never blank. Each line
+  # starts at 0% on its first buy; a one-trading-day position is a single marker.
   output$lcPortfolioChart <- renderPlotly({
     p <- lc_pos()
     if (is.null(p) || nrow(p) == 0)
@@ -6914,35 +6915,45 @@ server <- function(input, output, session) {
       return(empty_plot("Connect to price your holdings."))
     ser <- tryCatch(lc_ticker_series(), error = function(e) NULL)
     if (is.null(ser) || nrow(ser) == 0)
-      return(empty_plot("No priced history yet - a position needs at least one trading day since its first buy. New buys fill in as days pass."))
+      return(empty_plot("No priced history yet - a position needs at least one trading day since its first buy. Tip: add a plan with an earlier start date to see a full curve now."))
     ser$d <- as.Date(ser$d); ser$ret_pct <- as.numeric(ser$ret_pct)
     ser <- ser[order(ser$ticker, ser$d), , drop = FALSE]
+    all_ticks <- sort(unique(ser$ticker[ser$ticker != "__SPY__"]))
+    # checked rows -> those tickers; none checked -> all. SPY always drawn.
+    checked <- suppressWarnings(as.integer(input$lcPosChecked))
+    checked <- checked[!is.na(checked) & checked >= 1 & checked <= nrow(p)]
+    sel_ticks <- if (length(checked)) intersect(all_ticks, toupper(p$ticker[checked])) else all_ticks
+    # stable color per ticker across check/uncheck (index into the full set)
     pal <- c("#38bdf8","#34d399","#f59e0b","#f472b6","#a78bfa","#fb7185","#22d3ee",
              "#4ade80","#fbbf24","#e879f9","#60a5fa","#2dd4bf","#facc15","#f87171",
              "#c084fc","#818cf8","#fca5a5","#5eead4","#fde047","#93c5fd")
-    ticks <- sort(unique(ser$ticker[ser$ticker != "__SPY__"]))
     fig <- plot_ly()
-    for (k in seq_along(ticks)) {
-      sub <- ser[ser$ticker == ticks[k], , drop = FALSE]
-      col <- pal[(k - 1) %% length(pal) + 1]
+    for (tkr in sel_ticks) {
+      sub <- ser[ser$ticker == tkr, , drop = FALSE]; if (!nrow(sub)) next
+      col <- pal[(match(tkr, all_ticks) - 1) %% length(pal) + 1]
       fig <- add_trace(fig, x = sub$d, y = sub$ret_pct, type = "scatter",
         mode = if (nrow(sub) <= 1) "markers" else "lines+markers",
-        name = ticks[k], legendgroup = ticks[k],
-        line = list(color = col, width = 1.6), marker = list(color = col, size = 5),
-        hovertemplate = paste0(ticks[k], "<br>%{x|%b %d %Y}: %{y:+.1f}%<extra></extra>"))
+        name = tkr, legendgroup = tkr,
+        line = list(color = col, width = 1.8), marker = list(color = col, size = 6),
+        hovertemplate = paste0(tkr, "<br>%{x|%b %d %Y}: %{y:+.1f}%<extra></extra>"))
     }
     sp <- ser[ser$ticker == "__SPY__", , drop = FALSE]
     if (nrow(sp)) fig <- add_trace(fig, x = sp$d, y = sp$ret_pct, type = "scatter",
       mode = if (nrow(sp) <= 1) "markers" else "lines+markers",
       name = "SPY (same cash)", legendgroup = "SPY",
       line = list(color = "#e2e8f0", width = 3, dash = "dash"),
-      marker = list(color = "#e2e8f0", size = 6),
+      marker = list(color = "#e2e8f0", size = 7),
       hovertemplate = "SPY (same cash)<br>%{x|%b %d %Y}: %{y:+.1f}%<extra></extra>")
+    # date x-axis; pad a single-day range so plotly does not fall back to
+    # sub-second ticks (the "23:59:59.999" axis on a one-point series).
+    ad <- sort(unique(ser$d))
+    xax <- list(title = "", color = "#cbd5e1", type = "date", tickformat = "%b %d",
+                gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE)
+    if (length(ad) <= 1) xax$range <- c(as.character(min(ad) - 3), as.character(max(ad) + 2))
     dark_layout(fig,
-      title = list(text = "Each holding's return vs same-cash SPY",
+      title = list(text = "Each holding's return vs same-cash SPY  (check rows to isolate)",
                    font = list(color = "#f8fafc", size = 13), x = 0.5),
-      xaxis = list(title = "", color = "#cbd5e1", type = "date",
-                   gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
+      xaxis = xax,
       yaxis = list(title = "Return (%)", color = "#cbd5e1", ticksuffix = "%",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
                    zerolinecolor = "rgba(148,163,184,0.28)"),
