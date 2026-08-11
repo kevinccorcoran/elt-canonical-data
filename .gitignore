@@ -133,3 +133,4 @@ docker/dbt-docs-canonical/.env*
 
 # local test creds
 tests/.env
+!tests/.env.example
