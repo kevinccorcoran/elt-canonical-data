@@ -2,7 +2,7 @@
 
 To change transport (e.g. to Meta's official WhatsApp Cloud API), swap this one
 file — callers only ever use send_whatsapp(text). Setup for CallMeBot:
-  1. add +34 644 51 95 23 to your phone contacts
+  1. add +34 623 80 11 90 to your phone contacts
   2. WhatsApp it: "I allow callmebot to send me messages"
   3. it replies with your apikey -> put it (and your number) in tests/.env
 """
