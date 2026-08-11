@@ -2202,9 +2202,12 @@ ui <- navbarPage(
             div(style = "margin:0.1rem 0 0.6rem;",
               actionButton("lcPosAdd", "Add manual", class = "btn-primary", style = "margin-right:0.4rem;"),
               actionButton("lcPosRemove", "Remove selected", style = "margin-right:0.4rem;"),
+              actionButton("lcPosHold", "Hold selected", style = "margin-right:0.4rem;"),
+              actionButton("lcPosResume", "Resume selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosClear", "Clear all")),
             div(style = "color:#64748b; font-size:0.7rem; margin:0.1rem 0 0.35rem;",
-                paste("id = cluster. Check rows (or the header box for all), then Remove selected.",
+                paste("id = cluster. Check rows (or the header box for all), then Remove / Hold /",
+                      "Resume. Hold pauses buying (the position keeps valuing); Resume restarts it.",
                       "Double-click a $/buy cell to change that row's amount.",
                       "Invested / Value / P&L / Return are that row's own accumulated buys;",
                       "vs SPY is the same dollars run into SPY (pp = percentage-point edge).",
@@ -6567,6 +6570,13 @@ server <- function(input, output, session) {
       why   = vapply(ticks, function(t) getv(wy, t, NA_character_), character(1)),
       grade = vapply(ticks, function(t) as.numeric(getv(gr, t, NA_real_)), numeric(1)),
       stringsAsFactors = FALSE)
+    # user-paused rows record as hold (matches the table's display override), so
+    # the transition trail shows the buy -> hold move even if the board says buy
+    held <- { e <- as.character(p$end_date); sd <- as.character(p$sold_date)
+              !is.na(e) & nzchar(e) & (is.na(sd) | !nzchar(sd)) }
+    heldtk <- toupper(p$ticker[held])
+    ih <- rows$ticker %in% heldtk
+    rows$state[ih] <- "hold"; rows$why[ih] <- "paused by user"
     rows <- rows[!is.na(rows$state) & nzchar(rows$state), , drop = FALSE]  # only what the board knows
     if (!nrow(rows)) return()
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return()
@@ -6664,6 +6674,31 @@ server <- function(input, output, session) {
     persist_positions(merged); lc_pos(merged)
     # remember the removal so the qualstream auto-seed won't re-add it next Generate
     nd <- union(lc_dismissed(), removed); persist_dismissed(nd); lc_dismissed(nd)
+  })
+  # Hold = pause accumulation: stamp end_date so no further buys fire, while the
+  # stake already bought keeps being valued in the table and chart. Resume clears
+  # the stamp and buying continues per cadence (and the model gate, for model rows).
+  observeEvent(input$lcPosHold, {
+    sel <- input$lcPosChecked; cur <- lc_pos()
+    if (is.null(cur) || !nrow(cur)) return()
+    sel <- suppressWarnings(as.integer(sel))
+    sel <- sel[!is.na(sel) & sel >= 1 & sel <= nrow(cur)]
+    if (!length(sel)) { showNotification("Check one or more rows to move to hold.", type = "message"); return() }
+    cur$end_date[sel] <- format(Sys.Date())
+    persist_positions(cur); lc_pos(cur)
+    showNotification(sprintf("%s moved to hold - buying paused, position keeps valuing.",
+                             paste(toupper(cur$ticker[sel]), collapse = ", ")), type = "message")
+  })
+  observeEvent(input$lcPosResume, {
+    sel <- input$lcPosChecked; cur <- lc_pos()
+    if (is.null(cur) || !nrow(cur)) return()
+    sel <- suppressWarnings(as.integer(sel))
+    sel <- sel[!is.na(sel) & sel >= 1 & sel <= nrow(cur)]
+    if (!length(sel)) { showNotification("Check one or more rows to resume.", type = "message"); return() }
+    cur$end_date[sel] <- ""
+    persist_positions(cur); lc_pos(cur)
+    showNotification(sprintf("%s resumed - buying continues per cadence/model.",
+                             paste(toupper(cur$ticker[sel]), collapse = ", ")), type = "message")
   })
   # Clear all = reset to defaults: wipe positions AND dismissals, so the next
   # Generate re-seeds the current qualstream orange-+ buys from scratch.
@@ -6800,6 +6835,11 @@ server <- function(input, output, session) {
       s <- if (!is.null(dv) && tk %in% names(dv$state_now)) dv$state_now[[tk]] else ""
       if (is.null(s) || is.na(s)) "" else s
     }, character(1))
+    # user override: a row with an end_date stamp (and not sold) is paused ->
+    # display "hold" whatever the board says; Resume clears it.
+    held <- { e <- as.character(p$end_date); sd <- as.character(p$sold_date)
+              !is.na(e) & nzchar(e) & (is.na(sd) | !nzchar(sd)) }
+    states[held] <- "hold"
     pcol <- function(col) if (is.null(perf) || !nrow(perf)) rep(NA_real_, nrow(p)) else
       as.numeric(perf[[col]])[match(p$id, perf$id)]
     invested <- pcol("invested"); value <- pcol("value"); spyv <- pcol("spy_value")
