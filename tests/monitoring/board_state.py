@@ -232,7 +232,34 @@ def compute_board_state(conn, hz: int = DEFAULT_HZ, today: dt.date | None = None
     return out
 
 
+SQL_USER_HELD = """
+    SELECT UPPER(ticker) FROM portfolio.positions
+    WHERE end_date IS NOT NULL AND sold_date IS NULL
+"""
+
+
+def user_held(conn) -> set[str]:
+    """Tracker rows the user moved to hold (Hold selected -> end_date stamped,
+    not sold). The dashboard renders these in the hold column overriding the
+    model state; the notifier must watch the same board the user sees. DBs
+    without the portfolio schema just contribute no overrides."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(SQL_USER_HELD)
+            return {t for (t,) in cur.fetchall()}
+    except Exception:
+        conn.rollback()
+        return set()
+
+
 def graded_state(conn, hz: int = DEFAULT_HZ, today: dt.date | None = None) -> dict[str, BoardName]:
     """Board-universe names that carry a qualstream grade >= threshold — the notifier's watch list."""
-    return {t: b for t, b in compute_board_state(conn, hz, today).items()
-            if b.grade is not None and b.grade >= QS_MIN}
+    out = {t: b for t, b in compute_board_state(conn, hz, today).items()
+           if b.grade is not None and b.grade >= QS_MIN}
+    held = user_held(conn)
+    if held:
+        from dataclasses import replace
+        for t in held & set(out):
+            if out[t].state not in ("sell", "closed"):   # a user pause never masks an exit call
+                out[t] = replace(out[t], state="hold", reason="paused by user")
+    return out
