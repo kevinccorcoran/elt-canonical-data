@@ -130,3 +130,6 @@ docker/airflow/.env*
 # Docker dbt-docs-canonical local envs (Secrets)
 docker/dbt-docs-canonical/.env*
 !docker/dbt-docs-canonical/.env.example
+
+# local test creds
+tests/.env
