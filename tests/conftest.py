@@ -1,24 +1,22 @@
+"""Shared fixtures. Loads tests/.env so DB + WhatsApp creds stay out of the repo."""
+import pathlib
+
 import pytest
-from .utilities.send_telegram_message import send_telegram_message
+from dotenv import load_dotenv
+
+load_dotenv(pathlib.Path(__file__).parent / ".env")
 
 
-CHAT_ID = "TELEGRAM_CHAT_ID"
-BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+@pytest.fixture
+def db_conn():
+    """A dev connection with autocommit OFF, rolled back after each test so any
+    DB edits a test makes (e.g. simulating a ticker's ledger/gate change) never
+    persist to the database."""
+    from tests.utilities.db import get_conn
 
-@pytest.hookimpl(tryfirst=True, hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    """
-    Hook to send a Telegram message when a test fails.
-    """
-    # Get the test result
-    outcome = yield
-    report = outcome.get_result()
-
-    # Send Telegram notification on failure
-    if report.when == 'call' and report.failed:
-        message = f"Test failed: {item.nodeid}"
-        try:
-            send_telegram_message(CHAT_ID, message, BOT_TOKEN)
-        except Exception as e:
-            # Log if Telegram notification fails
-            print(f"Failed to send Telegram notification: {e}")
+    conn = get_conn()
+    try:
+        yield conn
+    finally:
+        conn.rollback()
+        conn.close()
