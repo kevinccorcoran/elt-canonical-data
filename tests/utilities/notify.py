@@ -33,4 +33,10 @@ def send_whatsapp(text: str, *, phone: str | None = None,
         timeout=timeout,
     )
     resp.raise_for_status()
+    # CallMeBot returns HTTP 200 even for failures (bad apikey, rate limit) -
+    # only the body says whether the message was accepted.
+    if "message queued" not in resp.text.lower():
+        logging.warning("CallMeBot did not queue the message: %s",
+                        resp.text[:200])
+        return False
     return True

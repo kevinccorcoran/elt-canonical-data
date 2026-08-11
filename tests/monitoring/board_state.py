@@ -190,29 +190,45 @@ def compute_board_state(conn, hz: int = DEFAULT_HZ, today: dt.date | None = None
         entry_of[t], mat_of[t], reason_of[t], exit_of[t], src_of[t], fin_of[t] = \
             entry_d, mat_d, reason, exit_d, src, cur_m
 
-    # --- current-decision cascade -> state_now ---
+    # --- current-decision cascade -> state_now + why (mirrors app.R why_now) ---
     out: dict[str, BoardName] = {}
     for t in tickers:
         mat_d, dl_d, g, fin = mat_of[t], dl.get(t), gate.get(t), fin_of[t]
+        entry_d = entry_of[t]
         if fin == "sell":
             r = reason_of[t]
             ref = mat_d if r == "matured" else (dl_d if r == "delisted" and dl_d else exit_of[t])
             stale = ref is not None and (today - ref).days > 30
             state = "closed" if stale else "sell"
+            why = f"{r} {ref}" if ref is not None else r
         elif dl_d is not None and dl_d <= today:
             state = "closed" if (today - dl_d).days > 30 else "sell"
+            why = f"delisted {dl_d}"
         elif mat_d is not None and today >= mat_d:
             state = "closed" if (today - mat_d).days > 30 else "sell"
+            why = f"matured {mat_d}"
         elif g == "SELL":
             state = "sell"
+            why = "gate flipped (today)"
         elif majf(t) and provf(t):
             state = "buy"
+            why = ("new entry" if entry_d is not None and (today - entry_d).days <= 7
+                   else f"held since {entry_d}")
         else:
             state = "hold"
+            d2m = (mat_d - today).days if mat_d is not None else None
+            if d2m is not None and d2m <= 30:
+                why = f"matures {mat_d}"
+            elif majf(t):
+                why = "signal live (unproven slot)"
+            elif g == "BUY":
+                why = "flickering (below monthly majority)"
+            else:
+                why = "washed out to SKIP"
 
         board_ok = src_of[t] == "cohort" or provf(t)
         if board_ok:                                           # table-only names never notify
-            out[t] = BoardName(t, state, qs.get(t), entry_of[t], reason_of[t])
+            out[t] = BoardName(t, state, qs.get(t), entry_d, why)
     return out
 
 

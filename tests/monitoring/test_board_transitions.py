@@ -26,9 +26,23 @@ def test_graded_watchlist_passes_threshold(db_conn):
     assert all(b.grade is not None and b.grade >= QS_MIN for b in watch.values())
 
 
+def _reset_coke(conn):
+    """Pin COKE to its pristine baseline (recent ledger BUY, gate SKIP) INSIDE
+    the test's transaction, so the tests are deterministic regardless of any
+    leftover demo state in dev. Rolled back with everything else."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE monitoring.prediction_ledger SET global_action='BUY' "
+            "WHERE ticker='COKE' AND prediction_date >= %s", (dt.date(2026, 8, 2),))
+        cur.execute(
+            "UPDATE serving.return_cluster_ticker_global_action_current "
+            "SET global_action='SKIP' WHERE ticker='COKE'")
+
+
 def test_wash_demotes_buy_to_hold(db_conn):
     """A proven buy whose recent ledger washes to SKIP drops below the monthly
     majority -> hold. This is the COKE buy->hold case validated in the dashboard."""
+    _reset_coke(db_conn)
     assert compute_board_state(db_conn)["COKE"].state == "buy"
     with db_conn.cursor() as cur:
         cur.execute(
@@ -38,12 +52,24 @@ def test_wash_demotes_buy_to_hold(db_conn):
 
 
 def test_gate_flip_moves_to_sell(db_conn):
-    """Today's gate flipping to SELL sends an open position straight to sell."""
+    """Today's gate flipping to SELL sends an open position straight to sell,
+    and the reason reports the gate flip (not the walk's leftover reason)."""
+    _reset_coke(db_conn)
     with db_conn.cursor() as cur:
         cur.execute(
             "UPDATE serving.return_cluster_ticker_global_action_current "
             "SET global_action='SELL' WHERE ticker='COKE'")
-    assert compute_board_state(db_conn)["COKE"].state == "sell"
+    coke = compute_board_state(db_conn)["COKE"]
+    assert coke.state == "sell"
+    assert coke.reason == "gate flipped (today)"
+
+
+def test_buy_reason_reports_tenure(db_conn):
+    """An established buy reads 'held since <entry>' (COKE entered 2026-07-29)."""
+    _reset_coke(db_conn)
+    coke = compute_board_state(db_conn)["COKE"]
+    assert coke.state == "buy"
+    assert coke.reason.startswith(("held since", "new entry"))
 
 
 def test_diff_only_reports_changes():
