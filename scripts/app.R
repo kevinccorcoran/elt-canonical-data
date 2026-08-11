@@ -7559,6 +7559,16 @@ server <- function(input, output, session) {
     d <- app_dataLC()
     del_ticks <- if (!is.null(d$meta)) d$meta$ticker else character(0)
     st <- dv$state_now; why <- dv$why_now; hz <- dv$hz
+    # user override: tracker rows moved to hold (Hold selected -> end_date
+    # stamped, not sold) render in the hold column whatever the model says -
+    # same rule as the tracker table and the transition history.
+    pp <- lc_pos()
+    if (!is.null(pp) && nrow(pp)) {
+      pe <- as.character(pp$end_date); ps <- as.character(pp$sold_date)
+      heldtk <- toupper(pp$ticker[!is.na(pe) & nzchar(pe) & (is.na(ps) | !nzchar(ps))])
+      heldtk <- intersect(heldtk, names(st))
+      if (length(heldtk)) { st[heldtk] <- "hold"; why[heldtk] <- "paused by user" }
+    }
     col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
     # qualstream grades per ticker (latest non-vetoed); the top-20 AMONG THE
     # BUY SECTION get an orange +. Resolved after the buy set is known below;
@@ -7687,7 +7697,8 @@ server <- function(input, output, session) {
     hz_days <- round(hz * 30.44)
     h_pct <- pmin(100L, as.integer(round(100 *
                as.numeric(Sys.Date() - as.Date(dv$entry_of[holds])) / hz_days)))
-    h_note <- ifelse(grepl("^matures", why[holds]), unname(why[holds]),
+    h_note <- ifelse(grepl("^matures", why[holds]) | why[holds] == "paused by user",
+                     unname(why[holds]),
                      sprintf("%s · %d%%", dv$entry_of[holds], h_pct))
     # sell column: same qualstream filter while ticked, ordered by the exit
     # date embedded in the reason string ("gate flipped/matured/delisted DATE");
