@@ -80,6 +80,7 @@ def run_once(conn, notify_fn, *, hz: int = DEFAULT_HZ, today: dt.date | None = N
 
 
 if __name__ == "__main__":
+    import os
     import pathlib
 
     from dotenv import load_dotenv
@@ -88,10 +89,18 @@ if __name__ == "__main__":
     from tests.utilities.db import get_conn
     from tests.utilities.notify import send_whatsapp
 
+    # every message carries the watched environment ("[dev] ...", "[prod] ..."),
+    # so one phone receiving from several notifiers stays unambiguous.
+    # BOARD_ENV in tests/.env; falls back to DB_NAME.
+    env_label = os.getenv("BOARD_ENV") or os.getenv("DB_NAME") or "db"
+
+    def _notify(text: str) -> bool:
+        return send_whatsapp(f"[{env_label}] {text}")
+
     connection = get_conn()
     try:
-        result = run_once(connection, send_whatsapp)
-        print(f"{len(result)} transition(s):")
+        result = run_once(connection, _notify)
+        print(f"[{env_label}] {len(result)} transition(s):")
         for tk, ol, nw, gr in result:
             print("  ", format_message(tk, ol, nw, gr))
     finally:
