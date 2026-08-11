@@ -1520,6 +1520,7 @@ FROM vdates v JOIN bv ON bv.d=v.d GROUP BY v.d ORDER BY v.d;"
 # ─── Define UI ───
 ui <- navbarPage(
   title = "Analysis Dashboard",
+  id = "mainNav",   # active-tab input; gates the Lifecycle auto-refresh timer
   # the ONE shared connection, rendered on every tab above its content, plus the
   # global loading overlay (toggled by the shiny:busy/idle handler in head)
   header = tagList(
@@ -2150,10 +2151,20 @@ ui <- navbarPage(
                      "(full detail in the table). Unproven gate names live in the",
                      "table only, flagged."),
                style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;"),
+        radioButtons("lcBoardLayout", "Board layout",
+                     choices = c("Columns (board)" = "columns", "Stacked" = "stacked"),
+                     selected = "columns", inline = TRUE),
+        checkboxInput("lcBuyQSonly", "Buy: show qualstream + picks only", value = TRUE),
+        checkboxInput("lcBuyStats", "Buy: also show win% · runs", value = FALSE),
+        checkboxInput("lcAutoRefresh", "Auto-refresh board (every 20s)", value = TRUE),
         uiOutput("idFilterLC")
       )),
       mainPanel(div(class = "main-card",
-        # Benchmark comparison up top for visibility: does the qualstream + add return?
+        # Decision board leads the panel: the at-a-glance buy/hold/sell surface is
+        # the primary artifact, so it sits at the top; benchmark + portfolio follow.
+        uiOutput("boardLC"),
+        tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1.1rem;"),
+        # Benchmark comparison: does the qualstream + add return?
         plotlyOutput("qsCompareLC", height = "380px"),
         uiOutput("qsCompareNoteLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1rem;"),
@@ -2206,10 +2217,9 @@ ui <- navbarPage(
                 "Transition history - each position's Buy → Hold → Sell path over time"),
             DT::DTOutput("lcTransitionsTable")
           )
-        ),
-        uiOutput("boardLC")
-        # qsCompareLC benchmark graph moved to the top of this panel for
-        # visibility. "Same companies with detail" table removed from view
+        )
+        # Decision board moved to the top of this panel; the benchmark chart sits
+        # just below it. "Same companies with detail" table removed from view
         # (still computed; re-add hr + caption + DT::DTOutput("tableLC") to restore).
       ))
     )
@@ -6470,16 +6480,17 @@ server <- function(input, output, session) {
   # Raw pulls are cached in app_dataLC; the state machine re-derives live on
   # horizon/snapshot-count changes without re-querying.
   app_dataLC   <- reactiveVal(NULL)
-  # every LC query is independent of the hold-length + id filters (those re-derive
-  # in R), so a repeat Generate can reuse the last fetch. Cleared on Connect so an
-  # environment switch or reconnect always re-queries.
-  lc_cache     <- reactiveVal(NULL)
   status_msgLC <- reactiveVal("Ready")
-  # whether the id checkboxes have delivered a value since the last Generate:
-  # distinguishes "not rendered yet" (NULL -> show all) from a real
-  # deselect-all (NULL -> show nothing)
-  ids_seenLC   <- reactiveVal(FALSE)
-  observeEvent(input$idsLC, ids_seenLC(TRUE), ignoreNULL = TRUE)
+  # the board's cluster-id selection, preserved across data refreshes (same
+  # pattern as lc_chart_ids_sel, so an auto-refresh re-render cannot reset the
+  # user's narrowing): NULL = never touched -> all on; character(0) = a real
+  # deselect-all -> empty board. Reset on (re)connect / env switch only.
+  lc_board_ids_sel <- reactiveVal(NULL)
+  lcAutoTick   <- reactiveVal(0)
+  observeEvent(input$idsLC, {
+    lc_board_ids_sel(if (is.null(input$idsLC)) character(0)
+                     else as.character(input$idsLC))
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
   output$statusMessageLC <- renderText({ status_msgLC() })
 
   # ── Personal portfolio: strategy follower (model DCA + ladder sells) ──────
@@ -7094,7 +7105,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$connect_btn, {
     if (input$db_pass == "") { status_msgLC("Error: Password is not set."); return() }
-    lc_cache(NULL)   # invalidate the Lifecycle query cache on (re)connect / env switch
+    lc_board_ids_sel(NULL)   # new environment -> new universe -> reset the id filter
     status_msgLC("Connecting...")
     tryCatch({
       con <- get_con(input)
@@ -7108,17 +7119,24 @@ server <- function(input, output, session) {
     }, error = function(e) { status_msgLC(paste("Error:", e$message)) })
   })
 
-  observeEvent(input$execute_LC, {
+  # Auto-refresh: while the toggle is on, re-run the Generate fetch on a timer so
+  # the board tracks the DB without a click. Ticks are suppressed (but the clock
+  # keeps running) when the Lifecycle tab is not active or no password is set, so
+  # hidden tabs and unconnected sessions never query. Returning to the tab
+  # triggers an immediate refresh (mainNav is a reactive dep); the password is
+  # isolate()d so typing it does not fire per-keystroke fetches.
+  observe({
+    if (!isTRUE(input$lcAutoRefresh)) return()
+    invalidateLater(20000)
+    if (!identical(input$mainNav, "Lifecycle")) return()
+    if (isolate(is.null(input$db_pass) || input$db_pass == "")) return()
+    isolate(lcAutoTick(lcAutoTick() + 1))
+  })
+  observeEvent(list(input$execute_LC, lcAutoTick()), {
     if (input$db_pass == "") { status_msgLC("Error: Password is not set."); return() }
-    # cache hit: reuse this connection's fetch instead of re-querying (~1.7s of
-    # window-function + basket SQL). Cleared on Connect, so this only serves a
-    # repeat Generate against the same environment.
-    cached <- lc_cache()
-    if (!is.null(cached)) {
-      ids_seenLC(FALSE); app_dataLC(cached)
-      status_msgLC("Loaded from this session's cache. Reconnect to pull fresh data.")
-      return()
-    }
+    # Every Generate re-queries fresh, so the board always reflects the current
+    # DB - no stale cache to reconnect past. (Horizon changes still re-derive in
+    # memory from app_dataLC without a re-query.)
     status_msgLC("Loading the signal record...")
     tryCatch({
       con <- get_con(input)
@@ -7253,10 +7271,9 @@ server <- function(input, output, session) {
         dbGetQuery(con, gsub("__ANCHOR__", format(qs_anchor, "%Y-%m-%d"),
                              LC_QS_COMPARE_SQL, fixed = TRUE)),
         c("graded_pct", "passed_pct", "spy_pct")), error = function(e) NULL)
-      ids_seenLC(FALSE)   # id checkboxes re-render fresh with the new universe
       dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
                   qs = qs, qscmp = qscmp, qscmp_anchor = qs_anchor)
-      app_dataLC(dat); lc_cache(dat)   # cache for repeat Generates this session
+      app_dataLC(dat)
       status_msgLC(sprintf(
         "Loaded - %d proven cohort picks across %d quarterly cutoffs + %d live series across %d snapshots.",
         if (is.null(coh)) 0L else nrow(coh),
@@ -7264,7 +7281,7 @@ server <- function(input, output, session) {
         length(unique(led$ticker[led$global_action == "BUY"])),
         length(unique(led$d))))
     }, error = function(e) { status_msgLC(paste("Error:", e$message)) })
-  })
+  }, ignoreInit = TRUE)
 
   # State machine + summary, re-derived live on horizon changes without
   # re-querying. The snapshot stream at horizon hz is the model's own record:
@@ -7469,11 +7486,16 @@ server <- function(input, output, session) {
       as.integer(d$gate$id),
       if (!is.null(d$coh)) as.integer(d$coh$id)))))
     if (!length(ids)) return(NULL)
+    # survive data refreshes: rebuild with the user's stored selection (isolate,
+    # same pattern as lcChartFilter) instead of resetting to all-on
+    sel_now <- isolate(lc_board_ids_sel())
+    sel_use <- if (is.null(sel_now)) as.character(ids)
+               else intersect(sel_now, as.character(ids))
     div(style = "margin-bottom:0.6rem;",
       tags$label("Cluster id filter (all on; uncheck to narrow)",
                  style = paste0("color:#94a3b8; font-size:0.72rem; font-weight:600;",
                                 " display:block; margin-bottom:0.3rem;")),
-      checkboxGroupInput("idsLC", NULL, choices = ids, selected = ids, inline = TRUE),
+      checkboxGroupInput("idsLC", NULL, choices = ids, selected = sel_use, inline = TRUE),
       # buttons, not links: same control pair as the Predictions/Forecast tabs
       actionButton("idsAllLC", "Select all",
                    style = "padding:2px 10px; font-size:0.72rem; margin-right:0.35rem;"),
@@ -7522,7 +7544,7 @@ server <- function(input, output, session) {
               sprintf("display:flex; flex-wrap:wrap; max-height:%dpx; overflow-y:auto;", max_h)
             else "display:flex; flex-wrap:wrap;",
           mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks,
-                                      plus = t %in% qs_top),
+                                      plus = t %in% qs_pass),
                  ticks, notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)))
     }
     note_line <- function(txt) div(
@@ -7541,10 +7563,12 @@ server <- function(input, output, session) {
       ex <- ex[!duplicated(ex$ticker), , drop = FALSE]
       if (nrow(ex)) id_of <- c(id_of, setNames(as.integer(ex$id), ex$ticker))
     }
-    sel_id <- input$idsLC
+    # NULL = filter never touched -> show all; character(0) = deselect-all ->
+    # empty board; else narrow. The stored val survives refetch re-renders.
+    sel_id <- lc_board_ids_sel()
     keep_id <- function(v) {
-      if (is.null(sel_id))
-        return(if (isTRUE(ids_seenLC())) v[FALSE] else v)
+      if (is.null(sel_id)) return(v)
+      if (!length(sel_id)) return(v[FALSE])
       v[is.na(id_of[v]) | id_of[v] %in% as.integer(sel_id)]
     }
     bt <- keep_id(bt)
@@ -7573,12 +7597,66 @@ server <- function(input, output, session) {
     bg <- qs_grade[buys]
     qs_ok <- buys[!is.na(bg) & bg >= qs_min]
     qs_top <- utils::head(qs_ok[order(-qs_grade[qs_ok], qs_ok)], qs_cap)
-    holds <- holds[order(dv$entry_of[holds], holds)]
+    # Buy column display (sidebar-driven): default to the qualstream-passed names
+    # only (the orange +), best grade first = "better positioned"; the "show all"
+    # box falls back to the full runs-ordered buy list. With no qualstream grades
+    # there is nothing to filter to, so show all rather than an empty column.
+    buys_all   <- buys
+    # default ON: the BUY column shows only the qualstream-passed names. Buy
+    # only, deliberately: qualstream grades current buy candidates and grades
+    # expire (150d), so held/sold positions routinely carry no fresh grade -
+    # filtering those columns would hide positions the user actually owns or
+    # must exit (Kevin, 2026-08-11). With no grades at all there is nothing to
+    # filter to, so the buy column falls back to showing everything.
+    buys_qsonly <- isTRUE(input$lcBuyQSonly) && length(qs_top) > 0
+    # every ticker qualstream graded at/above the orange-+ threshold: marks the
+    # + on chips in ALL columns (a hold/sell keeps its + as long as the grade
+    # is fresh), but never filters hold/sell membership.
+    qs_pass <- names(qs_grade)[!is.na(qs_grade) & qs_grade >= qs_min]
+    # shared sort: order a column by its shown date, most recent first (undated
+    # sinks to the bottom), ticker as the tiebreak.
+    date_desc <- function(ticks, dates) {
+      dd <- suppressWarnings(as.Date(dates)); dd[is.na(dd)] <- as.Date("1900-01-01")
+      ticks[order(-as.numeric(dd), ticks)]
+    }
+    buys_shown <- if (buys_qsonly) qs_top else buys_all
+    buys_shown <- date_desc(buys_shown, dv$entry_of[buys_shown])
+    # Chip note: entry "since" date by default; win% · runs appended only when the
+    # sidebar detail box is ticked. A brand-new entry with no real tenure says so.
+    b_since <- ifelse(is.na(dv$entry_of[buys_shown]), "", as.character(dv$entry_of[buys_shown]))
+    if (isTRUE(input$lcBuyStats)) {
+      b_stat <- sprintf("%.0f%% · %d/%d runs", wp[buys_shown],
+                        ifelse(is.na(rn[buys_shown]), 0L, rn[buys_shown]), rt)
+      b_note2 <- ifelse(nzchar(b_since), paste0(b_since, " · ", b_stat), b_stat)
+    } else {
+      b_note2 <- b_since
+    }
+    b_note2 <- ifelse(why[buys_shown] == "new entry",
+                      ifelse(nzchar(b_note2), paste0(b_note2, " · new"), "new entry"),
+                      b_note2)
+    note_fmt <- if (isTRUE(input$lcBuyStats)) "entry date · win% · runs" else "entry date"
+    buy_sub <- if (!length(qs_top)) paste0("no qualstream grades yet · all shown · ", note_fmt)
+               else if (buys_qsonly) paste0("qualstream + only · ", note_fmt)
+               else paste0("all standing recs · ", note_fmt)
+    buy_title_stacked <- if (!length(qs_top)) "buy - all standing recs (no qualstream grades)"
+                         else if (buys_qsonly) "buy - qualstream-passed picks only (untick for all)"
+                         else "buy - all standing recs"
+    holds_all <- holds
+    holds <- date_desc(holds, dv$entry_of[holds])
     hz_days <- round(hz * 30.44)
     h_pct <- pmin(100L, as.integer(round(100 *
                as.numeric(Sys.Date() - as.Date(dv$entry_of[holds])) / hz_days)))
     h_note <- ifelse(grepl("^matures", why[holds]), unname(why[holds]),
                      sprintf("%s · %d%%", dv$entry_of[holds], h_pct))
+    # sell column: all exits (never qualstream-filtered), ordered by the exit
+    # date embedded in the reason string ("gate flipped/matured/delisted DATE");
+    # "(today)" has no date so it counts as today = newest.
+    sells_all <- sells
+    sell_dt <- as.Date(vapply(unname(why[sells]), function(s) {
+      m <- regmatches(s, regexpr("[0-9]{4}-[0-9]{2}-[0-9]{2}", s))
+      if (length(m)) m else NA_character_ }, character(1)))
+    sell_dt[is.na(sell_dt)] <- Sys.Date()
+    sells <- sells[order(-as.numeric(sell_dt), sells)]
     # checkpoint calendar: qualstream runs every 4 months (Jan/May/Sep 1, in
     # sync with the qual_scorecards_4monthly DAG); the buy/prune window is the
     # few days right AFTER the run, so grades inform the prune. Amber while
@@ -7646,19 +7724,61 @@ server <- function(input, output, session) {
         sprintf(" passed qualstream: %s.",
           paste(sprintf("%s %d", qs_top,
                         as.integer(round(qs_grade[qs_top]))), collapse = ", ")))))
-    tagList(
-      notes,
-      section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
-      section(sprintf(
-                "buy - the period's standing recs: proven %d-month slots backed by the last month of runs (win%% · runs on list)",
-                hz),
-              col_of[["buy"]], buys, b_note),
-      section("hold - the period's dropped recs, still open (entry · % of horizon)",
-              col_of[["hold"]], holds, h_note, max_h = 220),
-      div(style = "color:#64748b; font-weight:600; font-size:0.85rem; margin-bottom:0.5rem;",
+    # Kanban column: same chips as the stacked sections (chipf reused verbatim, so
+    # orange +, delisted strikethrough and the notes are identical), only laid out
+    # side by side. Chips still wrap inside each column and the column scrolls
+    # independently, so a 90-name hold list stays compact instead of a giant tower.
+    kanban_col <- function(title, colr, ticks, ch_notes, sub = "", max_h = 520, n_total = NA) {
+      hdr <- if (!is.na(n_total) && n_total != length(ticks))
+               sprintf("%s (%d of %d)", title, length(ticks), n_total)
+             else sprintf("%s (%d)", title, length(ticks))
+      div(style = paste0("min-width:0; background:rgba(148,163,184,0.03);",
+                         " border:1px solid #1e293b; border-radius:8px; padding:0.5rem 0.6rem;"),
+        div(style = sprintf(paste0("color:%s; font-weight:700; font-size:0.92rem;",
+                                   " border-bottom:2px solid %s55; padding-bottom:0.25rem;"),
+                            colr, colr),
+            hdr),
+        if (nzchar(sub))
+          div(style = "color:#64748b; font-size:0.68rem; margin:0.15rem 0 0.4rem;", sub)
+        else div(style = "margin-bottom:0.4rem;"),
+        div(style = sprintf(paste0("display:flex; flex-direction:column; align-items:flex-start;",
+                                   " gap:2px; max-height:%dpx; overflow-y:auto;"), max_h),
+          if (length(ticks))
+            mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks, plus = t %in% qs_pass),
+                   ticks, ch_notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)
+          else div(style = "color:#475569; font-size:0.75rem; font-style:italic; padding:0.3rem;",
+                   "none")))
+    }
+    closed_foot <- div(style = "color:#64748b; font-weight:600; font-size:0.85rem; margin:0.4rem 0 0.5rem;",
           sprintf("closed - exited over a month ago (%d) · detail in the table below",
                   length(closed)))
-    )
+    if (identical(input$lcBoardLayout, "stacked")) {
+      tagList(
+        notes,
+        section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
+        section(sprintf("%s (%d of %d shown)", buy_title_stacked,
+                        length(buys_shown), length(buys_all)),
+                col_of[["buy"]], buys_shown, b_note2),
+        section("hold - the period's dropped recs, still open (entry · % of horizon)",
+                col_of[["hold"]], holds, h_note, max_h = 220),
+        closed_foot)
+    } else {
+      # Lifecycle order left to right: buy -> hold -> sell (sell = the terminal
+      # "exit now" state, kept red so urgency still reads at a glance).
+      tagList(
+        notes,
+        div(style = paste0("display:grid; grid-template-columns:repeat(3, minmax(0,1fr));",
+                           " gap:0.6rem; align-items:stretch; margin-bottom:0.5rem;"),
+          kanban_col("buy", col_of[["buy"]], buys_shown, b_note2, buy_sub,
+                     n_total = length(buys_all)),
+          kanban_col("hold", col_of[["hold"]], holds, h_note,
+                     "dropped recs · entry · % of horizon",
+                     n_total = length(holds_all)),
+          kanban_col("sell", col_of[["sell"]], sells, unname(why[sells]),
+                     "exit now · reason",
+                     n_total = length(sells_all))),
+        closed_foot)
+    }
   })
 
   # Does the qualstream marking help? Equal-weight return of the current BUYs
@@ -7788,9 +7908,11 @@ server <- function(input, output, session) {
     df$del_class[!df$delisted] <- ""
     # cluster-id filter (same control + semantics as the board); idless names
     # always show; deselect-all empties the table too
-    sel_id <- input$idsLC
+    sel_id <- lc_board_ids_sel()
     if (is.null(sel_id)) {
-      if (isTRUE(ids_seenLC())) df <- df[0, , drop = FALSE]
+      # filter never touched -> show all
+    } else if (!length(sel_id)) {
+      df <- df[0, , drop = FALSE]
     } else if (!is.null(d$gate$id)) {
       id_of <- setNames(suppressWarnings(as.integer(d$gate$id)), d$gate$ticker)
       if (!is.null(d$coh) && nrow(d$coh) > 0) {   # cohort id fills gate gaps
