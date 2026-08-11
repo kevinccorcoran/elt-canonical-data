@@ -2156,7 +2156,7 @@ ui <- navbarPage(
                      selected = "columns", inline = TRUE),
         checkboxInput("lcBuyQSonly", "Show qualstream + picks only (all columns)", value = TRUE),
         checkboxInput("lcBuyStats", "Buy: also show win% · runs", value = FALSE),
-        checkboxInput("lcAutoRefresh", "Auto-refresh board (every 20s)", value = TRUE),
+        checkboxInput("lcAutoRefresh", "Auto-refresh board (every 20s)", value = FALSE),
         uiOutput("idFilterLC")
       )),
       mainPanel(div(class = "main-card",
