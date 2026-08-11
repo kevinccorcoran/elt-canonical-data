@@ -232,34 +232,42 @@ def compute_board_state(conn, hz: int = DEFAULT_HZ, today: dt.date | None = None
     return out
 
 
-SQL_USER_HELD = """
-    SELECT UPPER(ticker) FROM portfolio.positions
-    WHERE end_date IS NOT NULL AND sold_date IS NULL
+SQL_USER_MOVES = """
+    SELECT UPPER(ticker),
+           CASE WHEN sold_date IS NOT NULL THEN 'sell' ELSE 'hold' END
+    FROM portfolio.positions
+    WHERE end_date IS NOT NULL OR sold_date IS NOT NULL
 """
 
 
-def user_held(conn) -> set[str]:
-    """Tracker rows the user moved to hold (Hold selected -> end_date stamped,
-    not sold). The dashboard renders these in the hold column overriding the
-    model state; the notifier must watch the same board the user sees. DBs
-    without the portfolio schema just contribute no overrides."""
+def user_moves(conn) -> dict[str, str]:
+    """Tracker rows the user moved by hand: end_date stamped (not sold) -> hold,
+    sold_date stamped -> sell. The dashboard renders these overriding the model
+    state; the notifier must watch the same board the user sees. DBs without
+    the portfolio schema just contribute no overrides."""
     try:
         with conn.cursor() as cur:
-            cur.execute(SQL_USER_HELD)
-            return {t for (t,) in cur.fetchall()}
+            cur.execute(SQL_USER_MOVES)
+            return dict(cur.fetchall())
     except Exception:
         conn.rollback()
-        return set()
+        return {}
 
 
 def graded_state(conn, hz: int = DEFAULT_HZ, today: dt.date | None = None) -> dict[str, BoardName]:
     """Board-universe names that carry a qualstream grade >= threshold — the notifier's watch list."""
     out = {t: b for t, b in compute_board_state(conn, hz, today).items()
            if b.grade is not None and b.grade >= QS_MIN}
-    held = user_held(conn)
-    if held:
+    moves = user_moves(conn)
+    if moves:
         from dataclasses import replace
-        for t in held & set(out):
-            if out[t].state not in ("sell", "closed"):   # a user pause never masks an exit call
-                out[t] = replace(out[t], state="hold", reason="paused by user")
+        for t, mv in moves.items():
+            if t not in out:
+                continue
+            if mv == "hold" and out[t].state in ("sell", "closed"):
+                continue   # a user pause never masks a model exit call
+            if mv == "sell" and out[t].state == "closed":
+                continue   # already closed is stronger than a manual sell
+            out[t] = replace(out[t], state=mv,
+                             reason="paused by user" if mv == "hold" else "sold by user")
     return out

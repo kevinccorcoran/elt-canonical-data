@@ -2203,11 +2203,13 @@ ui <- navbarPage(
               actionButton("lcPosAdd", "Add manual", class = "btn-primary", style = "margin-right:0.4rem;"),
               actionButton("lcPosRemove", "Remove selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosHold", "Hold selected", style = "margin-right:0.4rem;"),
+              actionButton("lcPosSell", "Sell selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosResume", "Resume selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosClear", "Clear all")),
             div(style = "color:#64748b; font-size:0.7rem; margin:0.1rem 0 0.35rem;",
                 paste("id = cluster. Check rows (or the header box for all), then Remove / Hold /",
-                      "Resume. Hold pauses buying (the position keeps valuing); Resume restarts it.",
+                      "Sell / Resume. Hold pauses buying (the position keeps valuing); Sell",
+                      "records a full exit; Resume returns the row to the model's flow.",
                       "Double-click a $/buy cell to change that row's amount.",
                       "Invested / Value / P&L / Return are that row's own accumulated buys;",
                       "vs SPY is the same dollars run into SPY (pp = percentage-point edge).",
@@ -6570,13 +6572,17 @@ server <- function(input, output, session) {
       why   = vapply(ticks, function(t) getv(wy, t, NA_character_), character(1)),
       grade = vapply(ticks, function(t) as.numeric(getv(gr, t, NA_real_)), numeric(1)),
       stringsAsFactors = FALSE)
-    # user-paused rows record as hold (matches the table's display override), so
-    # the transition trail shows the buy -> hold move even if the board says buy
+    # user-paused/sold rows record as hold/sell (matches the table's display
+    # override), so the trail shows the user's moves even if the board says buy
     held <- { e <- as.character(p$end_date); sd <- as.character(p$sold_date)
               !is.na(e) & nzchar(e) & (is.na(sd) | !nzchar(sd)) }
     heldtk <- toupper(p$ticker[held])
     ih <- rows$ticker %in% heldtk
     rows$state[ih] <- "hold"; rows$why[ih] <- "paused by user"
+    sold <- { sd <- as.character(p$sold_date); !is.na(sd) & nzchar(sd) }
+    soldtk <- toupper(p$ticker[sold])
+    is2 <- rows$ticker %in% soldtk
+    rows$state[is2] <- "sell"; rows$why[is2] <- "sold by user"
     rows <- rows[!is.na(rows$state) & nzchar(rows$state), , drop = FALSE]  # only what the board knows
     if (!nrow(rows)) return()
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return()
@@ -6689,6 +6695,22 @@ server <- function(input, output, session) {
     showNotification(sprintf("%s moved to hold - buying paused, position keeps valuing.",
                              paste(toupper(cur$ticker[sel]), collapse = ", ")), type = "message")
   })
+  # Sell = record a full exit by hand: stamp sold_date + sold_fraction (and
+  # end_date, a sold position never keeps buying). Displays as sell everywhere;
+  # Resume clears every stamp and the row rejoins the model's flow.
+  observeEvent(input$lcPosSell, {
+    sel <- input$lcPosChecked; cur <- lc_pos()
+    if (is.null(cur) || !nrow(cur)) return()
+    sel <- suppressWarnings(as.integer(sel))
+    sel <- sel[!is.na(sel) & sel >= 1 & sel <= nrow(cur)]
+    if (!length(sel)) { showNotification("Check one or more rows to sell.", type = "message"); return() }
+    cur$sold_date[sel] <- format(Sys.Date())
+    cur$sold_fraction[sel] <- 1
+    cur$end_date[sel] <- format(Sys.Date())
+    persist_positions(cur); lc_pos(cur)
+    showNotification(sprintf("%s marked sold - buying stopped, exit recorded.",
+                             paste(toupper(cur$ticker[sel]), collapse = ", ")), type = "message")
+  })
   observeEvent(input$lcPosResume, {
     sel <- input$lcPosChecked; cur <- lc_pos()
     if (is.null(cur) || !nrow(cur)) return()
@@ -6696,6 +6718,7 @@ server <- function(input, output, session) {
     sel <- sel[!is.na(sel) & sel >= 1 & sel <= nrow(cur)]
     if (!length(sel)) { showNotification("Check one or more rows to resume.", type = "message"); return() }
     cur$end_date[sel] <- ""
+    cur$sold_date[sel] <- ""; cur$sold_fraction[sel] <- NA_real_
     persist_positions(cur); lc_pos(cur)
     showNotification(sprintf("%s resumed - buying continues per cadence/model.",
                              paste(toupper(cur$ticker[sel]), collapse = ", ")), type = "message")
@@ -6835,11 +6858,13 @@ server <- function(input, output, session) {
       s <- if (!is.null(dv) && tk %in% names(dv$state_now)) dv$state_now[[tk]] else ""
       if (is.null(s) || is.na(s)) "" else s
     }, character(1))
-    # user override: a row with an end_date stamp (and not sold) is paused ->
-    # display "hold" whatever the board says; Resume clears it.
+    # user overrides: end_date stamp (not sold) = paused -> "hold"; sold_date
+    # stamp = exited -> "sell". Resume clears both and the model state returns.
     held <- { e <- as.character(p$end_date); sd <- as.character(p$sold_date)
               !is.na(e) & nzchar(e) & (is.na(sd) | !nzchar(sd)) }
     states[held] <- "hold"
+    sold <- { sd <- as.character(p$sold_date); !is.na(sd) & nzchar(sd) }
+    states[sold] <- "sell"
     pcol <- function(col) if (is.null(perf) || !nrow(perf)) rep(NA_real_, nrow(p)) else
       as.numeric(perf[[col]])[match(p$id, perf$id)]
     invested <- pcol("invested"); value <- pcol("value"); spyv <- pcol("spy_value")
@@ -7568,6 +7593,9 @@ server <- function(input, output, session) {
       heldtk <- toupper(pp$ticker[!is.na(pe) & nzchar(pe) & (is.na(ps) | !nzchar(ps))])
       heldtk <- intersect(heldtk, names(st))
       if (length(heldtk)) { st[heldtk] <- "hold"; why[heldtk] <- "paused by user" }
+      soldtk <- toupper(pp$ticker[!is.na(ps) & nzchar(ps)])
+      soldtk <- intersect(soldtk, names(st))
+      if (length(soldtk)) { st[soldtk] <- "sell"; why[soldtk] <- "sold by user" }
     }
     col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
     # qualstream grades per ticker (latest non-vetoed); the top-20 AMONG THE
