@@ -2,9 +2,9 @@
 
 ![Architecture Diagram](tools/alphastream_system_architecture.png?v=5)
 
-AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans and standardizes it, then uses unsupervised clustering and statistical scoring to rank groups, checked against later periods it did not use. A separate LLM layer grades each pick against a weighted qualitative rubric. An interactive dashboard sits on top.
+AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans it into a canonical layer, then ranks groups with unsupervised clustering and statistical scoring, and proves every ranking against periods it never trained on. A separate LLM layer grades each pick against a weighted qualitative rubric. An interactive dashboard sits on top.
 
-Over 2012–2024, the model's picks beat the benchmark by about 8 percentage points a year on average.
+Over 2012–2024, its picks beat the benchmark by roughly 8 percentage points a year.
 
 ## Repositories
 
@@ -23,7 +23,7 @@ AlphaStream is organized into three repositories:
 
 ![Pipeline](tools/pipeline_grouped.png?v=3)
 
-The end-to-end flow grouped by stage, each box labeled with the database schema it lands in. Data is pulled in, screened for quality, and standardized into a canonical layer, then split into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, validated before it reaches the dashboard. A parallel qualitative grading stage (qualstream) scores each pick against a weighted rubric with a single LLM call, feeding the same dashboard. The machine-learning and LLM stages are flagged in the diagram.
+The end-to-end flow, grouped by stage, each box labeled with the database schema it lands in. The pipeline pulls data in, screens it for quality, and standardizes it into a canonical layer, then splits it into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, and validates it before it reaches the dashboard. A parallel qualitative stage (qualstream) grades each pick against a weighted rubric with a single LLM call and feeds the same dashboard. The diagram flags the machine-learning and LLM stages.
 
 ## Data Lineage
 
