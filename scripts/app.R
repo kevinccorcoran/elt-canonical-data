@@ -2154,7 +2154,7 @@ ui <- navbarPage(
         radioButtons("lcBoardLayout", "Board layout",
                      choices = c("Columns (board)" = "columns", "Stacked" = "stacked"),
                      selected = "columns", inline = TRUE),
-        checkboxInput("lcBuyQSonly", "Buy: show qualstream + picks only", value = TRUE),
+        checkboxInput("lcBuyQSonly", "Show qualstream + picks only (all columns)", value = TRUE),
         checkboxInput("lcBuyStats", "Buy: also show win% · runs", value = FALSE),
         checkboxInput("lcAutoRefresh", "Auto-refresh board (every 20s)", value = TRUE),
         uiOutput("idFilterLC")
@@ -7602,16 +7602,16 @@ server <- function(input, output, session) {
     # box falls back to the full runs-ordered buy list. With no qualstream grades
     # there is nothing to filter to, so show all rather than an empty column.
     buys_all   <- buys
-    # default ON: the BUY column shows only the qualstream-passed names. Buy
-    # only, deliberately: qualstream grades current buy candidates and grades
-    # expire (150d), so held/sold positions routinely carry no fresh grade -
-    # filtering those columns would hide positions the user actually owns or
-    # must exit (Kevin, 2026-08-11). With no grades at all there is nothing to
-    # filter to, so the buy column falls back to showing everything.
+    # default ON: show only qualstream-passed names in ALL three columns
+    # (Kevin's final call 2026-08-11, after trying buy-only scoping on prod:
+    # he wants the ticked state strictly qualstream). Known trade-off, accepted:
+    # qualstream grades current buy candidates and grades expire (150d), so
+    # held/sold positions routinely lack a fresh grade and hide while ticked -
+    # UNTICK to see every open position/exit. With no grades at all there is
+    # nothing to filter to, so everything shows.
     buys_qsonly <- isTRUE(input$lcBuyQSonly) && length(qs_top) > 0
-    # every ticker qualstream graded at/above the orange-+ threshold: marks the
-    # + on chips in ALL columns (a hold/sell keeps its + as long as the grade
-    # is fresh), but never filters hold/sell membership.
+    # every ticker qualstream graded at/above the orange-+ threshold: filters
+    # hold/sell membership while ticked, and marks the + on chips everywhere.
     qs_pass <- names(qs_grade)[!is.na(qs_grade) & qs_grade >= qs_min]
     # shared sort: order a column by its shown date, most recent first (undated
     # sinks to the bottom), ticker as the tiebreak.
@@ -7642,16 +7642,18 @@ server <- function(input, output, session) {
                          else if (buys_qsonly) "buy - qualstream-passed picks only (untick for all)"
                          else "buy - all standing recs"
     holds_all <- holds
+    holds <- if (buys_qsonly) holds[holds %in% qs_pass] else holds
     holds <- date_desc(holds, dv$entry_of[holds])
     hz_days <- round(hz * 30.44)
     h_pct <- pmin(100L, as.integer(round(100 *
                as.numeric(Sys.Date() - as.Date(dv$entry_of[holds])) / hz_days)))
     h_note <- ifelse(grepl("^matures", why[holds]), unname(why[holds]),
                      sprintf("%s · %d%%", dv$entry_of[holds], h_pct))
-    # sell column: all exits (never qualstream-filtered), ordered by the exit
+    # sell column: same qualstream filter while ticked, ordered by the exit
     # date embedded in the reason string ("gate flipped/matured/delisted DATE");
     # "(today)" has no date so it counts as today = newest.
     sells_all <- sells
+    sells <- if (buys_qsonly) sells[sells %in% qs_pass] else sells
     sell_dt <- as.Date(vapply(unname(why[sells]), function(s) {
       m <- regmatches(s, regexpr("[0-9]{4}-[0-9]{2}-[0-9]{2}", s))
       if (length(m)) m else NA_character_ }, character(1)))
@@ -7772,10 +7774,12 @@ server <- function(input, output, session) {
           kanban_col("buy", col_of[["buy"]], buys_shown, b_note2, buy_sub,
                      n_total = length(buys_all)),
           kanban_col("hold", col_of[["hold"]], holds, h_note,
-                     "dropped recs · entry · % of horizon",
+                     if (buys_qsonly) "qualstream + only · entry · % of horizon"
+                     else "dropped recs · entry · % of horizon",
                      n_total = length(holds_all)),
           kanban_col("sell", col_of[["sell"]], sells, unname(why[sells]),
-                     "exit now · reason",
+                     if (buys_qsonly) "qualstream + only · exit now · reason"
+                     else "exit now · reason",
                      n_total = length(sells_all))),
         closed_foot)
     }
