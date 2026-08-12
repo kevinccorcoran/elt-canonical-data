@@ -75,10 +75,23 @@ save_portfolio <- function(df) {
 }
 
 # Qualstream orange-+ rule, shared by the board's mark AND the portfolio's
-# default seed so the two can never diverge: a current BUY graded >= QS_MIN by
-# qualstream, capped at the top QS_CAP by grade.
+# QS_MIN marks the orange + on board chips (grade threshold, Kevin's call
+# 2026-08-11). The SEED no longer gates on it: one retroactive grade vintage
+# cannot validate a 68 cut, so the seed takes every validated-board BUY,
+# ranked by grade (ungraded rank after, by signal persistence), vetoed names
+# excluded, capped at QS_CAP overall and QS_CLUSTER_CAP per cluster id
+# (concentration guard: the seed set has clustered ~7+7 across two cluster
+# models before, so one cluster-gate flip would move a large block of the board
+# at once; the per-id cap bounds that blast radius).
 QS_MIN <- 68L
 QS_CAP <- 25L
+QS_CLUSTER_CAP <- 5L
+# grade freshness in days - ONE source for every SQL copy (board mark, seed
+# ranking, comparison chart; twin: board_state.py QS_MAX_AGE_DAYS). 150 ~ the
+# 4-month cadence + slack, so a mark expires instead of living forever. NOTE:
+# all current grades share one as_of, so expiry is a synchronized cliff until
+# grading runs monthly/incrementally - the caption warns as it approaches.
+QS_MAX_AGE_DAYS <- 150L
 
 # Dismissed set: tickers the user explicitly removed, kept so the qualstream
 # auto-seed does not resurrect them on the next Generate. Stored as a one-column
@@ -246,10 +259,14 @@ LC_SIGNAL_MAX_AGE <- 10L   # calendar days a BUY run stays actionable
 # expand_schedule, but model-linked rows only fire a buy when the model still
 # said BUY around that date: the ticker must have a BUY row on the most recent
 # ledger run on/before the buy date, and that run within LC_SIGNAL_MAX_AGE days.
-# This single filter yields pause (name off the buy list), resume (BUY returns),
-# buy-off during a wind-down, and a fresh accumulation leg after re-entry.
-# Manual rows are unchanged. Model rows need `led`; without it they contribute
-# nothing and their tickers land in attr(out, "model_skipped").
+# For recurring cadences this filter yields pause (name off the buy list),
+# resume (BUY returns), buy-off during a wind-down, and a fresh accumulation
+# leg after re-entry. ONE-SHOT rows defer instead of drop: a "once" plan whose
+# single candidate date fails the gate enters at the FIRST later ledger run
+# where the model says BUY - dropping its only date would mean the position
+# silently never exists. Manual rows are unchanged. Model rows need `led`;
+# any model row that ends up contributing no fills (no ledger yet, or gated
+# out entirely) lands in attr(out, "model_skipped") so the UI can say so.
 # model_start picks the tracking basis for MODEL rows only:
 #   "epoch"  - strategy view: track from the regime epoch regardless of stored
 #              start, so a holding shows the model's real multi-week record.
@@ -287,18 +304,31 @@ gated_expand_schedule <- function(positions, led = NULL, today = Sys.Date(),
           r$start_date <- format(max(c(st, epoch), na.rm = TRUE))
         }
         cand <- expand_schedule(r, today)
-        if (!nrow(cand)) next
+        if (!nrow(cand)) {
+          skipped <- c(skipped, toupper(trimws(as.character(r$ticker)))); next }
         cd   <- as.Date(cand$d)
         idx  <- findInterval(cd, run_dates)                 # latest run <= D (0 if none)
         keep <- idx >= 1 &
                 as.numeric(cd - run_dates[pmax(idx, 1L)]) <= LC_SIGNAL_MAX_AGE &
                 paste(toupper(cand$ticker), format(run_dates[pmax(idx, 1L)])) %in% buy_keys
+        if (!any(keep) && identical(as.character(r$cadence), "once")) {
+          # one-shot defers, never drops: enter at the first run on/after the
+          # candidate date where this ticker is a BUY (bounded by end_date/today)
+          tk      <- toupper(trimws(as.character(cand$ticker[1])))
+          end_raw <- as.character(r$end_date)
+          stop_r  <- if (!is.na(r$end_date) && nzchar(end_raw))
+                       min(as.Date(end_raw), today) else today
+          later <- run_dates[run_dates >= cd[1] & run_dates <= stop_r &
+                             paste(tk, format(run_dates)) %in% buy_keys]
+          if (length(later)) { cand$d <- format(min(later)); keep <- TRUE }
+        }
         if (any(keep)) parts[[length(parts) + 1]] <- cand[keep, , drop = FALSE]
+        else skipped <- c(skipped, toupper(trimws(as.character(r$ticker))))
       }
       if (length(parts)) out <- rbind(out, do.call(rbind, parts))
     }
   }
-  attr(out, "model_skipped") <- skipped
+  attr(out, "model_skipped") <- unique(skipped)
   out
 }
 
@@ -1003,7 +1033,7 @@ scored AS (
     SELECT DISTINCT ON (ticker) ticker, overall
     FROM qual.ticker_scorecards
     WHERE NOT veto
-      AND rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - 150
+      AND rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - __QS_AGE__
     ORDER BY ticker, as_of DESC, graded_at DESC
 ),
 graded_buys AS (
@@ -6524,16 +6554,33 @@ server <- function(input, output, session) {
     tryCatch({ db_save_dismissed(con, v); invisible(TRUE) }, error = function(e) invisible(FALSE))
   }
 
-  # Default the table to the qualstream orange-+ buys: on every Generate, each
-  # current BUY graded >= 68 (dv$qs_buys, the exact board + set) is auto-added as
-  # a model-linked $100/monthly plan unless it is already tracked or was
-  # explicitly removed (dismissed). Idempotent: once seeded, qs_buys is a subset
-  # of tracked+dismissed, so `toAdd` is empty and no further write fires (the
-  # self-trigger on lc_pos() settles after one no-op pass).
+  # Default the table to the seed queue (dv$qs_buys): on every Generate, each
+  # validated-board BUY - grade-ranked, veto-excluded, cluster-capped - is
+  # auto-added as a model-linked $100 ONE-SHOT plan (lump at entry:
+  # installments measured -3.9pp vs the same cash lumped, and the one-shot
+  # defers to the first live BUY run) unless it is already tracked or was
+  # explicitly removed (dismissed).
+  # Idempotent: once seeded, qs_buys is a subset of tracked+dismissed, so
+  # `toAdd` is empty and no further write fires (the self-trigger on lc_pos()
+  # settles after one no-op pass).
   observe({
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     if (is.null(dv) || is.null(dv$qs_buys) || !length(dv$qs_buys)) return()
     cur <- lc_pos(); dis <- lc_dismissed()
+    # one-time policy migration: monthly seeds the app itself created become
+    # one-shot. Only untouched auto-seeds move - adopted/manual rows keep the
+    # cadence the user chose, and stamped (held/sold) rows keep their history.
+    if (nrow(cur)) {
+      e <- as.character(cur$end_date); s <- as.character(cur$sold_date)
+      clean <- (is.na(e) | !nzchar(e)) & (is.na(s) | !nzchar(s))
+      mig <- grepl("-seed", cur$id, fixed = TRUE) & cur$mode == "model" &
+             cur$cadence == "monthly" & clean
+      if (any(mig, na.rm = TRUE)) {
+        cur$cadence[which(mig)] <- "once"
+        persist_positions(cur); lc_pos(cur)
+        return()   # let the write settle; the next pass handles seeding
+      }
+    }
     toAdd <- setdiff(dv$qs_buys, union(toupper(cur$ticker), dis))
     if (!length(toAdd)) return()
     now <- format(Sys.time())
@@ -6541,7 +6588,7 @@ server <- function(input, output, session) {
       tk <- toAdd[i]
       data.frame(
         id = paste0(tk, "-seed", i, "-", format(Sys.time(), "%Y%m%d%H%M%S")),
-        ticker = tk, amount_usd = 100, cadence = "monthly",
+        ticker = tk, amount_usd = 100, cadence = "once",
         # Stored start = the day it was actually added (the personal truth used
         # by the "since I added" basis); the epoch basis ignores it and tracks
         # from the regime epoch inside gated_expand_schedule.
@@ -6635,7 +6682,9 @@ server <- function(input, output, session) {
       column(3, selectInput("lcAdoptTicker", "Adopt model BUY", choices = choices)),
       column(2, numericInput("lcAdoptAmt", "$ per buy", value = 100, min = 1)),
       column(3, selectInput("lcAdoptCadence", "Cadence",
-               choices = c("Monthly" = "monthly", "One-off" = "once"), selected = "monthly")),
+               # one-shot is the policy default: lump-at-entry measured +3.9pp
+               # over monthly installments on the proven cohort record
+               choices = c("One-off" = "once", "Monthly" = "monthly"), selected = "once")),
       column(2, numericInput("lcAdoptDay", "Day", value = 1, min = 1, max = 28)),
       column(2, div(style = "margin-top:1.6rem;",
                actionButton("lcAdoptBtn", "Adopt", class = "btn-primary"))))
@@ -7141,8 +7190,9 @@ server <- function(input, output, session) {
     extra <- ""
     sk <- attr(ser, "model_skipped")
     if (!is.null(sk) && length(sk))
-      extra <- paste0(extra, sprintf(" Model rows (%s) price after Generate.",
-                                     paste(sk, collapse = ", ")))
+      extra <- paste0(extra, sprintf(
+        " Model rows (%s) have no fills yet - run Generate, or the model has not said BUY since their start.",
+        paste(sk, collapse = ", ")))
     lad <- tryCatch(lc_sell_events(), error = function(e) NULL)
     if (!is.null(lad) && !is.null(lad$meta) &&
         any(!lad$meta$has_hist & lad$meta$reason != "delisted", na.rm = TRUE))
@@ -7243,10 +7293,14 @@ server <- function(input, output, session) {
                delisted_utc::date::text AS delisted_date
         FROM raw.ticker_metadata"), error = function(e) NULL)
       # shortlist evidence PER HORIZON: the ticker's walk-forward rank bin at
-      # the latest cutoff and that bin's realized win rate - the SAME rule as
-      # the Shortlist tab (>= 55% win on >= 100 graded observations). One row
-      # per (ticker, fut_lag); DISTINCT ON keeps the best-evidence bin when a
-      # ticker sits in two clusters.
+      # the latest cutoff and that bin's realized win rate. One row per
+      # (ticker, fut_lag); DISTINCT ON prefers a cell that passes the FULL
+      # cohort standard (top vingtile of a long id, >= 55% win on >= 100 obs)
+      # when a ticker sits in two clusters, then best win rate. rank_bin/eid
+      # ride along so the prov gate can hold the bin-1 line - 28 (id,bin)
+      # cells pass 55/100 pooled, but only bin 1 is what the cohort record
+      # validated; mid-table passes are multiple-comparisons noise (id 6's
+      # bin 1 FAILS at 52 while its bins 2/6/7/9 'pass').
       sl <- tryCatch(dbGetQuery(con, "
         WITH mx AS (
             SELECT fut_lag, MAX(train_cutoff_date) AS cut
@@ -7266,12 +7320,16 @@ server <- function(input, output, session) {
             WHERE r.ticker_score IS NOT NULL AND r.ticker_score <> 0
         )
         SELECT DISTINCT ON (w.ticker, w.fut_lag) w.ticker, w.fut_lag,
+               w.wf_bin AS rank_bin, w.eid,
                ROUND(ps.hit_rate::numeric * 100, 1) AS bin_win_pct,
                ps.n_obs::int AS bin_n
         FROM wfbin w
         LEFT JOIN validation.walk_forward_pctile_summary ps
           ON ps.id = w.eid AND ps.fut_lag = w.fut_lag AND ps.pctile_bin = w.wf_bin
-        ORDER BY w.ticker, w.fut_lag, ps.hit_rate DESC NULLS LAST"),
+        ORDER BY w.ticker, w.fut_lag,
+               (w.wf_bin = 1 AND w.eid <= 12 AND ps.hit_rate >= 0.55
+                AND ps.n_obs >= 100) DESC,
+               ps.hit_rate DESC NULLS LAST"),
         error = function(e) NULL)
       # the model's own historical entry record: at each quarterly walk-forward
       # cutoff inside the longest hold window, the top vingtile per LONG id
@@ -7315,14 +7373,23 @@ server <- function(input, output, session) {
       # rubric_versions score on different scales and must not mix into one
       # ranking) and bounded by freshness (150d ~ the 4-month cadence + slack)
       # so an orange + can expire instead of living forever.
-      qs <- tryCatch(dbGetQuery(con, "
+      qs <- tryCatch(dbGetQuery(con, sprintf("
         SELECT DISTINCT ON (ticker) ticker,
                overall AS grade, as_of::text AS as_of,
                graded_at::date::text AS graded_at
         FROM qual.ticker_scorecards
         WHERE NOT veto
           AND rubric_version = 'buy_decision_v1'
-          AND as_of >= CURRENT_DATE - 150
+          AND as_of >= CURRENT_DATE - %d
+        ORDER BY ticker, as_of DESC, graded_at DESC", QS_MAX_AGE_DAYS)),
+        error = function(e) NULL)
+      # vetoed names (latest scorecard, any age): excluded from the auto-seed
+      # even though a grade no longer hard-gates entry - a veto is an active
+      # thumbs-down, the absence of a grade is not.
+      qsv <- tryCatch(dbGetQuery(con, "
+        SELECT DISTINCT ON (ticker) ticker, veto
+        FROM qual.ticker_scorecards
+        WHERE rubric_version = 'buy_decision_v1'
         ORDER BY ticker, as_of DESC, graded_at DESC"),
         error = function(e) NULL)
       # descriptive qualstream comparison series (LC_QS_COMPARE_SQL): current
@@ -7333,11 +7400,15 @@ server <- function(input, output, session) {
                   c(1, 5, 9)))
       qs_anchor <- max(ck_all[ck_all <= Sys.Date()])
       qscmp <- tryCatch(coerce_numeric_cols(
-        dbGetQuery(con, gsub("__ANCHOR__", format(qs_anchor, "%Y-%m-%d"),
-                             LC_QS_COMPARE_SQL, fixed = TRUE)),
+        dbGetQuery(con, gsub("__QS_AGE__", QS_MAX_AGE_DAYS,
+                        gsub("__ANCHOR__", format(qs_anchor, "%Y-%m-%d"),
+                             LC_QS_COMPARE_SQL, fixed = TRUE), fixed = TRUE)),
         c("graded_pct", "passed_pct", "spy_pct")), error = function(e) NULL)
       dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
-                  qs = qs, qscmp = qscmp, qscmp_anchor = qs_anchor)
+                  qs = qs, qscmp = qscmp, qscmp_anchor = qs_anchor,
+                  qs_veto = if (!is.null(qsv) && nrow(qsv) > 0)
+                              toupper(qsv$ticker[qsv$veto %in% TRUE])
+                            else character(0))
       app_dataLC(dat)
       status_msgLC(sprintf(
         "Loaded - %d proven cohort picks across %d quarterly cutoffs + %d live series across %d snapshots.",
@@ -7376,13 +7447,18 @@ server <- function(input, output, session) {
               setNames(suppressWarnings(as.Date(d$meta$delisted_date)), d$meta$ticker)
             else setNames(as.Date(character(0)), character(0))
     # proven-at-hz evidence (today's rank bin at the latest cutoff, this lag):
-    # the Shortlist rule that gates the board's buy section
+    # the SAME standard as the cohort record - top vingtile (bin 1) of a long
+    # id (eid <= 12) whose bin-1 cell wins >= 55% on >= 100 obs. Any-bin 55/100
+    # passes are NOT proven: 28 (id,bin) cells clear that pooled bar and the
+    # mid-table ones are multiple-comparisons noise, not validated edge.
     slh <- if (!is.null(d$sl) && nrow(d$sl) > 0 && "fut_lag" %in% names(d$sl))
              d$sl[d$sl$fut_lag == hz, , drop = FALSE]
            else NULL
     prov_of <- if (!is.null(slh) && nrow(slh) > 0)
                  setNames(!is.na(slh$bin_win_pct) & slh$bin_win_pct >= 55 &
-                          !is.na(slh$bin_n)       & slh$bin_n >= 100, slh$ticker)
+                          !is.na(slh$bin_n)       & slh$bin_n >= 100 &
+                          !is.na(slh$rank_bin)    & slh$rank_bin == 1 &
+                          !is.na(slh$eid)         & slh$eid <= 12, slh$ticker)
                else setNames(logical(0), character(0))
     wpct <- if (!is.null(slh) && nrow(slh) > 0)
               setNames(as.numeric(slh$bin_win_pct), slh$ticker) else numeric(0)
@@ -7526,9 +7602,33 @@ server <- function(input, output, session) {
                   setNames(suppressWarnings(as.numeric(d$qs$grade)), d$qs$ticker)
                 else setNames(numeric(0), character(0))
     buy_univ <- tickers[board_ok[tickers] & state_now[tickers] == "buy"]
-    bg_all   <- qs_grade[buy_univ]
-    qs_ok    <- buy_univ[!is.na(bg_all) & bg_all >= QS_MIN]
-    qs_buys  <- utils::head(qs_ok[order(-qs_grade[qs_ok], qs_ok)], QS_CAP)
+    # seed candidates: EVERY validated-board BUY. The grade RANKS the queue,
+    # it no longer gates it - one retroactive grade vintage cannot validate a
+    # 68 cut, and the hard gate collapsed the buy list to the 15 graded
+    # passers while 3x as many validated names sat invisible. Vetoed names
+    # stay out (a veto is an active thumbs-down; no grade is not). Ranking:
+    # graded names first by grade, ungraded after by signal persistence.
+    qs_ok    <- setdiff(buy_univ, if (!is.null(d$qs_veto)) d$qs_veto else character(0))
+    gr_rank  <- as.numeric(qs_grade[qs_ok]); gr_rank[is.na(gr_rank)] <- -Inf
+    pr_rank  <- as.numeric(runs_of[qs_ok]);  pr_rank[is.na(pr_rank)] <- 0
+    # concentration guard: within the ranked queue, keep at most
+    # QS_CLUSTER_CAP names per cluster id before the overall QS_CAP. One cluster
+    # model flipping its gate then moves at most that many seeds, not half the
+    # board. Names without a cluster id share one bucket. Existing tracked
+    # positions are never auto-pruned - the cap shapes what gets marked/seeded.
+    qs_rank <- qs_ok[order(-gr_rank, -pr_rank, qs_ok)]
+    id_seed <- if (!is.null(d$gate$id))
+                 setNames(suppressWarnings(as.integer(d$gate$id)),
+                          toupper(d$gate$ticker))
+               else setNames(integer(0), character(0))
+    if (!is.null(d$coh) && all(c("ticker", "id") %in% names(d$coh))) {
+      ex <- d$coh[!(toupper(d$coh$ticker) %in% names(id_seed)), c("ticker", "id")]
+      if (nrow(ex)) id_seed <- c(id_seed, setNames(
+        suppressWarnings(as.integer(ex$id)), toupper(ex$ticker)))
+    }
+    cid_seed <- id_seed[qs_rank]; cid_seed[is.na(cid_seed)] <- -1L
+    within_k <- stats::ave(seq_along(qs_rank), cid_seed, FUN = seq_along)
+    qs_buys  <- utils::head(qs_rank[within_k <= QS_CLUSTER_CAP], QS_CAP)
     list(M = M, dates = dates, tickers = tickers,
          entry_of = entry_of, exit_of = exit_of, reason_of = reason_of, hz = hz,
          state_now = state_now, why_now = why_now,
@@ -7914,6 +8014,15 @@ server <- function(input, output, session) {
     n_p   <- if (!is.null(d$qs)) sum(qs_g >= 68, na.rm = TRUE) else 0L
     qs_ran <- if (!is.null(d$qs) && nrow(d$qs) > 0 && "as_of" %in% names(d$qs))
                 suppressWarnings(max(as.Date(d$qs$as_of))) else as.Date(NA)
+    # expiry-cliff warning: every grade shares one as_of, so the orange + and
+    # this chart empty together QS_MAX_AGE_DAYS after that date. Surface the
+    # countdown as it nears so a slipped grading run does not silently blank the
+    # marks (board membership + seeding survive - they no longer gate on grade).
+    expires <- if (is.na(qs_ran)) as.Date(NA) else qs_ran + QS_MAX_AGE_DAYS
+    dleft   <- if (is.na(expires)) NA_integer_ else as.integer(expires - Sys.Date())
+    cliff <- if (!is.na(dleft) && dleft <= 30)
+               sprintf(" All %d grades share one as-of, so every orange + expires together on %s (%d days) unless a fresh grading run lands first.",
+                       n_g, format(expires), dleft) else ""
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
       sprintf(paste("Descriptive, not a walk-forward test: qualstream has a single grade run",
                     "(as of %s) applied across the whole window. The basket is qualstream's %d graded",
@@ -7922,8 +8031,8 @@ server <- function(input, output, session) {
                     "window). Membership is retroactive (today's buys applied backward), which flatters",
                     "both against SPY; the graded-vs-passed comparison is unaffected since both carry the",
                     "same tilt. One retroactive grade set cannot yet prove qualstream adds return; that",
-                    "needs several cadence cycles of point-in-time grades."),
-              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_g, n_p, format(d$qscmp_anchor)))
+                    "needs several cadence cycles of point-in-time grades.%s"),
+              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_g, n_p, format(d$qscmp_anchor), cliff))
   })
 
   # The full record: every company the model ever entered (cohort or ledger)

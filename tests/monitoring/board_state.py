@@ -16,9 +16,10 @@ import datetime as dt
 from dataclasses import dataclass
 
 LEDGER_EPOCH = dt.date(2026, 7, 3)
-QS_MIN = 68
+QS_MIN = 68           # orange-+ display threshold (app.R); grades no longer GATE anything here
 QS_CAP = 25
-DEFAULT_HZ = 12  # months; the board's default "hold length"
+DEFAULT_HZ = 12       # months; the board's default "hold length"
+QS_MAX_AGE_DAYS = 150  # grade freshness; twin of app.R QS_MAX_AGE_DAYS (one source per repo side)
 
 # --- the six inputs, same queries as app.R execute_LC (filtered to one horizon) ---
 SQL_LED = """
@@ -51,11 +52,15 @@ SQL_SL = """
         WHERE r.ticker_score IS NOT NULL AND r.ticker_score <> 0
     )
     SELECT DISTINCT ON (w.ticker) w.ticker,
+           w.wf_bin AS rank_bin, w.eid,
            ROUND(ps.hit_rate::numeric * 100, 1) AS bin_win_pct, ps.n_obs::int AS bin_n
     FROM wfbin w
     LEFT JOIN validation.walk_forward_pctile_summary ps
       ON ps.id = w.eid AND ps.fut_lag = %(hz)s AND ps.pctile_bin = w.wf_bin
-    ORDER BY w.ticker, ps.hit_rate DESC NULLS LAST
+    ORDER BY w.ticker,
+           (w.wf_bin = 1 AND w.eid <= 12 AND ps.hit_rate >= 0.55
+            AND ps.n_obs >= 100) DESC,
+           ps.hit_rate DESC NULLS LAST
 """
 SQL_COH = """
     WITH wfbin AS (
@@ -79,7 +84,8 @@ SQL_COH = """
 SQL_QS = """
     SELECT DISTINCT ON (ticker) ticker, overall AS grade
     FROM qual.ticker_scorecards
-    WHERE NOT veto AND rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - 150
+    WHERE NOT veto AND rubric_version = 'buy_decision_v1'
+      AND as_of >= CURRENT_DATE - %(qs_age)s
     ORDER BY ticker, as_of DESC, graded_at DESC
 """
 
@@ -109,13 +115,17 @@ def compute_board_state(conn, hz: int = DEFAULT_HZ, today: dt.date | None = None
     """Return {ticker: BoardName} for every board-universe ticker (cohort-entered
     or proven-at-hz). Ungraded names are included; the notifier filters to graded."""
     today = today or dt.date.today()
-    p = {"epoch": LEDGER_EPOCH, "hz": hz}
+    p = {"epoch": LEDGER_EPOCH, "hz": hz, "qs_age": QS_MAX_AGE_DAYS}
     with conn.cursor() as cur:
         led = _rows(cur, SQL_LED, p)                       # (d, ticker, action)
         gate = {t: g for t, g, _ in _rows(cur, SQL_GATE, p)}
         dl = {t: d for t, d in _rows(cur, SQL_META, p) if d is not None}
-        prov = {t: (bw is not None and bw >= 55 and bn is not None and bn >= 100)
-                for t, bw, bn in _rows(cur, SQL_SL, p)}
+        # proven = the cohort standard, not any-bin 55/100: top vingtile
+        # (bin 1) of a long id (eid <= 12) - mid-table cells that clear the
+        # pooled bar are multiple-comparisons noise, not validated edge.
+        prov = {t: (bw is not None and bw >= 55 and bn is not None and bn >= 100
+                    and rb == 1 and eid is not None and eid <= 12)
+                for t, rb, eid, bw, bn in _rows(cur, SQL_SL, p)}
         coh = _rows(cur, SQL_COH, p)                        # (d, ticker, id)
         qs = {t: float(g) for t, g in _rows(cur, SQL_QS, p) if g is not None}
 
@@ -255,9 +265,13 @@ def user_moves(conn) -> dict[str, str]:
 
 
 def graded_state(conn, hz: int = DEFAULT_HZ, today: dt.date | None = None) -> dict[str, BoardName]:
-    """Board-universe names that carry a qualstream grade >= threshold — the notifier's watch list."""
-    out = {t: b for t, b in compute_board_state(conn, hz, today).items()
-           if b.grade is not None and b.grade >= QS_MIN}
+    """The notifier's watch list: the FULL validated board, grades riding along.
+
+    The former ``grade >= QS_MIN`` filter made every ungraded name invisible to
+    the notifier regardless of model state (150 of 205 board names at the time),
+    hard-gating visibility on a threshold with a single retroactive vintage
+    behind it. Grades rank and decorate; they no longer gate."""
+    out = dict(compute_board_state(conn, hz, today).items())
     moves = user_moves(conn)
     if moves:
         from dataclasses import replace
