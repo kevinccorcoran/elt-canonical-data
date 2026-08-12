@@ -6768,6 +6768,15 @@ server <- function(input, output, session) {
     if (!length(sel)) { showNotification("Check one or more rows to resume.", type = "message"); return() }
     cur$end_date[sel] <- ""
     cur$sold_date[sel] <- ""; cur$sold_fraction[sel] <- NA_real_
+    # one-shot resume DEFERS FORWARD: re-stamp start_date to today so the single
+    # buy prices at the re-commit date, not a backfilled sat-out price. Resume
+    # means "I'm in now" - backdating a fill the user never made would fabricate
+    # a hindsight-selected entry. The epoch/strategy basis ignores stored start
+    # (tracks from the regime epoch regardless), so only the "since I added"
+    # personal view changes - and it becomes truthful. Recurring cadences keep
+    # their stored start; their next scheduled buy resumes per cadence + gate.
+    once <- sel[as.character(cur$cadence[sel]) == "once"]
+    if (length(once)) cur$start_date[once] <- format(Sys.Date())
     persist_positions(cur); lc_pos(cur)
     showNotification(sprintf("%s resumed - buying continues per cadence/model.",
                              paste(toupper(cur$ticker[sel]), collapse = ", ")), type = "message")
