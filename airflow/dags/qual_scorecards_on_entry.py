@@ -1,11 +1,18 @@
 """Daily entry-trigger buy-decision grader -> qual.ticker_scorecards.
 
 Grades a ticker qualstream the moment it becomes a standing buy, instead of
-waiting for the 4-monthly cadence (qual_scorecards_4monthly.py). It resolves the
-board's buy universe and, via `--regrade-after N`, grades ONLY names that lack a
-grade within the last N days -- i.e. names that just entered the buy list, plus
-any whose grade has gone stale. On a typical day that is zero or a handful of
-names, so cost is a few cents; the run exits green when there is nothing new.
+waiting for the retired 4-monthly cadence (qual_scorecards_4monthly.py). It
+resolves the board's buy universe PLUS open positions that dropped off the buy
+list (--include-holds: still held, still need a live mark) and, via
+`--regrade-after N`, grades ONLY names that lack a grade within the last N days
+-- i.e. names that just entered the buy list, plus any buy or hold whose grade
+has gone stale. On a typical day that is zero or a handful of names, so cost is
+a few cents; the run exits green when there is nothing new.
+
+--include-holds is UNCONDITIONAL here, not behind a Variable: the 4-monthly
+DAG's default-off QUAL_INCLUDE_HOLDS knob was never set in prod, so holds were
+silently graded by nothing (found in the 2026-08-13 gap analysis). Coverage of
+open positions must not be optional.
 
 Why daily/triggered rather than scheduled on a clock: buy-decision mode reads the
 CURRENT-state warehouse tables (ledger, gate, walk-forward), so its grade is only
@@ -16,9 +23,16 @@ stale universe. A name graded this way gets its scorecard as_of = its entry date
 which is exactly the point-in-time series needed to later validate whether the
 qualstream >= 68 buys actually outperform.
 
-The 4-monthly DAG stays for the periodic `--include-holds` prune pass over open
-positions; this DAG covers fresh-buy grading. Grades are upsert-idempotent per
-(ticker, as_of, rubric_version), so the two never collide.
+The 4-monthly DAG is RETIRED (paused in prod; file kept for reversibility) --
+this DAG now covers both fresh-buy grading and the holds refresh. Grades are
+upsert-idempotent per (ticker, as_of, rubric_version).
+
+Failures WhatsApp-ping Kevin via CallMeBot (same env contract as
+tests/utilities/notify.py: WHATSAPP_PHONE + CALLMEBOT_APIKEY). A missing env or
+a failed ping only logs -- it never re-fails the task. Rationale: the one prior
+Airflow grading failure (2026-08-05) sat unnoticed for 8 days; a dead grader
+means new buys silently enter ungraded and drop out of the board's orange-+
+filter and portfolio seeding.
 
 REGRADE_AFTER_DAYS default 90: inside a ~12-month hold a name is re-graded roughly
 every 90 days (entry, ~month 3, ~month 6, ~month 9), keeping the board's mark
@@ -31,8 +45,11 @@ the worker's python.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
+import urllib.parse
+import urllib.request
 from datetime import timedelta
 from pathlib import Path
 
@@ -40,6 +57,35 @@ import pendulum
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.bash import BashOperator
+
+log = logging.getLogger(__name__)
+
+
+def _notify_failure(context) -> None:
+    """WhatsApp-ping the grading failure via CallMeBot; never raise.
+
+    Env contract matches tests/utilities/notify.py (WHATSAPP_PHONE,
+    CALLMEBOT_APIKEY). Anything short of a sent message -- unset env, network
+    error, non-200 -- is logged and swallowed so the callback can never turn a
+    task failure into a second failure or mask the original log.
+    """
+    try:
+        phone = os.getenv("WHATSAPP_PHONE")
+        apikey = os.getenv("CALLMEBOT_APIKEY")
+        if not phone or not apikey:
+            log.warning("qual failure notify skipped: WHATSAPP_PHONE/CALLMEBOT_APIKEY not set")
+            return
+        ti = context.get("task_instance")
+        msg = "qual grading FAILED: %s.%s %s" % (
+            getattr(ti, "dag_id", "?"), getattr(ti, "task_id", "?"),
+            context.get("ds", "?"))
+        url = ("https://api.callmebot.com/whatsapp.php?phone=%s&text=%s&apikey=%s"
+               % (urllib.parse.quote(phone), urllib.parse.quote(msg),
+                  urllib.parse.quote(apikey)))
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            log.info("qual failure notify sent (HTTP %s)", resp.status)
+    except Exception:
+        log.exception("qual failure notify errored (swallowed)")
 
 QUALSTREAM_ROOT = Path(
     os.environ.get("QUALSTREAM_ROOT", Path(__file__).resolve().parents[1])
@@ -67,6 +113,8 @@ default_args = {
     # spend does not balloon; still keep retries low.
     "retries": 1,
     "retry_delay": timedelta(minutes=10),
+    # fires after the FINAL failed attempt; see _notify_failure for the contract
+    "on_failure_callback": _notify_failure,
 }
 
 with DAG(
@@ -85,12 +133,15 @@ with DAG(
         task_id="grade_new_buys",
         # data_interval_end | ds = the trigger date (today) for a triggered run ->
         # the point-in-time as_of. --regrade-after skips already-fresh names.
+        # --include-holds keeps open positions that left the buy list on the
+        # same 90d refresh (unconditional -- see module docstring).
         bash_command=(
             f'cd "{QUALSTREAM_ROOT}" && '
             f'export PYTHONPATH="{QUALSTREAM_ROOT}/src" && '
             f'python -m qualstream.runner --mode buy-decision '
             f'--as-of {{{{ data_interval_end | ds }}}} '
-            f'--regrade-after {REGRADE_AFTER_DAYS} --max-cost {MAX_COST}'
+            f'--regrade-after {REGRADE_AFTER_DAYS} --max-cost {MAX_COST} '
+            f'--include-holds'
         ),
         append_env=True,
     )

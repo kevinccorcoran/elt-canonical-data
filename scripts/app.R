@@ -7665,8 +7665,9 @@ server <- function(input, output, session) {
       # dormant; once grades exist the board marks the top-20 with an orange +.
       # qualstream grades: pinned to the LIVE series (buy_decision_v1 -- other
       # rubric_versions score on different scales and must not mix into one
-      # ranking) and bounded by freshness (150d ~ the 4-month cadence + slack)
-      # so an orange + can expire instead of living forever.
+      # ranking) and bounded by freshness (150d ~ the daily grader's 90d
+      # re-grade cadence + slack) so an orange + can expire instead of living
+      # forever if the grader dies.
       qs <- tryCatch(dbGetQuery(con, sprintf("
         SELECT DISTINCT ON (ticker) ticker,
                overall AS grade, as_of::text AS as_of,
@@ -8136,41 +8137,43 @@ server <- function(input, output, session) {
       if (length(m)) m else NA_character_ }, character(1)))
     sell_dt[is.na(sell_dt)] <- Sys.Date()
     sells <- sells[order(-as.numeric(sell_dt), sells)]
-    # checkpoint calendar: qualstream runs every 4 months (Jan/May/Sep 1, in
-    # sync with the qual_scorecards_4monthly DAG); the buy/prune window is the
-    # few days right AFTER the run, so grades inform the prune. Amber while
-    # the window is open, grey while waiting.
-    ck_all <- as.Date(sprintf("%d-%02d-01",
-                rep(as.integer(format(Sys.Date(), "%Y")) + c(-1, 0, 1), each = 3),
-                c(1, 5, 9)))
-    ck_last <- max(ck_all[ck_all <= Sys.Date()])
-    ck_next <- min(ck_all[ck_all > Sys.Date()])
-    ck_open <- Sys.Date() <= ck_last + 4
-    # Did qualstream ACTUALLY run? Read MAX(as_of) from the loaded grades rather
-    # than asserting it from the calendar -- a silently failed DAG must not be
-    # announced as a completed run.
+    # Grading cadence note. Continuous since 2026-08-13: the daily
+    # qual_scorecards_on_entry DAG grades a name the day it enters the buy list
+    # and re-grades standing buys AND holds past 90 days (--include-holds); the
+    # Jan/May/Sep 4-monthly checkpoint calendar is retired. Latest as_of is read
+    # from the loaded grades, never asserted from a calendar -- a silently dead
+    # grader must not be announced as running.
     qs_ran <- if (!is.null(d$qs) && nrow(d$qs) > 0 && "as_of" %in% names(d$qs))
                 suppressWarnings(max(as.Date(d$qs$as_of))) else as.Date(NA)
-    ck_note <- if (ck_open && !is.na(qs_ran) && qs_ran >= ck_last) div(
-        style = "color:#fbbf24; font-size:0.78rem; font-weight:700; margin:0.15rem 0 0.6rem;",
-        sprintf(paste("CHECKPOINT WINDOW OPEN - qualstream ran %s: prune",
-                      "(matured / vetoed / washed-out) and buy the new cohort by %s.",
-                      "Sells in the red section never wait for this window."),
-                format(qs_ran), format(ck_last + 4)))
-      else if (ck_open) div(
+    # dead-grader tripwire: a buy that entered >= 2 days ago must have a grade
+    # within 90d (entry day would have graded it; 90d staleness re-grades it).
+    # One that doesn't means the entry grader is dead -- or the name's fresh
+    # grade was a veto (d$qs is non-vetoed only), which deserves a look anyway.
+    ungr <- if (!is.na(qs_ran)) {
+      ent <- suppressWarnings(as.Date(dv$entry_of[buys_all]))
+      qs_asof <- if (!is.null(d$qs)) suppressWarnings(
+        setNames(as.Date(d$qs$as_of), toupper(d$qs$ticker))) else NULL
+      aof <- if (!is.null(qs_asof)) qs_asof[toupper(buys_all)] else rep(as.Date(NA), length(buys_all))
+      buys_all[!is.na(ent) & ent <= Sys.Date() - 2 &
+               (is.na(aof) | aof < Sys.Date() - 90)]
+    } else character(0)
+    ck_note <- tagList(
+      if (length(ungr)) div(
         style = "color:#f87171; font-size:0.78rem; font-weight:700; margin:0.15rem 0 0.6rem;",
-        sprintf(paste("CHECKPOINT WINDOW OPEN - but NO qualstream grades recorded",
-                      "for %s (latest grades: %s). Check the qual_scorecards_4monthly",
-                      "DAG before pruning; sells in the red section never wait."),
-                format(ck_last),
-                if (is.na(qs_ran)) "none" else format(qs_ran)))
-      else note_line(sprintf(paste(
-        "Next checkpoint: qualstream runs %s (in %d days); buy/prune window %s",
-        "to %s - act after the run so its grades inform the prune. Gate flips,",
-        "delistings and maturities in the sell section do not wait.%s"),
-        format(ck_next), as.integer(ck_next - Sys.Date()),
-        format(ck_next + 1), format(ck_next + 4),
-        if (is.na(qs_ran)) "" else sprintf(" Latest recorded grades: %s.", format(qs_ran))))
+        sprintf(paste("GRADING GAP - %d buy(s) entered 2+ days ago without a",
+                      "grade in the last 90 days: %s. The entry grader",
+                      "(qual_scorecards_on_entry) may be dead - check its last",
+                      "run - or the name was vetoed on re-grade."),
+                length(ungr), paste(ungr, collapse = ", "))),
+      note_line(sprintf(paste(
+        "Qualstream grading is continuous: a new buy is graded the day it",
+        "enters (daily run after the ledger rebuild); standing buys and holds",
+        "re-grade after 90 days, and a mark expires at %d days. Prune/adopt on",
+        "your own rhythm - grades are always current. Gate flips, delistings",
+        "and maturities in the sell section never wait.%s"),
+        QS_MAX_AGE_DAYS,
+        if (is.na(qs_ran)) " No grades recorded yet."
+        else sprintf(" Latest recorded grades: %s.", format(qs_ran)))))
     # honesty notes: where the record is thin, say so instead of implying signal
     gap_lo <- if (length(dv$coh_dates)) max(dv$coh_dates) else NULL
     led_lo <- min(d$led$d)

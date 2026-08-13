@@ -1,4 +1,16 @@
-"""Every-4-months buy-decision grader -> qual.ticker_scorecards (the 3838
+"""RETIRED 2026-08-13 (paused in prod; file kept for reversibility).
+
+The daily entry-trigger DAG (qual_scorecards_on_entry.py) now covers everything
+this cadence did and more: new buys are graded on entry, and standing buys AND
+holds re-grade after 90 days (--include-holds, unconditional). This DAG's
+QUAL_INCLUDE_HOLDS knob defaulted off and was never set, so its holds sweep
+never actually ran -- the 2026-08-13 gap analysis closed that by folding holds
+into the daily run. Unpausing this would only force-regrade names the daily DAG
+already keeps fresh. To revive: `airflow dags unpause qual_scorecards_4monthly`.
+
+Original docstring follows.
+
+Every-4-months buy-decision grader -> qual.ticker_scorecards (the 3838
 Lifecycle board reads the latest non-vetoed row per ticker).
 
 Runs 3x/year (Jan/May/Sep 1), a few days ahead of each 4-monthly buy/prune
