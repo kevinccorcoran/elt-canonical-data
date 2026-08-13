@@ -1080,8 +1080,25 @@ spy AS (SELECT d.d,
        FROM dates d)
 SELECT p.d::text AS d,
        ROUND((AVG(p.px/NULLIF(p.entry_px,0)-1)*100)::numeric,2) AS ledger_pct,
+       ROUND((AVG(p.px/NULLIF(p.entry_px,0)-1) FILTER (WHERE g.passed) * 100)::numeric,2) AS qs_pct,
        ROUND(((s.px/s.px0)-1)::numeric*100,2) AS spy_pct
 FROM px p JOIN spy s ON s.d=p.d
+LEFT JOIN LATERAL (
+    -- Point-in-time qualstream membership for the qs >= 68 subset line. Take the
+    -- latest grade KNOWN ON OR BEFORE this date (as_of <= d); passed = that grade
+    -- is non-vetoed AND overall >= 68. No grade yet, or a latest grade that is a
+    -- veto / < 68, means excluded. Consequences, both intended: the subset is
+    -- EMPTY before the first real grade (so qs_pct is NULL until ~Aug 5 and the
+    -- line simply does not draw), and a name is PRUNED from the subset the day its
+    -- latest grade turns veto/<68. Same entry_px (epoch snapshot) as ledger_pct,
+    -- so the two lines share the 'return since Jun' basis and are comparable. This
+    -- is honest forward validation, NOT the hindsight sketch: only grades that
+    -- existed by date d ever enter the average.
+    SELECT (sc.overall >= 68 AND NOT sc.veto) AS passed
+    FROM qual.ticker_scorecards sc
+    WHERE sc.ticker = p.ticker AND sc.rubric_version = 'buy_decision_v1'
+      AND sc.as_of <= p.d
+    ORDER BY sc.as_of DESC, sc.graded_at DESC LIMIT 1) g ON TRUE
 GROUP BY p.d, s.px, s.px0 ORDER BY p.d;", fixed = TRUE)
 
 # Lifecycle qualstream comparison: equal-weight return of the CURRENT BUYs that
@@ -6269,6 +6286,7 @@ server <- function(input, output, session) {
       if (is.null(fc_ledseries())) {
         ls0 <- dbGetQuery(con, FORECAST_LEDGER_SERIES_SQL)
         ls0$ledger_pct <- as.numeric(ls0$ledger_pct); ls0$spy_pct <- as.numeric(ls0$spy_pct)
+        if ("qs_pct" %in% names(ls0)) ls0$qs_pct <- as.numeric(ls0$qs_pct)
         fc_ledseries(ls0) }
       ledseries <- fc_ledseries()
       # live portfolio depends on anchor + id filter + hold length -> always re-run (~0.7s)
@@ -6497,6 +6515,12 @@ server <- function(input, output, session) {
     ls$d <- as.Date(ls$d)
     start <- min(ls$d); today <- max(ls$d)
     lend <- tail(ls$ledger_pct, 1); send <- tail(ls$spy_pct, 1)
+    # qs >= 68 subset: NULL before the first grade, so has_qs gates the whole line.
+    # q0 = first graded date (where the line begins), qi = last (the end label).
+    has_qs <- !is.null(ls$qs_pct) && any(!is.na(ls$qs_pct))
+    q0 <- if (has_qs) min(which(!is.na(ls$qs_pct))) else NA_integer_
+    qi <- if (has_qs) max(which(!is.na(ls$qs_pct))) else NA_integer_
+    qend <- if (has_qs) ls$qs_pct[qi] else NA_real_
     # Out-of-sample panel: show ONLY the realized ledger track. No typical-pace
     # projection - it borrowed the backtest portfolio's slope (not the ledger's),
     # and reading a down 6-week ledger as "heading up" was misleading.
@@ -6507,6 +6531,14 @@ server <- function(input, output, session) {
     fig <- add_trace(fig, x = ls$d, y = ls$ledger_pct, type = "scatter", mode = "lines", name = "Live log (signal basket)",
       legendgroup = "l", line = list(color = "#f59e0b", width = 3),
       hovertemplate = "Live log<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    # qs >= 68 subset of the SAME basket, point-in-time: appears only from the first
+    # grade date, prunes on veto/<68. connectgaps = FALSE so the pre-grade NULLs stay
+    # blank instead of drawing a phantom segment back to Jun.
+    if (has_qs)
+      fig <- add_trace(fig, x = ls$d, y = ls$qs_pct, type = "scatter", mode = "lines",
+        name = "Live log · qs ≥ 68 subset", legendgroup = "q", connectgaps = FALSE,
+        line = list(color = "#10b981", width = 3),
+        hovertemplate = "qs ≥ 68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     tdy <- format(today, "%Y-%m-%d")
     ann <- list(
       list(x = tdy, y = 1, yref = "paper", text = "today", showarrow = FALSE,
@@ -6515,8 +6547,16 @@ server <- function(input, output, session) {
            xanchor = "left", xshift = 6, font = list(color = "#f59e0b", size = 12)),
       list(x = tdy, y = send, text = sprintf("%+.1f%%", send), showarrow = FALSE,
            xanchor = "left", xshift = 6, font = list(color = "#3b82f6", size = 12)))
+    # qs end-value label + a small marker where the line begins, so the mid-chart
+    # start reads as "grades began here", not "qs was flat then jumped".
+    if (has_qs) ann <- c(ann, list(
+      list(x = tdy, y = qend, text = sprintf("%+.1f%%", qend), showarrow = FALSE,
+           xanchor = "left", xshift = 6, font = list(color = "#10b981", size = 12)),
+      list(x = format(ls$d[q0], "%Y-%m-%d"), y = ls$qs_pct[q0], text = "qs grades begin",
+           showarrow = TRUE, arrowhead = 0, ax = 0, ay = -22,
+           font = list(color = "#6ee7b7", size = 9), arrowcolor = "rgba(16,185,129,0.55)")))
     dark_layout(fig,
-      title = list(text = "REAL SCOREBOARD - the model's actual live picks vs Benchmark (since Jun 2026)",
+      title = list(text = "REAL SCOREBOARD - live picks vs qs ≥ 68 subset vs Benchmark (since Jun 2026)",
                    font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
