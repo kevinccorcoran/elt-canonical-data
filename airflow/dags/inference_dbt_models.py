@@ -394,6 +394,17 @@ with DAG(
         reset_dag_run=True,
     )
 
+    # --- trigger the daily entry-grader after the ledger + gate are rebuilt ---
+    # qualstream's buy-decision mode reads current-state tables, so it must run on
+    # today's fresh ledger/gate. Firing it here (not on a clock) guarantees a
+    # point-in-time grade the moment a name becomes a standing buy.
+    trigger_qual_entry = TriggerDagRunOperator(
+        task_id="trigger_qual_scorecards_on_entry",
+        trigger_dag_id="qual_scorecards_on_entry",
+        wait_for_completion=False,
+        reset_dag_run=True,
+    )
+
     # DEPENDENCIES
     dbt_run_feature_set >> batch_transition_scored >> [dbt_run_past_bucket_stats, dbt_run_future_bucket_stats] >> dbt_run_combined_bucket_stats
     dbt_run_feature_set >> dbt_run_lag_viability
@@ -403,4 +414,4 @@ with DAG(
     dbt_run_transition_confidence >> dbt_run_cell_score_extended
     [dbt_run_transition_scored_current, dbt_run_cell_score, dbt_run_pair_recommendation] >> dbt_run_ticker_pair_current
     [dbt_run_ticker_pair_current, dbt_run_cell_credibility] >> dbt_run_ticker_summary_current >> dbt_run_ticker_global_action_current >> trigger_inference_backtest
-    dbt_run_ticker_global_action_current >> dbt_run_prediction_ledger >> dbt_run_prediction_ledger_scored
+    dbt_run_ticker_global_action_current >> dbt_run_prediction_ledger >> dbt_run_prediction_ledger_scored >> trigger_qual_entry

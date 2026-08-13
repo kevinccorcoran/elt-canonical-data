@@ -1,0 +1,75 @@
+%%{init: {"theme":"dark", "flowchart": {"curve":"basis","nodeSpacing":50,"rankSpacing":58}, "themeVariables": {"fontFamily":"Helvetica, Arial, sans-serif","fontSize":"15px","lineColor":"#8892a6"}}}%%
+flowchart TB
+  subgraph EXT[External APIs]
+    direction LR
+    massive([Massive Data API]):::src
+    yahoo([Yahoo Finance API]):::src
+    delist([Polygon Delisted]):::src
+    claude([Claude API]):::llm
+  end
+
+  subgraph PROD[DigitalOcean Production &middot; Docker]
+    subgraph ORCH[Orchestration]
+      direction LR
+      airflow[Airflow]:::ctrl
+      ingest[Ingestion]:::ctrl
+      dbt[dbt Transforms]:::ctrl
+    end
+    subgraph PG[Managed PostgreSQL]
+      subgraph CANON[Canonical &middot; elt-canonical-data]
+        direction LR
+        raw[(raw)]:::canon --> cdm[(cdm)]:::canon
+      end
+      subgraph INF[Inference &middot; elt-inference-models]
+        features[(features)]:::inf
+        clustering[(clustering)]:::inf
+        analysis[(analysis)]:::inf
+        scoring[(scoring)]:::inf
+        serving[(serving)]:::inf
+        monitoring[(monitoring)]:::inf
+      end
+      valid[(validation)]:::valid
+      qual[(qual)]:::qual
+    end
+    shiny[Shiny Dashboard]:::dash
+  end
+  analysts([Analysts]):::src
+
+  massive --> ingest
+  yahoo --> ingest
+  delist --> ingest
+  airflow -. trigger .-> ingest
+  airflow -. trigger .-> dbt
+  ingest --> raw
+  cdm --> features
+  cdm --> clustering
+  clustering --> analysis --> clustering
+  features --> scoring
+  clustering --> scoring
+  scoring --> serving
+  clustering --> serving
+  serving --> monitoring
+  scoring -- backtest --> valid
+  valid -. credibility .-> serving
+  analysis -- tickers --> qual
+  claude -- LLM grade --> qual
+  serving --> shiny
+  monitoring --> shiny
+  qual -- qual grades --> shiny
+  shiny --> analysts
+
+  classDef src  fill:#1b2431,stroke:#7c8aa0,color:#c7d2e0;
+  classDef llm  fill:#161225,stroke:#a78bfa,color:#c9b8fb;
+  classDef ctrl fill:#1b2431,stroke:#9aa7bd,color:#dbe4f0;
+  classDef canon fill:#0e2735,stroke:#38bdf8,color:#8fd6f7;
+  classDef inf  fill:#12301b,stroke:#4ade80,color:#9ff0b8;
+  classDef valid fill:#33260a,stroke:#fbbf24,color:#fcd66b;
+  classDef qual fill:#241a3a,stroke:#a78bfa,color:#c9b8fb;
+  classDef dash fill:#2a1330,stroke:#e879f9,color:#f0abfc;
+
+  style EXT  fill:#12161f,stroke:#5b6678,color:#c7d2e0
+  style PROD fill:#0f1826,stroke:#38bdf8,stroke-width:2px,color:#9fd4f5
+  style ORCH fill:#141c28,stroke:#7c8aa0,color:#c7d2e0
+  style PG   fill:#131a2b,stroke:#818cf8,stroke-width:1.5px,color:#c7d2fe
+  style CANON fill:#0c1a26,stroke:#38bdf8,color:#8fd6f7
+  style INF  fill:#0d1f14,stroke:#4ade80,color:#9ff0b8
