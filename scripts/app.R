@@ -1066,18 +1066,53 @@ WITH first_snap AS (
                              WHERE prediction_date >= '__EPOCH__')
       AND global_action = 'BUY'
 ),
-entry_now AS (SELECT ic.ticker, ic.adj_close AS entry_px
-    FROM cdm.ingest_combined ic JOIN first_snap k ON k.ticker=ic.ticker AND k.entry_date=ic.date),
-dates AS (SELECT DISTINCT date AS d FROM cdm.ingest_combined
-    WHERE date >= (SELECT MIN(entry_date) FROM first_snap)
-      AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY') AND ticker='SPY'),
-px AS (SELECT en.ticker, d.d, en.entry_px,
-        (SELECT i.adj_close FROM cdm.ingest_combined i WHERE i.ticker=en.ticker AND i.date<=d.d ORDER BY i.date DESC LIMIT 1) AS px
-       FROM entry_now en CROSS JOIN dates d),
-spy AS (SELECT d.d,
-        (SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY' AND date<=d.d ORDER BY date DESC LIMIT 1) AS px,
-        (SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY' AND date=(SELECT MIN(entry_date) FROM first_snap)) AS px0
-       FROM dates d),
+maxd AS (SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'),
+mind AS (SELECT MIN(entry_date) AS d FROM first_snap),
+spy AS (
+    SELECT DISTINCT ON (i.date) i.date AS d, i.adj_close AS px,
+      (SELECT adj_close FROM cdm.ingest_combined WHERE ticker = 'SPY'
+       AND date >= (SELECT d FROM mind) ORDER BY date LIMIT 1) AS px0
+    FROM cdm.ingest_combined i
+    WHERE i.ticker = 'SPY' AND i.date >= (SELECT d FROM mind) AND i.date <= (SELECT d FROM maxd)
+    ORDER BY i.date, i.adj_close
+),
+grid AS (SELECT d FROM spy),
+-- One indexed range scan of the basket tickers' prices, then gap-fill onto the
+-- SPY calendar with last-observation-carried-forward (the COUNT-partition
+-- FIRST_VALUE trick). Same reshape that took LC_QS_COMPARE_SQL 617ms -> 40ms;
+-- the old per-(ticker,day) correlated as-of subqueries here measured 729ms vs
+-- 232ms for this shape, output verified row-identical. The LOCF matters: 7
+-- basket names have stopped trading (delisted/acquired) and must stay in the
+-- average at their last mark -- a plain price join would silently drop them
+-- from the day they go quiet (measured +0.07pp flattery by Aug 2026).
+led_slice AS (
+    SELECT DISTINCT ON (i.ticker, i.date) i.ticker, i.date AS d, i.adj_close AS px
+    FROM cdm.ingest_combined i
+    JOIN (SELECT DISTINCT ticker FROM first_snap) t ON t.ticker = i.ticker
+    WHERE i.date >= (SELECT d FROM mind) AND i.date <= (SELECT d FROM maxd)
+    ORDER BY i.ticker, i.date, i.adj_close
+),
+entry_now AS (
+    SELECT DISTINCT ON (s.ticker) s.ticker, s.px AS entry_px
+    FROM led_slice s JOIN first_snap k ON k.ticker = s.ticker AND k.entry_date = s.d
+    ORDER BY s.ticker
+),
+led_fill AS (
+    SELECT ticker, d, entry_px,
+           FIRST_VALUE(px) OVER (PARTITION BY ticker, grp ORDER BY d) AS px
+    FROM (
+        SELECT en.ticker, g.d, en.entry_px, sl.px,
+               COUNT(sl.px) OVER (PARTITION BY en.ticker ORDER BY g.d) AS grp
+        FROM entry_now en
+        CROSS JOIN grid g
+        LEFT JOIN led_slice sl ON sl.ticker = en.ticker AND sl.d = g.d
+    ) z
+),
+led AS (
+    SELECT d, AVG(px / NULLIF(entry_px, 0) - 1) AS ret
+    FROM led_fill WHERE entry_px > 0
+    GROUP BY d
+),
 qs_pick AS (
     -- The qs >= 68 PICKS universe: every ticker qualstream has ever scored >= 68
     -- (non-vetoed), with the date it FIRST did so. Independent of the frozen buy
@@ -1087,28 +1122,51 @@ qs_pick AS (
     FROM qual.ticker_scorecards
     WHERE rubric_version = 'buy_decision_v1' AND overall >= 68 AND NOT veto
     GROUP BY ticker),
+qs_slice AS (
+    SELECT DISTINCT ON (i.ticker, i.date) i.ticker, i.date AS d, i.adj_close AS px
+    FROM cdm.ingest_combined i JOIN qs_pick qp ON qp.ticker = i.ticker
+    WHERE i.date >= qp.first_pass AND i.date <= (SELECT d FROM maxd)
+    ORDER BY i.ticker, i.date, i.adj_close
+),
+qs_fill AS (
+    SELECT ticker, d, FIRST_VALUE(px) OVER (PARTITION BY ticker, grp ORDER BY d) AS px
+    FROM (
+        SELECT qp.ticker, g.d, sl.px,
+               COUNT(sl.px) OVER (PARTITION BY qp.ticker ORDER BY g.d) AS grp
+        FROM qs_pick qp
+        JOIN grid g ON g.d >= qp.first_pass
+        LEFT JOIN qs_slice sl ON sl.ticker = qp.ticker AND sl.d = g.d
+    ) z
+),
 qs_entry AS (
     -- Entry = first close ON/AFTER the first-pass date: you buy when the signal
     -- fires, never before. No backdating to Jun (the flaw in the first cut, which
     -- subset the frozen basket from its Jul entry and credited pre-grade gains).
-    SELECT qp.ticker, qp.first_pass,
-        (SELECT i.adj_close FROM cdm.ingest_combined i
-         WHERE i.ticker = qp.ticker AND i.date >= qp.first_pass ORDER BY i.date LIMIT 1) AS entry_px
-    FROM qs_pick qp),
+    SELECT DISTINCT ON (ticker) ticker, px AS entry_px
+    FROM qs_fill WHERE px IS NOT NULL
+    ORDER BY ticker, d
+),
+qs_grades AS (
+    -- point-in-time validity interval per grade row: a grade applies from its
+    -- as_of until the next grade's as_of (same-day regrades leave the superseded
+    -- row a zero-length interval). Joining a day into its interval = 'the latest
+    -- grade known by d', the rule the old per-cell subquery applied.
+    SELECT ticker, as_of, (overall >= 68 AND NOT veto) AS passed,
+           LEAD(as_of) OVER (PARTITION BY ticker ORDER BY as_of, graded_at) AS nxt
+    FROM qual.ticker_scorecards
+    WHERE rubric_version = 'buy_decision_v1'
+),
 qs_px AS (
-    -- Per (pick, date) from its first-pass date on: as-of price + point-in-time
-    -- membership. held = the latest grade known by d (as_of <= d) still passes;
-    -- a veto/<68 flip prunes it that day. A re-pass re-enters at the ORIGINAL
-    -- entry_px (rare; kept simple).
-    SELECT qe.ticker, d.d, qe.entry_px,
-        (SELECT i.adj_close FROM cdm.ingest_combined i
-         WHERE i.ticker = qe.ticker AND i.date <= d.d ORDER BY i.date DESC LIMIT 1) AS px,
-        (SELECT (sc.overall >= 68 AND NOT sc.veto)
-         FROM qual.ticker_scorecards sc
-         WHERE sc.ticker = qe.ticker AND sc.rubric_version = 'buy_decision_v1' AND sc.as_of <= d.d
-         ORDER BY sc.as_of DESC, sc.graded_at DESC LIMIT 1) AS held
-    FROM qs_entry qe JOIN dates d ON d.d >= qe.first_pass
-    WHERE qe.entry_px > 0),
+    -- Per (pick, date) from its first-pass date on: held = the latest grade known
+    -- by d still passes; a veto/<68 flip prunes it that day. A re-pass re-enters
+    -- at the ORIGINAL entry_px (rare; kept simple).
+    SELECT f.ticker, f.d, e.entry_px, f.px, g.passed AS held
+    FROM qs_fill f
+    JOIN qs_entry e ON e.ticker = f.ticker
+    LEFT JOIN qs_grades g ON g.ticker = f.ticker AND f.d >= g.as_of
+                         AND (g.nxt IS NULL OR f.d < g.nxt)
+    WHERE e.entry_px > 0
+),
 qs_series AS (
     -- Equal-weight return of the held qs picks, each since ITS OWN grade-date entry.
     -- NULL before the first grade date, so the line starts ~Aug 5 near 0% and grows
@@ -1116,13 +1174,14 @@ qs_series AS (
     -- 0%, nudging the average down the day it joins.
     SELECT d, ROUND((AVG(px/NULLIF(entry_px,0)-1) FILTER (WHERE held) * 100)::numeric, 2) AS qs_pct
     FROM qs_px GROUP BY d)
-SELECT p.d::text AS d,
-       ROUND((AVG(p.px/NULLIF(p.entry_px,0)-1)*100)::numeric,2) AS ledger_pct,
+SELECT sp.d::text AS d,
+       ROUND((l.ret * 100)::numeric, 2) AS ledger_pct,
        qs.qs_pct,
-       ROUND(((s.px/s.px0)-1)::numeric*100,2) AS spy_pct
-FROM px p JOIN spy s ON s.d=p.d
-LEFT JOIN qs_series qs ON qs.d = p.d
-GROUP BY p.d, s.px, s.px0, qs.qs_pct ORDER BY p.d;", fixed = TRUE)
+       ROUND(((sp.px / sp.px0) - 1)::numeric * 100, 2) AS spy_pct
+FROM spy sp
+LEFT JOIN led l ON l.d = sp.d
+LEFT JOIN qs_series qs ON qs.d = sp.d
+ORDER BY sp.d;", fixed = TRUE)
 
 # Lifecycle qualstream comparison: equal-weight return of the CURRENT BUYs that
 # qualstream graded (latest non-vetoed scorecard) vs the >= 68 subset vs SPY,
@@ -6701,6 +6760,10 @@ server <- function(input, output, session) {
   observeEvent(input$idsLC, {
     lc_board_ids_sel(if (is.null(input$idsLC)) character(0)
                      else as.character(input$idsLC))
+    # changing the cluster filter invalidates any clicked-chip overlay (the
+    # clicked name may not even be on the filtered board any more): reset the
+    # sketch to lines-only so the white line + pins never outlive the filter.
+    lc_hist_tk(NULL)
   }, ignoreNULL = FALSE, ignoreInit = TRUE)
   output$statusMessageLC <- renderText({ status_msgLC() })
 
@@ -8438,7 +8501,9 @@ server <- function(input, output, session) {
       cmp$graded_pct <- round(as.numeric(gvec[key]), 2)
       cmp$passed_pct <- round(as.numeric(pvec[key]), 2)
       n_over    <- c(g = length(unique(dsel$ticker)), p = length(unique(dpas$ticker)))
-      cl_suffix <- sprintf(" &middot; cluster %s", paste(sort(sel_ids), collapse = ", "))
+      # literal middle dot: plotly titles don't decode HTML entities (a raw
+      # '&middot;' rendered verbatim), unlike Shiny HTML() blocks
+      cl_suffix <- sprintf(" · cluster %s", paste(sort(sel_ids), collapse = ", "))
     }
     qs_g <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
     n_g  <- if (!is.null(n_over)) unname(n_over[["g"]])
