@@ -1113,15 +1113,43 @@ led AS (
     FROM led_fill WHERE entry_px > 0
     GROUP BY d
 ),
+qs_proven AS (
+    -- Board-parity gate for the qs line (frozen_gate_2026-08-13 instrument fix):
+    -- top rank slot (bin 1) of a LONG cluster (eid <= 12) whose bin-1 cell wins
+    -- >= 55% on >= 100 obs at fut_lag 12 -- the resolver/board's exact proven
+    -- rule, evaluated at the latest cutoff. Without this the line carried 7
+    -- names graded 2026-08-05 by the pre-parity-fix resolver (best-of-any-slot
+    -- drift; bins 2-7) that the board rule never selected and the fixed
+    -- resolver will never re-grade.
+    SELECT DISTINCT w.ticker FROM (
+        SELECT m.id AS eid, r.ticker,
+               NTILE(20) OVER (PARTITION BY m.id
+                 ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+               )::int AS wf_bin
+        FROM validation.walk_forward_ticker_rank r
+        JOIN (SELECT MAX(train_cutoff_date) AS cut
+              FROM validation.walk_forward_ticker_rank WHERE fut_lag = 12) mx
+          ON mx.cut = r.train_cutoff_date
+        JOIN validation.walk_forward_cluster_id_map m
+          ON m.train_cutoff_date = r.train_cutoff_date
+         AND m.cluster_id       = r.cluster_id
+        WHERE r.fut_lag = 12 AND r.ticker_score IS NOT NULL AND r.ticker_score <> 0
+    ) w
+    JOIN validation.walk_forward_pctile_summary ps
+      ON ps.id = w.eid AND ps.fut_lag = 12 AND ps.pctile_bin = w.wf_bin
+    WHERE w.wf_bin = 1 AND w.eid <= 12
+      AND ROUND(ps.hit_rate::numeric * 100, 1) >= 55 AND ps.n_obs >= 100
+),
 qs_pick AS (
-    -- The qs >= 68 PICKS universe: every ticker qualstream has ever scored >= 68
-    -- (non-vetoed), with the date it FIRST did so. Independent of the frozen buy
-    -- basket -- this judges the qs signal on its own, matching the HINDSIGHT green
-    -- line's 'all passers' population but made point-in-time honest below.
-    SELECT ticker, MIN(as_of) AS first_pass
-    FROM qual.ticker_scorecards
-    WHERE rubric_version = 'buy_decision_v1' AND overall >= 68 AND NOT veto
-    GROUP BY ticker),
+    -- The qs >= 68 PICKS universe: every BOARD-RULE ticker qualstream has scored
+    -- >= 68 (non-vetoed), with the date it FIRST did so. Proven-gated so the
+    -- line tests the frozen gate's graded output, not the drift-era loose
+    -- universe; membership follows the CURRENT evidence vintage by design.
+    SELECT s.ticker, MIN(s.as_of) AS first_pass
+    FROM qual.ticker_scorecards s
+    JOIN qs_proven p ON p.ticker = s.ticker
+    WHERE s.rubric_version = 'buy_decision_v1' AND s.overall >= 68 AND NOT s.veto
+    GROUP BY s.ticker),
 qs_slice AS (
     SELECT DISTINCT ON (i.ticker, i.date) i.ticker, i.date AS d, i.adj_close AS px
     FROM cdm.ingest_combined i JOIN qs_pick qp ON qp.ticker = i.ticker
@@ -1152,7 +1180,12 @@ qs_grades AS (
     -- row a zero-length interval). Joining a day into its interval = 'the latest
     -- grade known by d', the rule the old per-cell subquery applied.
     SELECT ticker, as_of, (overall >= 68 AND NOT veto) AS passed,
-           LEAD(as_of) OVER (PARTITION BY ticker ORDER BY as_of, graded_at) AS nxt
+           -- validity ends at the NEXT grade or 150d staleness, whichever comes
+           -- first (mirrors the board's QS freshness window): a name the grader
+           -- stops re-grading ages out instead of passing forever
+           LEAST(COALESCE(LEAD(as_of) OVER (PARTITION BY ticker
+                            ORDER BY as_of, graded_at), DATE '9999-12-31'),
+                 as_of + 150) AS valid_to
     FROM qual.ticker_scorecards
     WHERE rubric_version = 'buy_decision_v1'
 ),
@@ -1164,7 +1197,7 @@ qs_px AS (
     FROM qs_fill f
     JOIN qs_entry e ON e.ticker = f.ticker
     LEFT JOIN qs_grades g ON g.ticker = f.ticker AND f.d >= g.as_of
-                         AND (g.nxt IS NULL OR f.d < g.nxt)
+                         AND f.d < g.valid_to
     WHERE e.entry_px > 0
 ),
 qs_series AS (
