@@ -6516,7 +6516,7 @@ server <- function(input, output, session) {
       list(x = tdy, y = send, text = sprintf("%+.1f%%", send), showarrow = FALSE,
            xanchor = "left", xshift = 6, font = list(color = "#3b82f6", size = 12)))
     dark_layout(fig,
-      title = list(text = "Live log vs Benchmark, own clock (out-of-sample, since Jun 2026)",
+      title = list(text = "REAL SCOREBOARD - the model's actual live picks vs Benchmark (since Jun 2026)",
                    font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
@@ -8460,7 +8460,7 @@ server <- function(input, output, session) {
     if (!is.null(ap_yrange)) yax$range <- ap_yrange
     dark_layout(fig,
       title = list(text = paste0(sprintf(
-          "Does the qualstream marking help? Current buys vs benchmark (from %s, descriptive)",
+          "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s",
           format(d$qscmp_anchor, "%b %d")), ov_suffix, ap_suffix),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
