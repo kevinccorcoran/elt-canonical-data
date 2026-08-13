@@ -1188,6 +1188,43 @@ LEFT JOIN basket b ON b.d = sp.d
 GROUP BY sp.d, sp.px, sp.px0
 ORDER BY sp.d;"
 
+# Per-ticker daily detail behind LC_QS_COMPARE_SQL, used ONLY to re-aggregate the
+# HINDSIGHT sketch's graded/passed lines for a selected cluster without re-querying.
+# Same basket/entry/return shape (same optimized SPY-calendar slice) but WITHOUT the
+# per-date aggregate, plus the ticker's current cluster id. The id LEFT JOIN is
+# DISTINCT ON (ticker) so a name in >1 cluster can't double-count; a future off-board
+# name simply gets a NULL id and drops out only when a specific cluster is selected
+# (in the all-clusters/default view the sketch keeps reading the pre-aggregated
+# LC_QS_COMPARE_SQL, so those names still count there).
+LC_QS_COMPARE_DETAIL_SQL <- "
+WITH params AS (SELECT DATE '__ANCHOR__' AS start_d),
+scored AS (
+    SELECT DISTINCT ON (ticker) ticker, overall
+    FROM qual.ticker_scorecards
+    WHERE NOT veto
+      AND rubric_version = 'buy_decision_v1' AND as_of >= CURRENT_DATE - __QS_AGE__
+    ORDER BY ticker, as_of DESC, graded_at DESC
+),
+graded_buys AS (SELECT s.ticker, (s.overall >= 68) AS passed FROM scored s),
+maxd AS (SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'),
+slice AS (
+    SELECT i.ticker, i.date AS d, i.adj_close AS px
+    FROM cdm.ingest_combined i
+    JOIN graded_buys g ON g.ticker = i.ticker
+    WHERE i.date >= (SELECT start_d FROM params) AND i.date <= (SELECT d FROM maxd)
+),
+entry AS (SELECT DISTINCT ON (ticker) ticker, px AS entry_px FROM slice ORDER BY ticker, d)
+SELECT s.d::text AS d, s.ticker, gate.id, g.passed,
+       s.px / NULLIF(e.entry_px, 0) - 1 AS ret
+FROM slice s
+JOIN graded_buys g ON g.ticker = s.ticker
+JOIN entry e ON e.ticker = s.ticker
+LEFT JOIN (SELECT DISTINCT ON (ticker) ticker, id
+           FROM serving.return_cluster_ticker_global_action_current
+           ORDER BY ticker, id) gate ON gate.ticker = s.ticker
+WHERE e.entry_px > 0
+ORDER BY s.ticker, s.d;"
+
 # Personal DCA portfolio value + return vs a SAME-CASH-FLOW SPY benchmark.
 # __BUYS__ is a VALUES list of (ticker, buy_date, dollars) expanded in R from the
 # saved positions. Each buy fills at the first adj_close on/after its date; the
@@ -7764,8 +7801,22 @@ server <- function(input, output, session) {
                         gsub("__ANCHOR__", format(qs_anchor, "%Y-%m-%d"),
                              LC_QS_COMPARE_SQL, fixed = TRUE), fixed = TRUE)),
         c("graded_pct", "passed_pct", "spy_pct")), error = function(e) NULL)
+      # per-ticker detail (ticker, id, passed, ret) behind the same series, so the
+      # sketch can re-aggregate the graded/passed lines for a selected cluster live
+      # in R without a re-query. Same anchor/age substitution as qscmp above.
+      qscmp_detail <- tryCatch({
+        dd <- dbGetQuery(con, gsub("__QS_AGE__", QS_MAX_AGE_DAYS,
+                          gsub("__ANCHOR__", format(qs_anchor, "%Y-%m-%d"),
+                               LC_QS_COMPARE_DETAIL_SQL, fixed = TRUE), fixed = TRUE))
+        if (!is.null(dd) && nrow(dd)) {
+          dd$ret    <- suppressWarnings(as.numeric(dd$ret))
+          dd$id     <- suppressWarnings(as.integer(dd$id))
+          dd$passed <- as.logical(dd$passed)
+        }
+        dd
+      }, error = function(e) NULL)
       dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
-                  qs = qs, qscmp = qscmp, qscmp_anchor = qs_anchor,
+                  qs = qs, qscmp = qscmp, qscmp_detail = qscmp_detail, qscmp_anchor = qs_anchor,
                   qs_veto = if (!is.null(qsv) && nrow(qsv) > 0)
                               toupper(qsv$ticker[qsv$veto %in% TRUE])
                             else character(0))
@@ -8360,9 +8411,40 @@ server <- function(input, output, session) {
     if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
       return(empty_plot("No qualstream-graded names in range - run qualstream to populate this."))
     cmp$d <- as.Date(cmp$d)
+    # Cluster narrowing (live on the buy-cluster checkboxes): recompute the graded
+    # and passed lines for the selected cluster(s) from the per-ticker detail. SPY is
+    # cluster-independent and always stays. Rules honour the "UNCHECK TO NARROW"
+    # label: NULL (untouched) or all-available checked = full basket; a strict subset
+    # = that cluster only; empty = nothing.
+    sel_raw  <- lc_board_ids_sel()
+    sel_ids  <- suppressWarnings(as.integer(sel_raw))
+    avail_id <- tryCatch(lc_board_filter_ids(), error = function(e) integer(0))
+    det      <- d$qscmp_detail
+    cl_suffix <- ""; n_over <- NULL
+    if (!is.null(sel_raw) && length(sel_raw) == 0L)
+      return(empty_plot("No cluster selected - check a cluster to show the sketch."))
+    narrowed <- !is.null(sel_raw) && length(sel_ids) > 0 &&
+                !is.null(det) && nrow(det) > 0 && !setequal(sel_ids, avail_id)
+    if (narrowed) {
+      dsel <- det[!is.na(det$id) & det$id %in% sel_ids, , drop = FALSE]
+      if (nrow(dsel) == 0)
+        return(empty_plot(sprintf("No qualstream-graded names in cluster %s.",
+                                  paste(sort(sel_ids), collapse = ", "))))
+      key  <- as.character(cmp$d)
+      gvec <- tapply(dsel$ret, dsel$d, function(x) mean(x, na.rm = TRUE) * 100)
+      dpas <- dsel[dsel$passed %in% TRUE, , drop = FALSE]
+      pvec <- if (nrow(dpas)) tapply(dpas$ret, dpas$d, function(x) mean(x, na.rm = TRUE) * 100)
+              else numeric(0)
+      cmp$graded_pct <- round(as.numeric(gvec[key]), 2)
+      cmp$passed_pct <- round(as.numeric(pvec[key]), 2)
+      n_over    <- c(g = length(unique(dsel$ticker)), p = length(unique(dpas$ticker)))
+      cl_suffix <- sprintf(" &middot; cluster %s", paste(sort(sel_ids), collapse = ", "))
+    }
     qs_g <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
-    n_g  <- if (!is.null(d$qs)) length(d$qs$ticker) else 0L
-    n_p  <- if (!is.null(d$qs)) sum(qs_g >= 68, na.rm = TRUE) else 0L
+    n_g  <- if (!is.null(n_over)) unname(n_over[["g"]])
+            else if (!is.null(d$qs)) length(d$qs$ticker) else 0L
+    n_p  <- if (!is.null(n_over)) unname(n_over[["p"]])
+            else if (!is.null(d$qs)) sum(qs_g >= 68, na.rm = TRUE) else 0L
     has_pass <- any(!is.na(cmp$passed_pct))
     fig <- plot_ly()
     fig <- add_trace(fig, x = cmp$d, y = cmp$spy_pct, type = "scatter", mode = "lines",
@@ -8526,7 +8608,7 @@ server <- function(input, output, session) {
     dark_layout(fig,
       title = list(text = paste0(sprintf(
           "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s",
-          format(d$qscmp_anchor, "%b %d")), ov_suffix, ap_suffix),
+          format(d$qscmp_anchor, "%b %d")), cl_suffix, ov_suffix, ap_suffix),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
