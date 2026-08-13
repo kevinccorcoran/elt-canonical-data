@@ -1077,29 +1077,52 @@ px AS (SELECT en.ticker, d.d, en.entry_px,
 spy AS (SELECT d.d,
         (SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY' AND date<=d.d ORDER BY date DESC LIMIT 1) AS px,
         (SELECT adj_close FROM cdm.ingest_combined WHERE ticker='SPY' AND date=(SELECT MIN(entry_date) FROM first_snap)) AS px0
-       FROM dates d)
+       FROM dates d),
+qs_pick AS (
+    -- The qs >= 68 PICKS universe: every ticker qualstream has ever scored >= 68
+    -- (non-vetoed), with the date it FIRST did so. Independent of the frozen buy
+    -- basket -- this judges the qs signal on its own, matching the HINDSIGHT green
+    -- line's 'all passers' population but made point-in-time honest below.
+    SELECT ticker, MIN(as_of) AS first_pass
+    FROM qual.ticker_scorecards
+    WHERE rubric_version = 'buy_decision_v1' AND overall >= 68 AND NOT veto
+    GROUP BY ticker),
+qs_entry AS (
+    -- Entry = first close ON/AFTER the first-pass date: you buy when the signal
+    -- fires, never before. No backdating to Jun (the flaw in the first cut, which
+    -- subset the frozen basket from its Jul entry and credited pre-grade gains).
+    SELECT qp.ticker, qp.first_pass,
+        (SELECT i.adj_close FROM cdm.ingest_combined i
+         WHERE i.ticker = qp.ticker AND i.date >= qp.first_pass ORDER BY i.date LIMIT 1) AS entry_px
+    FROM qs_pick qp),
+qs_px AS (
+    -- Per (pick, date) from its first-pass date on: as-of price + point-in-time
+    -- membership. held = the latest grade known by d (as_of <= d) still passes;
+    -- a veto/<68 flip prunes it that day. A re-pass re-enters at the ORIGINAL
+    -- entry_px (rare; kept simple).
+    SELECT qe.ticker, d.d, qe.entry_px,
+        (SELECT i.adj_close FROM cdm.ingest_combined i
+         WHERE i.ticker = qe.ticker AND i.date <= d.d ORDER BY i.date DESC LIMIT 1) AS px,
+        (SELECT (sc.overall >= 68 AND NOT sc.veto)
+         FROM qual.ticker_scorecards sc
+         WHERE sc.ticker = qe.ticker AND sc.rubric_version = 'buy_decision_v1' AND sc.as_of <= d.d
+         ORDER BY sc.as_of DESC, sc.graded_at DESC LIMIT 1) AS held
+    FROM qs_entry qe JOIN dates d ON d.d >= qe.first_pass
+    WHERE qe.entry_px > 0),
+qs_series AS (
+    -- Equal-weight return of the held qs picks, each since ITS OWN grade-date entry.
+    -- NULL before the first grade date, so the line starts ~Aug 5 near 0% and grows
+    -- as new names pass. Mechanical artifact (intended): each new joiner enters at
+    -- 0%, nudging the average down the day it joins.
+    SELECT d, ROUND((AVG(px/NULLIF(entry_px,0)-1) FILTER (WHERE held) * 100)::numeric, 2) AS qs_pct
+    FROM qs_px GROUP BY d)
 SELECT p.d::text AS d,
        ROUND((AVG(p.px/NULLIF(p.entry_px,0)-1)*100)::numeric,2) AS ledger_pct,
-       ROUND((AVG(p.px/NULLIF(p.entry_px,0)-1) FILTER (WHERE g.passed) * 100)::numeric,2) AS qs_pct,
+       qs.qs_pct,
        ROUND(((s.px/s.px0)-1)::numeric*100,2) AS spy_pct
 FROM px p JOIN spy s ON s.d=p.d
-LEFT JOIN LATERAL (
-    -- Point-in-time qualstream membership for the qs >= 68 subset line. Take the
-    -- latest grade KNOWN ON OR BEFORE this date (as_of <= d); passed = that grade
-    -- is non-vetoed AND overall >= 68. No grade yet, or a latest grade that is a
-    -- veto / < 68, means excluded. Consequences, both intended: the subset is
-    -- EMPTY before the first real grade (so qs_pct is NULL until ~Aug 5 and the
-    -- line simply does not draw), and a name is PRUNED from the subset the day its
-    -- latest grade turns veto/<68. Same entry_px (epoch snapshot) as ledger_pct,
-    -- so the two lines share the 'return since Jun' basis and are comparable. This
-    -- is honest forward validation, NOT the hindsight sketch: only grades that
-    -- existed by date d ever enter the average.
-    SELECT (sc.overall >= 68 AND NOT sc.veto) AS passed
-    FROM qual.ticker_scorecards sc
-    WHERE sc.ticker = p.ticker AND sc.rubric_version = 'buy_decision_v1'
-      AND sc.as_of <= p.d
-    ORDER BY sc.as_of DESC, sc.graded_at DESC LIMIT 1) g ON TRUE
-GROUP BY p.d, s.px, s.px0 ORDER BY p.d;", fixed = TRUE)
+LEFT JOIN qs_series qs ON qs.d = p.d
+GROUP BY p.d, s.px, s.px0, qs.qs_pct ORDER BY p.d;", fixed = TRUE)
 
 # Lifecycle qualstream comparison: equal-weight return of the CURRENT BUYs that
 # qualstream graded (latest non-vetoed scorecard) vs the >= 68 subset vs SPY,
@@ -6515,7 +6538,7 @@ server <- function(input, output, session) {
     ls$d <- as.Date(ls$d)
     start <- min(ls$d); today <- max(ls$d)
     lend <- tail(ls$ledger_pct, 1); send <- tail(ls$spy_pct, 1)
-    # qs >= 68 subset: NULL before the first grade, so has_qs gates the whole line.
+    # qs >= 68 picks line: NULL before the first grade, so has_qs gates the whole line.
     # q0 = first graded date (where the line begins), qi = last (the end label).
     has_qs <- !is.null(ls$qs_pct) && any(!is.na(ls$qs_pct))
     q0 <- if (has_qs) min(which(!is.na(ls$qs_pct))) else NA_integer_
@@ -6531,14 +6554,16 @@ server <- function(input, output, session) {
     fig <- add_trace(fig, x = ls$d, y = ls$ledger_pct, type = "scatter", mode = "lines", name = "Live log (signal basket)",
       legendgroup = "l", line = list(color = "#f59e0b", width = 3),
       hovertemplate = "Live log<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
-    # qs >= 68 subset of the SAME basket, point-in-time: appears only from the first
-    # grade date, prunes on veto/<68. connectgaps = FALSE so the pre-grade NULLs stay
-    # blank instead of drawing a phantom segment back to Jun.
+    # qs >= 68 PICKS, point-in-time: each name enters at its own first-grade date at
+    # 0% (not backdated to Jun), prunes on veto/<68. Independent of the frozen basket,
+    # so its level is on a DIFFERENT (grade-date) basis than the orange/blue lines --
+    # read its slope vs them, not the absolute gap. connectgaps = FALSE so the
+    # pre-grade NULLs stay blank instead of drawing a phantom segment back to Jun.
     if (has_qs)
       fig <- add_trace(fig, x = ls$d, y = ls$qs_pct, type = "scatter", mode = "lines",
-        name = "Live log · qs ≥ 68 subset", legendgroup = "q", connectgaps = FALSE,
+        name = "qs ≥ 68 picks (from grade date)", legendgroup = "q", connectgaps = FALSE,
         line = list(color = "#10b981", width = 3),
-        hovertemplate = "qs ≥ 68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+        hovertemplate = "qs ≥ 68 picks<br>%{x|%b %d}: %{y:.1f}%<br>(since each name's own grade date)<extra></extra>")
     tdy <- format(today, "%Y-%m-%d")
     ann <- list(
       list(x = tdy, y = 1, yref = "paper", text = "today", showarrow = FALSE,
@@ -6556,7 +6581,7 @@ server <- function(input, output, session) {
            showarrow = TRUE, arrowhead = 0, ax = 0, ay = -22,
            font = list(color = "#6ee7b7", size = 9), arrowcolor = "rgba(16,185,129,0.55)")))
     dark_layout(fig,
-      title = list(text = "REAL SCOREBOARD - live picks vs qs ≥ 68 subset vs Benchmark (since Jun 2026)",
+      title = list(text = "REAL SCOREBOARD - live picks vs qs ≥ 68 picks vs Benchmark (since Jun 2026)",
                    font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
@@ -8333,7 +8358,7 @@ server <- function(input, output, session) {
     req(app_dataLC())
     d <- app_dataLC(); cmp <- d$qscmp
     if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
-      return(empty_plot("No qualstream-graded buys in range - run qualstream to populate this."))
+      return(empty_plot("No qualstream-graded names in range - run qualstream to populate this."))
     cmp$d <- as.Date(cmp$d)
     qs_g <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
     n_g  <- if (!is.null(d$qs)) length(d$qs$ticker) else 0L
@@ -8344,8 +8369,8 @@ server <- function(input, output, session) {
       name = "Benchmark (SPY)", line = list(color = "#3b82f6", width = 2.5),
       hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     fig <- add_trace(fig, x = cmp$d, y = cmp$graded_pct, type = "scatter", mode = "lines",
-      name = sprintf("Graded buys (%d)", n_g), line = list(color = "#f59e0b", width = 3),
-      hovertemplate = "Graded buys<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+      name = sprintf("All graded names (%d)", n_g), line = list(color = "#f59e0b", width = 3),
+      hovertemplate = "All graded names<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     if (has_pass)
       fig <- add_trace(fig, x = cmp$d, y = cmp$passed_pct, type = "scatter", mode = "lines",
         name = sprintf("Passed qualstream ≥ 68 (%d)", n_p),
