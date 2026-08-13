@@ -7940,19 +7940,40 @@ server <- function(input, output, session) {
   # cluster-id filter (mirrors the Predictions tab): checkboxes for the ids
   # present in the loaded universe, all on by default; uncheck to narrow. The
   # board and the table both read input$idsLC.
+  # Cluster ids the board id filter offers: only clusters that actually hold a
+  # current BUY - NOT the whole gate universe (d$gate$id U d$coh$id), where a
+  # checkbox for a buy-less cluster just narrows the board to nothing. When
+  # "show qualstream + picks only" is on, scope further to clusters whose buy
+  # passed qualstream (>= QS_MIN), matching the board's orange-+ set. Buy-scoped
+  # by design (Kevin's ask); holds/sells contribute no ids.
+  lc_board_filter_ids <- reactive({
+    d <- app_dataLC(); dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    if (is.null(d) || is.null(d$gate$id) || is.null(dv) || is.null(dv$state_now))
+      return(integer(0))
+    buys <- toupper(dv$tickers[dv$board_ok[dv$tickers] %in% TRUE &
+                               dv$state_now[dv$tickers] %in% "buy"])
+    if (isTRUE(input$lcBuyQSonly) && length(dv$qs_grade)) {
+      g <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+      buys <- buys[!is.na(g[buys]) & g[buys] >= QS_MIN]
+    }
+    id_of <- setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker))
+    sort(unique(stats::na.omit(id_of[buys])))
+  })
+
   output$idFilterLC <- renderUI({
-    d <- app_dataLC(); if (is.null(d) || is.null(d$gate$id)) return(NULL)
-    ids <- sort(unique(stats::na.omit(c(
-      as.integer(d$gate$id),
-      if (!is.null(d$coh)) as.integer(d$coh$id)))))
-    if (!length(ids)) return(NULL)
+    ids <- lc_board_filter_ids()
+    if (!length(ids)) return(div(
+      style = "color:#64748b; font-size:0.72rem; margin-bottom:0.6rem;",
+      if (isTRUE(input$lcBuyQSonly))
+        "No qualstream-passing buys - no clusters to filter by."
+      else "No current buys - no clusters to filter by."))
     # survive data refreshes: rebuild with the user's stored selection (isolate,
     # same pattern as lcChartFilter) instead of resetting to all-on
     sel_now <- isolate(lc_board_ids_sel())
     sel_use <- if (is.null(sel_now)) as.character(ids)
                else intersect(sel_now, as.character(ids))
     div(style = "margin-bottom:0.6rem;",
-      tags$label("Cluster id filter (all on; uncheck to narrow)",
+      tags$label("Cluster id filter (buy clusters; uncheck to narrow)",
                  style = paste0("color:#94a3b8; font-size:0.72rem; font-weight:600;",
                                 " display:block; margin-bottom:0.3rem;")),
       checkboxGroupInput("idsLC", NULL, choices = ids, selected = sel_use, inline = TRUE),
@@ -7963,10 +7984,10 @@ server <- function(input, output, session) {
                    style = "padding:2px 10px; font-size:0.72rem;"))
   })
   observeEvent(input$idsAllLC, {
-    d <- app_dataLC(); req(d)
-    # as.character: checkbox values are strings client-side; integers can miss
+    # select-all = every buy cluster the filter offers (same scope as the list),
+    # not the whole gate universe. as.character: checkbox values are strings.
     updateCheckboxGroupInput(session, "idsLC",
-      selected = as.character(sort(unique(stats::na.omit(as.integer(d$gate$id))))))
+      selected = as.character(lc_board_filter_ids()))
   })
   observeEvent(input$idsNoneLC, {
     updateCheckboxGroupInput(session, "idsLC", selected = character(0))
