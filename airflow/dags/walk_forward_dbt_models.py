@@ -34,7 +34,14 @@ with DAG(
         "cascade so the daily pipeline stays fast."
     ),
     schedule_interval="0 6 1 * *",
-    start_date=pendulum.today("UTC").subtract(days=1),
+    # STATIC start_date. The old pendulum.today().subtract(days=1) re-evaluated
+    # on every parse, so with catchup=False the just-completed monthly interval
+    # always began before the ever-advancing start_date and the scheduler
+    # dropped it: this "monthly" DAG had ZERO scheduled runs ever (every run in
+    # history was a manual trigger, and the Aug-1 2026 activation never fired).
+    # Anchored at the 2026-08-01 boundary so the first auto-run is Sep-1 06:00Z
+    # with no surprise catch-up run at deploy time.
+    start_date=pendulum.datetime(2026, 8, 1, tz="UTC"),
     catchup=False,
     is_paused_upon_creation=False,
     max_active_runs=1,
