@@ -8328,7 +8328,7 @@ server <- function(input, output, session) {
           fig <- add_pin(fig, car, "square-open", cc, 12) }
         cur <- ev[ev$kind == "current", , drop = FALSE]
         if (nrow(cur))                                   # neutral grey, matches its flag
-          fig <- add_pin(fig, cur, "circle-open", "#94a3b8", 15)
+          fig <- add_pin(fig, cur, "circle-open", "#cbd5e1", 15)
         # flag declutter: pack labels into stack levels so none ever overlap.
         # Each label's width is estimated in x-day units from its text (against a
         # conservative plot width, so we err toward MORE separation); each pin
@@ -8355,7 +8355,9 @@ server <- function(input, output, session) {
         ann <- lapply(seq_len(nrow(ev)), function(i) {
           cc <- col_of[[ev$state[i]]]; if (is.null(cc)) cc <- "#e2e8f0"
           # "current" is a status tag, not a state - flag it neutral grey
-          if (ev$kind[i] == "current") cc <- "#94a3b8"
+          # (bright slate, not dim: the current pin often sits on the white
+          # overlay line, where a dim grey label washes out illegibly)
+          if (ev$kind[i] == "current") cc <- "#cbd5e1"
           txt <- if (ev$kind[i] == "current" && ev$state[i] == "sell")
                    sprintf("%s SELL now", ov$tk)
                  else sprintf("%s %s", ov$tk, lab_of[[ev$kind[i]]])
@@ -8369,7 +8371,9 @@ server <- function(input, output, session) {
                xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
                showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
                ax = 0, ay = -34 - 24 * lvl[i], font = list(color = cc, size = 10),
-               bgcolor = "rgba(2,6,23,0.75)", bordercolor = cc, borderwidth = 1, borderpad = 2)
+               # OPAQUE bg: a semi-transparent box lets the bright overlay/basket
+               # lines bleed through and wash the label out (Kevin's screenshot)
+               bgcolor = "#0b1220", bordercolor = cc, borderwidth = 1, borderpad = 2)
         })
       }
       ov_suffix <- sprintf(" · %s overlaid", ov$tk)
@@ -8416,7 +8420,9 @@ server <- function(input, output, session) {
              xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
              ax = 0, ay = -20 - 18 * lvl[i], font = list(color = cc, size = 10),
-             bgcolor = "rgba(2,6,23,0.78)", bordercolor = cc, borderwidth = 1,
+             # OPAQUE bg (see single-overlay flags): the green basket line the
+             # dots ride bleeds through a transparent box and washes the label
+             bgcolor = "#0b1220", bordercolor = cc, borderwidth = 1,
              borderpad = 2)
       })
       ann <- c(ann, apann)
