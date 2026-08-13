@@ -38,6 +38,16 @@ REGRADE_AFTER_DAYS default 90: inside a ~12-month hold a name is re-graded rough
 every 90 days (entry, ~month 3, ~month 6, ~month 9), keeping the board's mark
 fresh well under the 150-day expiry the 3838 board applies.
 
+QUAL_ENTRY_MAX_NAMES caps names per run. Typical days grade zero or a handful, so
+the cap does nothing -- it exists for the REFRESH WAVE. Every grade in the book
+currently shares one as_of (2026-08-05), so the entire book goes stale on the
+SAME day (2026-11-04 at 90 days) and lands as one ~55-name run. Uncapped on Opus
+5 x QG_SAMPLES=3 that is ~$13, which blows QUAL_ENTRY_MAX_COST and the task fails
+having graded nothing. Capped, the wave drains over a few days: names graded
+today become fresh and drop out, so the next run picks up the next batch. The
+resolver orders never-graded names first, so a genuine new entrant is never stuck
+behind a routine refresh.
+
 Deploy: same as qual_scorecards_4monthly.py -- copy into the host-side dags folder
 (bind-mounted to /opt/airflow/dags). Needs QUALSTREAM_ROOT, DATABASE_URL and
 ANTHROPIC_API_KEY in the container env, and anthropic + psycopg + python-dotenv in
@@ -97,6 +107,13 @@ MAX_COST = Variable.get("QUAL_ENTRY_MAX_COST", default_var="3")
 if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", MAX_COST or ""):
     raise ValueError(f"QUAL_ENTRY_MAX_COST must be a number, got: {MAX_COST!r}")
 
+# Max names per run. See the module docstring: this is the refresh-wave brake,
+# not a daily-cost knob. Keep MAX_NAMES x QG_SAMPLES x per-name cost under
+# QUAL_ENTRY_MAX_COST or the guard aborts the run before it starts.
+MAX_NAMES = Variable.get("QUAL_ENTRY_MAX_NAMES", default_var="8")
+if not re.fullmatch(r"[0-9]+", MAX_NAMES or ""):
+    raise ValueError(f"QUAL_ENTRY_MAX_NAMES must be an integer, got: {MAX_NAMES!r}")
+
 # A name graded within this many days is considered fresh and skipped. Governs
 # both "grade new entrants" (never graded -> always graded) and the in-hold
 # refresh cadence. Kept under the board's 150-day grade-expiry so a held name's
@@ -141,7 +158,7 @@ with DAG(
             f'python -m qualstream.runner --mode buy-decision '
             f'--as-of {{{{ data_interval_end | ds }}}} '
             f'--regrade-after {REGRADE_AFTER_DAYS} --max-cost {MAX_COST} '
-            f'--include-holds'
+            f'--limit {MAX_NAMES} --include-holds'
         ),
         append_env=True,
     )
