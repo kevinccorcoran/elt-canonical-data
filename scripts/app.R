@@ -8624,7 +8624,7 @@ server <- function(input, output, session) {
       for (s in c("buy", "hold", "sell")) {
         sub <- ap[ap$state == s, , drop = FALSE]; if (!nrow(sub)) next
         fig <- add_markers(fig, x = sub$date, y = sub$ret, showlegend = FALSE,
-          marker = list(color = apcol[[s]], size = 9, symbol = "circle",
+          marker = list(color = apcol[[s]], size = 6, symbol = "circle",
                         line = list(color = "#0b1220", width = 1)),
           text = sprintf("%s %s %s · %+.1f%% own", sub$ticker, toupper(s),
                          format(sub$date), sub$own),
@@ -8635,7 +8635,7 @@ server <- function(input, output, session) {
       xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
       span <- max(xhi - xlo, 1)
       labw <- vapply(seq_len(nrow(ap)), function(i)
-        (nchar(ap$ticker[i]) * 7 + 20) * span / 760, numeric(1))
+        (nchar(ap$ticker[i]) * 6 + 16) * span / 760, numeric(1))
       lvl <- integer(nrow(ap)); MAXLVL <- 8L
       for (i in seq_len(nrow(ap))) {
         L <- 0L
@@ -8652,18 +8652,19 @@ server <- function(input, output, session) {
              text = ap$ticker[i],
              xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
-             ax = 0, ay = -20 - 18 * lvl[i], font = list(color = cc, size = 10),
+             ax = 0, ay = -11 - 13 * lvl[i], font = list(color = cc, size = 9),
              # OPAQUE bg (see single-overlay flags): the green basket line the
              # dots ride bleeds through a transparent box and washes the label
              bgcolor = "#0b1220", bordercolor = cc, borderwidth = 1,
-             borderpad = 2)
+             borderpad = 1)
       })
       ann <- c(ann, apann)
       # headroom so the upward label stack never clips against the plot top
+      # (tuned to the tighter 13px-per-level stack + size-9 labels above)
       yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
       ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
-      ap_yrange <- c(ylo - yspan * 0.06, yhi + yspan * (0.10 + 0.12 * max(lvl)))
+      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.085 * max(lvl)))
       ap_suffix <- " · all qualstream pins"
     }
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
