@@ -332,6 +332,72 @@ gated_expand_schedule <- function(positions, led = NULL, today = Sys.Date(),
   out
 }
 
+# Collapse a ticker's daily model-state row (derivedLC$M, values ""/buy/hold/
+# sell across derivedLC$dates) into transition points: one row per state CHANGE
+# with its date. This is the click-through history - entry, every buy<->hold
+# flip, sells, and re-entries - reconstructed from the model's own walk.
+lc_state_trail <- function(M, dates, tk) {
+  if (is.null(M) || is.null(dates) || !(tk %in% rownames(M))) return(NULL)
+  row <- M[tk, ]
+  keep <- which(nzchar(row))
+  if (!length(keep)) return(NULL)
+  st <- unname(row[keep]); dt <- as.character(dates[keep])
+  chg <- c(TRUE, st[-1] != st[-length(st)])
+  data.frame(date = dt[chg], state = st[chg], stringsAsFactors = FALSE)
+}
+
+# Board-faithful trail for the chart overlay: same collapse as lc_state_trail,
+# but post-epoch buy/hold days are REPLAYED under the chip rule (monthly
+# majority x proven slot) instead of the raw per-run walk. The raw walk marks
+# an open name "hold" on any run day it is merely absent from - exactly the
+# one-off-day demotion state_now smooths away - so raw pins flip buy<->hold on
+# noise and can even END contradicting the chip. The cohort era (pre-epoch,
+# sparse cutoffs) passes through verbatim. Maturity/delist sells are re-dated
+# to the TRUE exit (entry + hz months, or the delist date) instead of the
+# later walk snapshot that first observed them - the same ref_d correction
+# state_now applies; a recorded SELL action (gate flip) keeps its date.
+# now_state is the chip's state today: the final open day is pinned to it so
+# trail and chip agree.
+lc_board_trail <- function(M, dates, tk, led, epoch, prov, now_state,
+                           hz = 12L, dl_d = as.Date(NA)) {
+  if (is.null(M) || is.null(dates) || !(tk %in% rownames(M))) return(NULL)
+  row <- M[tk, ]; dd <- as.Date(dates)
+  run_d <- sort(unique(as.Date(led$d)))
+  tkb <- sort(as.Date(led$d[led$ticker == tk & led$global_action == "BUY"]))
+  open_j <- which(row %in% c("buy", "hold") & dd >= as.Date(epoch))
+  for (j in open_j) {
+    D <- dd[j]
+    bw <- tkb[tkb >= D - 30 & tkb <= D]
+    # mirrors derivedLC share_of: denominator starts at the name's first BUY
+    # inside the window, so a fresh entrant (1/1) qualifies on day one
+    maj <- length(bw) > 0 &&
+      length(bw) / max(1, sum(run_d >= min(bw) & run_d <= D)) >= 0.5
+    row[j] <- if (maj && isTRUE(prov)) "buy" else "hold"
+  }
+  if (length(open_j) && !is.na(now_state) && now_state %in% c("buy", "hold"))
+    row[open_j[length(open_j)]] <- now_state
+  keep <- which(nzchar(row))
+  if (!length(keep)) return(NULL)
+  st <- unname(row[keep]); dt <- as.character(dates[keep])
+  chg <- c(TRUE, st[-1] != st[-length(st)])
+  out <- data.frame(date = dt[chg], state = st[chg], stringsAsFactors = FALSE)
+  idx <- seq_len(nrow(out))
+  for (k in idx[out$state == "sell"]) {
+    wd <- out$date[k]
+    if (any(led$ticker == tk & led$global_action == "SELL" &
+            as.character(led$d) == wd)) next          # gate flip: real that day
+    ps <- idx[out$state == "sell" & idx < k]          # this run's entry = first
+    lo <- if (length(ps)) max(ps) else 0L             # buy after the prior sell
+    eb <- idx[out$state == "buy" & idx > lo & idx < k]
+    if (!length(eb)) next
+    mat_d <- seq(as.Date(out$date[min(eb)]), by = paste(hz, "months"),
+                 length.out = 2)[2]
+    true_d <- suppressWarnings(min(c(mat_d, dl_d), na.rm = TRUE))
+    if (is.finite(true_d) && true_d < as.Date(wd)) out$date[k] <- format(true_d)
+  }
+  out
+}
+
 latest_qa_run <- function(history) {
   if (is.null(history) || nrow(history) == 0) return(NULL)
   latest_ts <- max(history$run_at)
@@ -1037,10 +1103,14 @@ scored AS (
     ORDER BY ticker, as_of DESC, graded_at DESC
 ),
 graded_buys AS (
-    -- basket = qualstream's graded standing-rec buys (the board's buy list = the
-    -- orange + universe), NOT the current-day gate snapshot. The snapshot dropped
-    -- names reading SKIP today that are still board buys (monthly-majority standing
-    -- recs), so the green line undercounted the + (10 shown vs 15 on the board).
+    -- basket = EVERY non-vetoed name qualstream graded in the age window, NOT the
+    -- current-day gate snapshot and NOT the board's buy list. This is deliberately
+    -- broader than the board's ~15 standing buys: the descriptive question here is
+    -- whether, across everything qualstream graded, the >= 68 names outran the rest,
+    -- so a passer that is on hold / matured / off the board still belongs in the
+    -- basket. The board's orange + is the intersection of THIS >= 68 set with the
+    -- live buy column (7 of the 15 passers, at time of writing) - a strict subset,
+    -- not an equality.
     SELECT s.ticker, (s.overall >= 68) AS passed FROM scored s
 ),
 maxd AS (SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'),
@@ -2186,6 +2256,7 @@ ui <- navbarPage(
                      selected = "columns", inline = TRUE),
         checkboxInput("lcBuyQSonly", "Show qualstream + picks only (all columns)", value = TRUE),
         checkboxInput("lcBuyStats", "Buy: also show win% · runs", value = FALSE),
+        checkboxInput("lcAllPins", "Chart: show all qualstream pins (every entry, no lines)", value = FALSE),
         checkboxInput("lcAutoRefresh", "Auto-refresh board (every 20s)", value = FALSE),
         uiOutput("idFilterLC")
       )),
@@ -2194,7 +2265,7 @@ ui <- navbarPage(
         # the primary artifact, so it sits at the top; benchmark + portfolio follow.
         uiOutput("boardLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1.1rem;"),
-        # Benchmark comparison: does the qualstream + add return?
+        # Benchmark comparison (+ click a board chip to overlay that ticker here).
         plotlyOutput("qsCompareLC", height = "380px"),
         uiOutput("qsCompareNoteLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1rem;"),
@@ -6521,6 +6592,9 @@ server <- function(input, output, session) {
   # user's narrowing): NULL = never touched -> all on; character(0) = a real
   # deselect-all -> empty board. Reset on (re)connect / env switch only.
   lc_board_ids_sel <- reactiveVal(NULL)
+  # clicked board chip -> the ticker whose lifecycle timeline is shown below the
+  # board (NULL = nothing selected, panel hidden). Set by the lcBoardClick observer.
+  lc_hist_tk   <- reactiveVal(NULL)
   lcAutoTick   <- reactiveVal(0)
   observeEvent(input$idsLC, {
     lc_board_ids_sel(if (is.null(input$idsLC)) character(0)
@@ -6786,6 +6860,19 @@ server <- function(input, output, session) {
   observeEvent(input$lcPosClear, {
     persist_positions(portfolio_empty()); lc_pos(portfolio_empty())
     persist_dismissed(character(0)); lc_dismissed(character(0))
+  })
+
+  # Click a board chip -> select it for the lifecycle timeline panel below the
+  # board (the price line + pins). Both board layouts route their chips through
+  # lcBoardClick, so this covers columns and stacked.
+  observeEvent(input$lcBoardClick, {
+    tk <- toupper(trimws(as.character(input$lcBoardClick)))
+    if (!nzchar(tk)) return()
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    if (is.null(dv) || is.null(dv$M)) {
+      showNotification("Generate the board first to see the timeline.", type = "message"); return() }
+    # click the same chip again to clear the overlay; a different chip switches it
+    if (identical(lc_hist_tk(), tk)) lc_hist_tk(NULL) else lc_hist_tk(tk)
   })
 
   # Tracking basis for MODEL rows (radio next to the chart filter): "epoch" =
@@ -7122,6 +7209,204 @@ server <- function(input, output, session) {
   # Holdings chart. SPY (same cash) benchmark is ALWAYS drawn. Which holdings
   # show = the by-id filter above (all on by default) intersected with any
   # checked rows (check rows to isolate). Each line starts at 0% on its first buy.
+  # ---- Ticker overlay for the benchmark chart (click a board chip) -----------
+  # Builds the clicked ticker's own return line - rebased to 0% at the SAME
+  # anchor as the benchmark basket lines - plus its lifecycle events
+  # (qualstream-approved, buy, hold, sell, current) as flag-pins to drop onto
+  # output$qsCompareLC. Each event carries growth since the previous event: the
+  # stock's own move AND its move vs SPY (pp). Read-only; nothing is written.
+  lc_overlay <- reactive({
+    tk <- lc_hist_tk(); if (is.null(tk) || !nzchar(tk)) return(NULL)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    if (is.null(dv) || is.null(dv$M)) return(NULL)
+    d <- app_dataLC()
+    anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
+    if (is.na(anchor)) return(NULL)
+    now_state <- if (!is.null(dv$state_now) && tk %in% names(dv$state_now))
+                   dv$state_now[[tk]] else NA_character_
+    prov_tk <- !is.null(dv$prov_of) && tk %in% names(dv$prov_of) &&
+               isTRUE(dv$prov_of[[tk]])
+    dl_tk <- if (!is.null(d$meta) && nrow(d$meta) > 0 &&
+                 any(toupper(d$meta$ticker) == tk))
+               suppressWarnings(as.Date(
+                 d$meta$delisted_date[toupper(d$meta$ticker) == tk][1]))
+             else as.Date(NA)
+    # chip-rule replay, NOT the raw walk - pins must tell the board's story
+    trail <- lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
+                            prov_tk, now_state, dv$hz, dl_tk)  # data.frame(date,state) | NULL
+    ev <- data.frame(date = character(0), kind = character(0), state = character(0),
+                     stringsAsFactors = FALSE)
+    if (!is.null(trail) && nrow(trail))
+      ev <- rbind(ev, data.frame(date = trail$date, kind = trail$state,
+                                 state = trail$state, stringsAsFactors = FALSE))
+    # position carried into the window: the entry predates the chart anchor, so
+    # without this pin a later in-window SELL would show with no BUY before it
+    pre <- if (!is.null(trail) && nrow(trail))
+             trail[as.Date(trail$date) < anchor, , drop = FALSE] else NULL
+    if (!is.null(pre) && nrow(pre) && pre$state[nrow(pre)] %in% c("buy", "hold"))
+      ev <- rbind(ev, data.frame(date = format(anchor), kind = "carried",
+                                 state = pre$state[nrow(pre)], stringsAsFactors = FALSE))
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    tkq <- gsub("'", "''", tk, fixed = TRUE)
+    # qualstream approval. qa_d = first as_of the grade crossed QS_MIN; fg_d =
+    # first as_of the name was graded at all. When the FIRST grade already passed
+    # (fg_d == qa_d -- always the case while a single vintage exists), approval
+    # belongs ON the buy pin as an orange + (like the board chip), NOT a separate
+    # pin: we take qualstream to have graded the name at entry. Only a genuine
+    # LATER crossing (graded below QS_MIN first, above it at a later vintage,
+    # fg_d < qa_d) earns its own marker at the crossing date.
+    qa <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT (MIN(as_of) FILTER (WHERE overall >= %d AND NOT veto))::text AS qa_d,
+              MIN(as_of)::text AS fg_d
+       FROM qual.ticker_scorecards
+       WHERE upper(ticker)=upper('%s') AND rubric_version='buy_decision_v1'",
+      QS_MIN, tkq)), error = function(e) NULL)
+    qa_d <- if (!is.null(qa) && nrow(qa) && !is.na(qa$qa_d[1]) && nzchar(qa$qa_d[1])) qa$qa_d[1] else NA_character_
+    fg_d <- if (!is.null(qa) && nrow(qa) && !is.na(qa$fg_d[1]) && nzchar(qa$fg_d[1])) qa$fg_d[1] else NA_character_
+    qs_passed  <- !is.na(qa_d)
+    qs_crossed <- qs_passed && !is.na(fg_d) && as.Date(fg_d) < as.Date(qa_d)
+    if (qs_crossed)
+      ev <- rbind(ev, data.frame(date = qa_d, kind = "qualstream",
+                                 state = "qualstream", stringsAsFactors = FALSE))
+    if (!nrow(ev)) return(list(tk = tk, no_events = TRUE))
+    # prices from min(anchor, first event) so a pre-anchor entry still prices the
+    # first in-window pin's growth; the LINE is rebased at the anchor bar below.
+    px_start <- min(anchor, min(as.Date(ev$date)))
+    px <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT ticker, date::text AS d, adj_close AS px
+       FROM cdm.ingest_combined
+       WHERE ticker IN ('%s','SPY') AND date >= '%s'
+         AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
+       ORDER BY ticker, date", tkq, format(px_start))), error = function(e) NULL)
+    if (is.null(px) || !nrow(px)) return(list(tk = tk, no_price = TRUE, hist = trail))
+    tkr <- px[toupper(px$ticker) == tk, , drop = FALSE]
+    spy <- px[px$ticker == "SPY", , drop = FALSE]
+    if (!nrow(tkr)) return(list(tk = tk, no_price = TRUE, hist = trail))
+    tkr$d <- as.Date(tkr$d); tkr$px <- as.numeric(tkr$px); tkr <- tkr[order(tkr$d), , drop = FALSE]
+    if (nrow(spy)) { spy$d <- as.Date(spy$d); spy$px <- as.numeric(spy$px)
+                     spy <- spy[order(spy$d), , drop = FALSE] }
+    asof <- function(df, dd) { s <- df[df$d <= dd, , drop = FALSE]
+      if (!nrow(s)) NA_real_ else s$px[nrow(s)] }
+    # rebase to 0% at the anchor bar (first bar on/after the anchor) so the line
+    # sits on the same axis as the basket lines.
+    base_tk  <- asof(tkr, anchor); if (is.na(base_tk)) base_tk <- tkr$px[1]
+    if (is.na(base_tk) || base_tk == 0) return(list(tk = tk, no_price = TRUE, hist = trail))
+    base_spy <- if (nrow(spy)) { b <- asof(spy, anchor); if (is.na(b)) spy$px[1] else b } else NA_real_
+    tkr$ret <- (tkr$px / base_tk - 1) * 100
+    # current pin at the latest bar while open (buy/hold) - or a red "SELL now"
+    # when the chip says exit (gate-flip-today lives only in state_now, never M)
+    last_d <- max(tkr$d)
+    if (!is.na(now_state) && now_state %in% c("buy", "hold", "sell"))
+      ev <- rbind(ev, data.frame(date = format(last_d), kind = "current",
+                                 state = now_state, stringsAsFactors = FALSE))
+    ev$date <- as.Date(ev$date)
+    ev <- ev[order(ev$date), , drop = FALSE]
+    ev <- ev[!duplicated(paste(ev$date, ev$kind)), , drop = FALSE]
+    ev$px  <- vapply(ev$date, function(dd) asof(tkr, dd), numeric(1))
+    ev$spx <- vapply(ev$date, function(dd) if (nrow(spy)) asof(spy, dd) else NA_real_, numeric(1))
+    ev$ret <- (ev$px / base_tk - 1) * 100
+    pv <- c(NA_real_, ev$px[-nrow(ev)]); spv <- c(NA_real_, ev$spx[-nrow(ev)])
+    ev$own   <- (ev$px / pv - 1) * 100
+    ev$vsspy <- ev$own - (ev$spx / spv - 1) * 100
+    line   <- tkr[tkr$d >= anchor, c("d", "ret"), drop = FALSE]   # basket lines start at anchor
+    ev_win <- ev[ev$date >= anchor, , drop = FALSE]               # pins shown in-window
+    # user manual-move note, if this name is a tracked position
+    p <- tryCatch(lc_pos(), error = function(e) NULL); note <- NA_character_
+    if (!is.null(p) && nrow(p)) {
+      r <- p[toupper(p$ticker) == tk, , drop = FALSE]
+      if (nrow(r)) {
+        edd <- as.character(r$end_date[1]); sdd <- as.character(r$sold_date[1])
+        if (!is.na(sdd) && nzchar(sdd)) note <- sprintf("you sold %s by hand on %s", tk, sdd)
+        else if (!is.na(edd) && nzchar(edd)) note <- sprintf("you paused %s by hand on %s", tk, edd)
+      }
+    }
+    list(tk = tk, line = line, ev = ev_win, note = note, passed = qs_passed,
+         hist = trail)
+  })
+
+  # "Show all pins" mode: every qualstream-pass board ticker's buy/hold/sell
+  # entries as pins on the benchmark chart - NO lines, label = ticker only,
+  # colored by state (buy green / hold orange / sell red). Reuses the exact
+  # board-faithful trail + as-of price rebase the single-ticker overlay uses,
+  # just mapped over the whole orange-+ set at once. Off unless input$lcAllPins.
+  lc_all_pins <- reactive({
+    if (!isTRUE(input$lcAllPins)) return(NULL)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    if (is.null(dv) || is.null(dv$M)) return(NULL)
+    d <- app_dataLC()
+    anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
+    if (is.na(anchor)) return(NULL)
+    # qs-pass board names: grade >= QS_MIN AND on the board in a live state
+    grade_u <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+    tks <- dv$tickers[
+      dv$board_ok[dv$tickers] %in% TRUE &
+      dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
+      !is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN]
+    # focus mode: while a chip is selected, hide the overview so its single-ticker
+    # overlay renders clean (the pre-all-pins behavior). Clear the chip to return.
+    clk <- lc_hist_tk()
+    if (!is.null(clk) && nzchar(clk)) return(NULL)
+    if (!length(tks)) return(NULL)
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
+    px <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
+       WHERE ticker IN (%s,'SPY') AND date >= '%s'
+         AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
+       ORDER BY ticker, date", inlist, format(anchor))), error = function(e) NULL)
+    if (is.null(px) || !nrow(px)) return(NULL)
+    px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
+    asof <- function(df, dd) { s <- df[df$d <= dd, , drop = FALSE]
+      if (!nrow(s)) NA_real_ else s$px[nrow(s)] }
+    # pins ride the passed-qualstream (green) line so the y-axis stays put and the
+    # basket lines never compress: a pin's y is that line's value on the event
+    # date, not the name's own return (kept as `own` for the hover). Fall back to
+    # the graded (orange) line if nothing in range passed >= 68.
+    ln <- d$qscmp
+    ln <- if (!is.null(ln) && nrow(ln)) data.frame(d = as.Date(ln$d),
+        y = suppressWarnings(as.numeric(
+              if ("passed_pct" %in% names(ln) && any(!is.na(ln$passed_pct)))
+                ln$passed_pct else ln$graded_pct)),
+        stringsAsFactors = FALSE) else NULL
+    if (!is.null(ln)) { ln <- ln[!is.na(ln$d) & !is.na(ln$y), , drop = FALSE]
+                        ln <- ln[order(ln$d), , drop = FALSE] }
+    if (is.null(ln) || !nrow(ln)) return(NULL)
+    line_at <- function(dd) { s <- ln$y[ln$d <= dd]
+      if (!length(s)) ln$y[1] else s[length(s)] }
+    out <- list()
+    for (tk in tks) {
+      tkr <- px[toupper(px$ticker) == toupper(tk), , drop = FALSE]
+      if (!nrow(tkr)) next
+      tkr <- tkr[order(tkr$d), , drop = FALSE]
+      base_tk <- asof(tkr, anchor); if (is.na(base_tk)) base_tk <- tkr$px[1]
+      if (is.na(base_tk) || base_tk == 0) next
+      now_state <- if (tk %in% names(dv$state_now)) dv$state_now[[tk]] else NA_character_
+      prov_tk <- !is.null(dv$prov_of) && tk %in% names(dv$prov_of) && isTRUE(dv$prov_of[[tk]])
+      dl_tk <- if (!is.null(d$meta) && nrow(d$meta) > 0 && any(toupper(d$meta$ticker) == toupper(tk)))
+                 suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == toupper(tk)][1]))
+               else as.Date(NA)
+      trail <- lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
+                              prov_tk, now_state, dv$hz, dl_tk)
+      if (is.null(trail) || !nrow(trail)) next
+      ev <- data.frame(date = as.Date(trail$date), state = trail$state,
+                       stringsAsFactors = FALSE)
+      ev <- ev[ev$date >= anchor & ev$state %in% c("buy", "hold", "sell"), , drop = FALSE]
+      if (!nrow(ev)) next
+      ev$own <- vapply(ev$date, function(dd) { p <- asof(tkr, dd)
+        if (is.na(p)) NA_real_ else (p / base_tk - 1) * 100 }, numeric(1))
+      ev <- ev[!is.na(ev$own), , drop = FALSE]; if (!nrow(ev)) next
+      ev$ret <- vapply(ev$date, line_at, numeric(1))   # sit on the green line
+      ev$ticker <- toupper(tk)
+      out[[tk]] <- ev
+    }
+    if (!length(out)) return(NULL)
+    do.call(rbind, out)
+  })
+
   output$lcPortfolioChart <- renderPlotly({
     p <- lc_pos()
     if (is.null(p) || nrow(p) == 0)
@@ -7715,12 +8000,16 @@ server <- function(input, output, session) {
       setNames(suppressWarnings(as.numeric(d$qs$grade)), d$qs$ticker)
     else setNames(numeric(0), character(0))
     qs_top <- character(0)
+    # chips are click-through: clicking one opens its state-history timeline
+    # (lcBoardClick -> the modal observer). cursor + title signal it.
     chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE) span(
       style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
                              " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
-                             " margin:2px; font-size:0.78rem; font-weight:600;%s"),
+                             " margin:2px; font-size:0.78rem; font-weight:600; cursor:pointer;%s"),
                       colr, colr, colr,
                       if (strike) " text-decoration:line-through; opacity:0.7;" else ""),
+      onclick = sprintf("Shiny.setInputValue('lcBoardClick','%s',{priority:'event'})", t),
+      title = "click for state history",
       if (nzchar(note)) sprintf("%s · %s", t, note) else t,
       if (plus) span("+", style = "color:#fb923c; font-weight:800; margin-left:3px;"))
     section <- function(title, colr, ticks, notes, max_h = NA) {
@@ -7998,18 +8287,161 @@ server <- function(input, output, session) {
         name = sprintf("Passed qualstream ≥ 68 (%d)", n_p),
         line = list(color = "#10b981", width = 3),
         hovertemplate = "Passed ≥68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    # Clicked-chip overlay: the ticker's own return line (white, on top) + a
+    # flag-pin at each lifecycle event, colored by state, labelled "<TK> BUY"
+    # etc. with the growth-since-previous-pin (own %, and pp vs SPY) on hover.
+    ov <- tryCatch(lc_overlay(), error = function(e) NULL)
+    ann <- list(); ov_suffix <- ""; ap_yrange <- NULL
+    if (!is.null(ov) && !is.null(ov$line) && nrow(ov$line)) {
+      col_of <- c(buy = "#34d399", hold = "#fbbf24", sell = "#f87171",
+                  qualstream = "#a78bfa", current = "#e2e8f0")
+      lab_of <- c(buy = "BUY", hold = "HOLD", sell = "SELL",
+                  qualstream = "QS+", current = "current", carried = "carried")
+      fig <- add_trace(fig, x = ov$line$d, y = ov$line$ret, type = "scatter", mode = "lines",
+        name = ov$tk, line = list(color = "#f8fafc", width = 2.4),
+        hovertemplate = paste0(ov$tk, "<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
+      ev <- ov$ev
+      if (!is.null(ev) && nrow(ev)) {
+        lbl <- function(sub) sprintf("%s<br>%s since prev · %s vs SPY",
+            ifelse(sub$kind == "carried",
+              sprintf("%s carried in as %s (entered before the window)",
+                      ov$tk, toupper(sub$state)),
+              sprintf("%s %s %s", ov$tk, toupper(sub$state), format(sub$date))),
+            ifelse(is.na(sub$own), "-", sprintf("%+.1f%%", sub$own)),
+            ifelse(is.na(sub$vsspy), "-", sprintf("%+.1fpp", sub$vsspy)))
+        add_pin <- function(fig, sub, symbol, color, size = 11) {
+          if (!nrow(sub)) return(fig)
+          add_markers(fig, x = sub$date, y = sub$ret, showlegend = FALSE,
+            marker = list(color = color, size = size, symbol = symbol,
+                          line = list(color = "#0b1220", width = 1)),
+            text = lbl(sub), hovertemplate = "%{text}<extra></extra>")
+        }
+        fig <- add_pin(fig, ev[ev$kind == "buy", , drop = FALSE],  "circle", col_of[["buy"]])
+        fig <- add_pin(fig, ev[ev$kind == "hold", , drop = FALSE], "circle", col_of[["hold"]])
+        fig <- add_pin(fig, ev[ev$kind == "sell", , drop = FALSE], "circle", col_of[["sell"]])
+        fig <- add_pin(fig, ev[ev$kind == "qualstream", , drop = FALSE], "diamond", col_of[["qualstream"]], 13)
+        car <- ev[ev$kind == "carried", , drop = FALSE]
+        if (nrow(car)) { cc <- col_of[[car$state[1]]]; if (is.null(cc)) cc <- "#e2e8f0"
+          fig <- add_pin(fig, car, "square-open", cc, 12) }
+        cur <- ev[ev$kind == "current", , drop = FALSE]
+        if (nrow(cur))                                   # neutral grey, matches its flag
+          fig <- add_pin(fig, cur, "circle-open", "#94a3b8", 15)
+        # flag declutter: pack labels into stack levels so none ever overlap.
+        # Each label's width is estimated in x-day units from its text (against a
+        # conservative plot width, so we err toward MORE separation); each pin
+        # takes the lowest level whose already-placed labels don't horizontally
+        # collide. Levels are 24px apart (> label height) so different levels
+        # can never touch. Right-edge labels anchor rightward to stay in-plot.
+        xs <- as.numeric(ev$date)
+        xhi <- as.numeric(max(ov$line$d))
+        span <- max(xhi - as.numeric(min(ov$line$d)), 1)
+        labw <- vapply(seq_len(nrow(ev)), function(i) {
+          n <- nchar(ov$tk) + nchar(lab_of[[ev$kind[i]]]) + 3
+          (n * 7 + 20) * span / 760                     # full label width, x-days
+        }, numeric(1))
+        lvl <- integer(nrow(ev)); MAXLVL <- 6L
+        for (i in seq_len(nrow(ev))) {
+          L <- 0L
+          while (L < MAXLVL) {
+            prev <- which(seq_len(nrow(ev)) < i & lvl == L)
+            if (!any(abs(xs[i] - xs[prev]) < (labw[i] + labw[prev]) / 2)) break
+            L <- L + 1L
+          }
+          lvl[i] <- L
+        }
+        ann <- lapply(seq_len(nrow(ev)), function(i) {
+          cc <- col_of[[ev$state[i]]]; if (is.null(cc)) cc <- "#e2e8f0"
+          # "current" is a status tag, not a state - flag it neutral grey
+          if (ev$kind[i] == "current") cc <- "#94a3b8"
+          txt <- if (ev$kind[i] == "current" && ev$state[i] == "sell")
+                   sprintf("%s SELL now", ov$tk)
+                 else sprintf("%s %s", ov$tk, lab_of[[ev$kind[i]]])
+          # orange qualstream + rides ON the buy pin when the name passed >= 68
+          # (assume-graded-at-entry) - the board chip shows the same +. A separate
+          # QS+ diamond only appears for a genuine later threshold crossing.
+          if (ev$kind[i] == "buy" && isTRUE(ov$passed))
+            txt <- paste0(txt, " <span style='color:#fb923c'>+</span>")
+          list(x = format(ev$date[i]), y = ev$ret[i], xref = "x", yref = "y",
+               text = txt,
+               xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
+               showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
+               ax = 0, ay = -34 - 24 * lvl[i], font = list(color = cc, size = 10),
+               bgcolor = "rgba(2,6,23,0.75)", bordercolor = cc, borderwidth = 1, borderpad = 2)
+        })
+      }
+      ov_suffix <- sprintf(" · %s overlaid", ov$tk)
+    }
+    # all-pins mode: every qs-pass ticker's buy/hold/sell entries as colored,
+    # ticker-labelled dots (NO lines). Appends to ann so labels join the packer.
+    ap_suffix <- ""
+    ap <- tryCatch(lc_all_pins(), error = function(e) NULL)
+    if (!is.null(ap) && nrow(ap)) {
+      apcol <- c(buy = "#34d399", hold = "#f59e0b", sell = "#f87171")
+      # dots ride the green passed-qualstream line (y set in lc_all_pins), colored
+      # by state; hover carries the name's OWN return. Ticker labels are packed
+      # into stack levels with short stems - the same flag style as the
+      # single-ticker overlay, readable now that every dot sits in the line's band.
+      for (s in c("buy", "hold", "sell")) {
+        sub <- ap[ap$state == s, , drop = FALSE]; if (!nrow(sub)) next
+        fig <- add_markers(fig, x = sub$date, y = sub$ret, showlegend = FALSE,
+          marker = list(color = apcol[[s]], size = 9, symbol = "circle",
+                        line = list(color = "#0b1220", width = 1)),
+          text = sprintf("%s %s %s · %+.1f%% own", sub$ticker, toupper(s),
+                         format(sub$date), sub$own),
+          hovertemplate = "%{text}<extra></extra>")
+      }
+      ap <- ap[order(ap$date), , drop = FALSE]
+      xs <- as.numeric(ap$date)
+      xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
+      span <- max(xhi - xlo, 1)
+      labw <- vapply(seq_len(nrow(ap)), function(i)
+        (nchar(ap$ticker[i]) * 7 + 20) * span / 760, numeric(1))
+      lvl <- integer(nrow(ap)); MAXLVL <- 8L
+      for (i in seq_len(nrow(ap))) {
+        L <- 0L
+        while (L < MAXLVL) {
+          prev <- which(seq_len(nrow(ap)) < i & lvl == L)
+          if (!any(abs(xs[i] - xs[prev]) < (labw[i] + labw[prev]) / 2)) break
+          L <- L + 1L
+        }
+        lvl[i] <- L
+      }
+      apann <- lapply(seq_len(nrow(ap)), function(i) {
+        cc <- apcol[[ap$state[i]]]
+        list(x = format(ap$date[i]), y = ap$ret[i], xref = "x", yref = "y",
+             text = ap$ticker[i],
+             xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
+             showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
+             ax = 0, ay = -20 - 18 * lvl[i], font = list(color = cc, size = 10),
+             bgcolor = "rgba(2,6,23,0.78)", bordercolor = cc, borderwidth = 1,
+             borderpad = 2)
+      })
+      ann <- c(ann, apann)
+      # headroom so the upward label stack never clips against the plot top
+      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
+      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, 0), na.rm = TRUE)
+      yspan <- max(yhi - ylo, 1)
+      ap_yrange <- c(ylo - yspan * 0.06, yhi + yspan * (0.10 + 0.12 * max(lvl)))
+      ap_suffix <- " · all qualstream pins"
+    }
+    yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
+                gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
+                zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%")
+    if (!is.null(ap_yrange)) yax$range <- ap_yrange
     dark_layout(fig,
-      title = list(text = sprintf(
+      title = list(text = paste0(sprintf(
           "Does the qualstream marking help? Current buys vs benchmark (from %s, descriptive)",
-          format(d$qscmp_anchor, "%b %d")),
+          format(d$qscmp_anchor, "%b %d")), ov_suffix, ap_suffix),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
-      yaxis = list(title = "Equal-weight return (%)", color = "#cbd5e1",
-                   gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
-                   zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%"),
+      yaxis = yax,
       legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.35),
-      hovermode = "x unified", margin = list(l = 60, r = 20, t = 44, b = 70))
+      hovermode = "closest",
+      hoverlabel = list(bgcolor = "rgba(2,6,23,0.92)", bordercolor = "#475569",
+                        font = list(color = "#e2e8f0", size = 11)),
+      margin = list(l = 60, r = 20, t = 44, b = 70),
+      annotations = ann)
   })
 
   # Honesty caption: the comparison is a single-grade-run snapshot with partial
@@ -8032,17 +8464,70 @@ server <- function(input, output, session) {
     cliff <- if (!is.na(dleft) && dleft <= 30)
                sprintf(" All %d grades share one as-of, so every orange + expires together on %s (%d days) unless a fresh grading run lands first.",
                        n_g, format(expires), dleft) else ""
+    # overlay legend + clear link, shown only while a chip's ticker is overlaid
+    ov_tk <- lc_hist_tk()
+    ov_note <- if (!is.null(ov_tk) && nzchar(ov_tk)) {
+      om <- tryCatch(lc_overlay(), error = function(e) NULL)
+      hint <- if (!is.null(om) && isTRUE(om$no_price))
+                sprintf("no price history for %s (try Production for full prices)", ov_tk)
+              else if (!is.null(om) && !is.na(om$note)) om$note else NULL
+      # dated state history for the clicked ticker: "buy Jul 29 -> hold Aug 12 -> ..."
+      # straight from the board-faithful trail, so it always matches the pins.
+      hist_line <- if (!is.null(om) && !is.null(om$hist) && nrow(om$hist))
+        div(style = "color:#cbd5e1; font-size:0.74rem; margin:0.1rem 0 0.3rem;",
+            span(style = "color:#f8fafc; font-weight:700;", sprintf("%s history: ", ov_tk)),
+            # ISO dates (as the trail already stores them) - unambiguous across
+            # years, since a lifecycle can span cohort entry -> maturity -> re-entry
+            paste(sprintf("%s %s", toupper(om$hist$state), om$hist$date),
+                  collapse = "  →  ")) else NULL
+      tagList(hist_line, div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+        span(style = "color:#f8fafc; font-weight:700;", sprintf("%s overlaid", ov_tk)),
+        " - white line = its return. Dots mark ",
+        span(style = "color:#34d399;", "buy"), ", ",
+        span(style = "color:#fbbf24;", "hold"), " and ",
+        span(style = "color:#f87171;", "sell"), "; an ",
+        span(style = "color:#fb923c;", "orange +"),
+        " on the buy pin means it passed qualstream (>= 68), taken as graded at ",
+        "entry - the same + the board chip shows. (A ",
+        span(style = "color:#a78bfa;", "violet diamond"),
+        " appears only if a grade crosses >= 68 at a LATER run than entry.) ",
+        "The open ring is where it stands now, the open square is a position ",
+        "carried in from before the window. ",
+        "Pins follow the board's monthly-majority states - one missed run day ",
+        "never pins a hold; maturity/delist exits pin at their TRUE date, not ",
+        "the snapshot that observed them. No pins can exist in the signal gap ",
+        "(after the last quarterly cohort, before the ledger epoch ",
+        LEDGER_EPOCH, ") - the model recorded nothing there. Hover a pin for ",
+        "growth since the previous pin (own %, and pp vs SPY).",
+        if (!is.null(hint)) span(style = "color:#fb923c;", paste0(" ", hint, ".")),
+        " ", actionLink("qsClearOverlay", "clear", style = "color:#64748b;")))
+    } else NULL
+    ap_note <- if (isTRUE(input$lcAllPins))
+      div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+        span(style = "color:#f8fafc; font-weight:700;", "All qualstream pins on"),
+        " - every graded (>= 68) board name's entries, ",
+        span(style = "color:#34d399;", "buy"), " / ",
+        span(style = "color:#f59e0b;", "hold"), " / ",
+        span(style = "color:#f87171;", "sell"),
+        "; label = ticker, dot at its own return, no lines. Hover a dot for its move.")
+      else NULL
+    tagList(ov_note, ap_note,
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
       sprintf(paste("Descriptive, not a walk-forward test: qualstream has a single grade run",
-                    "(as of %s) applied across the whole window. The basket is qualstream's %d graded",
-                    "standing-rec buys (the board's buy list = the orange + universe); the green line is",
-                    "the %d that scored >= 68. Both are equal-weight, held from %s (the current 4-month",
-                    "window). Membership is retroactive (today's buys applied backward), which flatters",
-                    "both against SPY; the graded-vs-passed comparison is unaffected since both carry the",
-                    "same tilt. One retroactive grade set cannot yet prove qualstream adds return; that",
-                    "needs several cadence cycles of point-in-time grades.%s"),
-              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_g, n_p, format(d$qscmp_anchor), cliff))
+                    "(as of %s) applied across the whole window. The basket is ALL %d names qualstream",
+                    "graded (every non-vetoed scorecard), NOT just today's board buys; the green line is",
+                    "the %d that scored >= 68. So this %d is a broader set than the board's buy list -",
+                    "only the passers that are also current standing buys wear the orange + (the rest",
+                    "are on hold, matured, or off the board). Both lines are equal-weight, held from %s",
+                    "(the current 4-month window). Membership is retroactive (today's grades applied",
+                    "backward), which flatters both against SPY; the graded-vs-passed comparison is",
+                    "unaffected since both carry the same tilt. One retroactive grade set cannot yet",
+                    "prove qualstream adds return; that needs several cadence cycles of point-in-time",
+                    "grades.%s"),
+              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_g, n_p, n_p,
+              format(d$qscmp_anchor), cliff)))
   })
+  observeEvent(input$qsClearOverlay, lc_hist_tk(NULL))
 
   # The full record: every company the model ever entered (cohort or ledger)
   # with its CURRENT state - including the unproven gate names the board hides
