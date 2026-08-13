@@ -146,6 +146,13 @@ with DAG(
     tags=["qual", "scorecards", "entry", "daily"],
 ) as dag:
 
+    # Verify, don't assume. This DAG being green means "the grader ran", not
+    # "every standing buy has a grade" -- --limit can defer names, a resolver
+    # change can shrink the universe, and the 2026-08-05 failure sat unnoticed
+    # for 8 days. The check re-resolves the universe through the SAME resolver
+    # the grader uses and fails the task if a name has been an ungraded standing
+    # buy for more than 2 days, which fires the WhatsApp callback above.
+    # Read-only: no API calls, no writes, costs nothing.
     grade_new_buys = BashOperator(
         task_id="grade_new_buys",
         # data_interval_end | ds = the trigger date (today) for a triggered run ->
@@ -162,3 +169,24 @@ with DAG(
         ),
         append_env=True,
     )
+
+    verify_coverage = BashOperator(
+        task_id="verify_coverage",
+        # all_done, not the default all_success: if grading fails, the coverage
+        # gap it caused is exactly what you want reported. With all_success this
+        # task would be SKIPPED on the one day it matters most.
+        trigger_rule="all_done",
+        bash_command=(
+            f'cd "{QUALSTREAM_ROOT}" && '
+            f'export PYTHONPATH="{QUALSTREAM_ROOT}/src" && '
+            f'python -m qualstream.coverage '
+            f'--as-of {{{{ data_interval_end | ds }}}} '
+            f'--regrade-after {REGRADE_AFTER_DAYS} --fail-after-days 2'
+        ),
+        append_env=True,
+    )
+
+    # Runs even if grading failed: a red grade task plus a red coverage task
+    # tells you the gap is real, and coverage alone tells you grading silently
+    # under-covered while reporting success.
+    grade_new_buys >> verify_coverage
