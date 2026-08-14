@@ -8667,37 +8667,53 @@ server <- function(input, output, session) {
       xs <- as.numeric(ap$date)
       xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
       span <- max(xhi - xlo, 1)
-      labw <- vapply(seq_len(nrow(ap)), function(i)
-        (nchar(ap$ticker[i]) * 6 + 16) * span / 760, numeric(1))
-      lvl <- integer(nrow(ap)); MAXLVL <- 8L
-      for (i in seq_len(nrow(ap))) {
-        L <- 0L
-        while (L < MAXLVL) {
-          prev <- which(seq_len(nrow(ap)) < i & lvl == L)
-          if (!any(abs(xs[i] - xs[prev]) < (labw[i] + labw[prev]) / 2)) break
-          L <- L + 1L
+      n_ap <- nrow(ap)
+      PXW <- 760                                       # assumed plot width (px)
+      labw <- vapply(seq_len(n_ap), function(i)
+        (nchar(ap$ticker[i]) * 6 + 14) * span / PXW, numeric(1))  # label width, x-days
+      # Callout-rail declutter (best practice for dense event labels): instead of
+      # stacking a vertical tower over each dot - which collided when buys bunch
+      # in time (the SNEX/UI/FTNT/NVDA pile-up) and stepped only 13px < the ~16px
+      # box height so neighbours touched - seat each label on the lowest of a few
+      # rails where it sits CLOSEST to its own x with no horizontal overlap,
+      # nudging it rightward only as far as needed. A thin leader drops to the dot,
+      # so a dense week fans out sideways-and-up instead of piling straight up.
+      RAILS <- 3L
+      rail_right <- rep(-Inf, RAILS)                   # right edge (x-days) per rail
+      rail_of <- integer(n_ap); lab_x <- numeric(n_ap)
+      gap <- span * 0.004
+      for (i in seq_len(n_ap)) {
+        half <- labw[i] / 2
+        best_r <- 1L; best_push <- Inf; best_c <- xs[i]
+        for (r in seq_len(RAILS)) {                    # pick the rail with least rightward push
+          c0 <- max(xs[i], rail_right[r] + gap + half)
+          if (c0 - xs[i] < best_push - 1e-9) { best_push <- c0 - xs[i]; best_r <- r; best_c <- c0 }
         }
-        lvl[i] <- L
+        rail_of[i] <- best_r; lab_x[i] <- best_c
+        rail_right[best_r] <- best_c + half
       }
-      apann <- lapply(seq_len(nrow(ap)), function(i) {
+      day2px <- PXW / span
+      apann <- lapply(seq_len(n_ap), function(i) {
         cc <- apcol[[ap$state[i]]]
         list(x = format(ap$date[i]), y = ap$ret[i], xref = "x", yref = "y",
              text = ap$ticker[i],
              xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
-             showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
-             ax = 0, ay = -11 - 13 * lvl[i], font = list(color = cc, size = 9),
+             showarrow = TRUE, arrowhead = 0, arrowwidth = 0.8,
+             arrowcolor = "rgba(148,163,184,0.55)",  # subtle grey leader, not the state colour
+             ax = (lab_x[i] - xs[i]) * day2px,        # rightward nudge to its rail slot, px
+             ay = -(15 + 20 * (rail_of[i] - 1)),      # rail height above the dot, px (20 > box)
+             font = list(color = cc, size = 9),
              # OPAQUE bg (see single-overlay flags): the green basket line the
              # dots ride bleeds through a transparent box and washes the label
              bgcolor = "#0b1220", bordercolor = cc, borderwidth = 1,
              borderpad = 1)
       })
       ann <- c(ann, apann)
-      # headroom so the upward label stack never clips against the plot top
-      # (tuned to the tighter 13px-per-level stack + size-9 labels above)
+      # headroom so the top rail never clips against the plot top
       yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
       ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
-      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.085 * max(lvl)))
+      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.10 + 0.05 * (max(rail_of) - 1)))
       ap_suffix <- " · all qualstream pins"
     }
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
