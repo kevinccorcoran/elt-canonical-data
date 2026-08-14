@@ -46,7 +46,7 @@ TABS = [
     ("check",     "Model Validation", "tested on unseen history",        VALID),
     ("target",    "Predictions",      "the current selections",          DECIDE),
     ("forecast",  "Forecast",         "past selections tracked to now",  DECIDE),
-    ("loop",      "Lifecycle",        "enter, hold, or exit calls",      DECIDE),
+    ("loop",      "Lifecycle",        "the enter, hold, or exit board",  DECIDE),
 ]
 
 STAGES = [("Foundation", FOUND), ("Analysis", ANALY),
