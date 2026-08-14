@@ -111,41 +111,12 @@ Supports:
 
 ## Project Timeline
 
-**2024 — Foundation**
-- ELT pipeline built on Python, dbt, and Airflow
-- Initial canonical data model
-- Separate dev and staging environments
-
-**2025 — Scale**
-- Migrated ingestion to a new data provider after the previous one was deprecated
-- Consolidated multiple sources into a single pipeline
-- Added a metrics layer over the historical dataset
-- Moved pipeline execution to the cloud
-
-**2026 Q1 — Production Infrastructure**
-- Codebase split into a public infrastructure repo and a private logic repo
-- Stack containerized with Docker
-- Hosting moved to DigitalOcean
-- Database switched to managed PostgreSQL
-
-**2026 Q2 — Forecasting & Dashboard**
-- Reworked the forecasting layer with walk-forward validation and trust scoring
-- Expanded the dashboard with new views for ranges, coverage, and clusters
-- Introduced new automated data-quality rules
-- Added 300% data coverage, removing survivorship bias
-
-**2026 Q3 — Reliability & Data Quality**
-- Added a point-in-time forecast view, tracking real picks forward against the benchmark
-- Built a backtest replay, scoring every pick against the benchmark
-- Added a live out-of-sample log, grading each published pick as prices arrive
-- Gated forecasts to the rank ranges with proven edge
-- Integrated qualstream, a qualitative LLM grade on each selection
-- Built the Lifecycle decision board, sorting every active selection into enter, hold, or exit
-
-**Ongoing**
-- Adding a WhatsApp push channel for alerts on the standing selections
-- Optimizing and testing the qualstream grading layer
-- Auditing the design against a structured set of decision principles
+- **2024 · Foundation:** ELT pipeline (Python, dbt, Airflow), first canonical model, separate dev and staging.
+- **2025 · Scale:** moved to a new data provider, consolidated sources into one pipeline, added a metrics layer, ran in the cloud.
+- **2026 Q1 · Production:** split into public-infra and private-logic repos, containerized with Docker, hosted on DigitalOcean managed PostgreSQL.
+- **2026 Q2 · Forecasting & Dashboard:** walk-forward validation and trust scoring, new dashboard views, automated data-quality rules, 300% coverage (survivorship bias removed).
+- **2026 Q3 · Reliability:** point-in-time forecast, backtest replay, live out-of-sample log, edge-gated forecasts, qualstream LLM grading, and the Lifecycle decision board.
+- **Ongoing:** WhatsApp alerts, qualstream tuning, and a design audit against decision principles.
 
 ---
 
