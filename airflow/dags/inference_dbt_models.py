@@ -413,6 +413,26 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # --- sticky-buy shadow + observability (flip-instability fixes, 2026-08-14) ---
+    # Advances the pre-registered hysteresis state machine one day (shadow line
+    # only; the frozen live rule is untouched), appends today's serving
+    # memberships/assignments to monitoring.serving_membership_log (makes the
+    # daily label churn measurable), and re-anchors the evidence membership
+    # snapshot from RESOLVED evidence ids with a thin-vote WARN. Runs after the
+    # ledger build so today's ledger row exists. Non-blocking leaf.
+    sticky_shadow = BashOperator(
+        task_id="sticky_board_shadow_daily",
+        bash_command=(
+            "set -euo pipefail && "
+            "cd /opt/elt-inference-models && "
+            "python scripts/sticky_board_shadow.py --daily"
+        ),
+        env={"ENV": runtime_env},
+        append_env=True,
+        do_xcom_push=False,
+        execution_timeout=timedelta(minutes=30),
+    )
+
     # --- trigger inference_backtest_dbt_models after prod refresh completes ---
     trigger_inference_backtest = TriggerDagRunOperator(
         task_id="trigger_inference_backtest_dbt_models",
@@ -443,3 +463,4 @@ with DAG(
     [dbt_run_transition_scored_current, dbt_run_cell_score, dbt_run_pair_recommendation] >> dbt_run_ticker_pair_current
     [dbt_run_ticker_pair_current, dbt_run_cell_credibility] >> dbt_run_ticker_summary_current >> dbt_run_ticker_global_action_current >> trigger_inference_backtest
     dbt_run_ticker_global_action_current >> dbt_run_prediction_ledger >> dbt_run_prediction_ledger_scored >> trigger_qual_entry
+    dbt_run_prediction_ledger_scored >> sticky_shadow
