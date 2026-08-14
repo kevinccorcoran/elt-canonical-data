@@ -98,9 +98,9 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
             with Cluster("Qualitative  |  qualstream", graph_attr={"bgcolor": "#EDE7F6", "pencolor": "#5E35B1", "penwidth": "2.0"}):
                 qual = DbaasPrimary("qual")
 
-        # Dashboard app (reads the serving + monitoring schemas)
-        with Cluster("Dashboard", graph_attr={"bgcolor": "#F3E5F5", "pencolor": "#7B1FA2", "penwidth": "2.0"}):
-            dashboard = R("Shiny Dashboard")
+        # Front-end app (reads the serving + monitoring schemas)
+        with Cluster("Front End", graph_attr={"bgcolor": "#F3E5F5", "pencolor": "#7B1FA2", "penwidth": "2.0"}):
+            dashboard = R("Shiny App")
 
     analysts = Users("Analysts")
 

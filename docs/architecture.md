@@ -8,7 +8,7 @@ A conceptual map of AlphaStream: the data flow, the three repositories, and how 
 
 ## 1. What it is
 
-AlphaStream refines raw time-series into ranked, quality-graded selections and serves them to an interactive dashboard. It follows an **ELT** pattern: raw source data is loaded before it is transformed, so the source is preserved independently of transformation logic and can be safely reprocessed if rules change.
+AlphaStream refines raw time-series into ranked, quality-graded selections and serves them to an interactive front end. It follows an **ELT** pattern: raw source data is loaded before it is transformed, so the source is preserved independently of transformation logic and can be safely reprocessed if rules change.
 
 ---
 
@@ -22,7 +22,7 @@ Each stage is a PostgreSQL schema; data flows left to right, each layer more tru
 4. **Score → `scoring`** — forecasts direction and ranks every item.
 5. **Serve → `serving`, `monitoring`** — rolls scored picks into the served answer and logs every call.
 6. **Validate (feedback loop) → `validation`** — a walk-forward backtest replays past calls on data it never trained on; the resulting credibility gates which rank ranges are allowed to reach `serving`.
-7. **Grade (sidecar) → `qual`** — qualstream grades each pick with one point-in-time LLM call and writes its own schema, joined only at the dashboard.
+7. **Grade (sidecar) → `qual`** — qualstream grades each pick with one point-in-time LLM call and writes its own schema, joined only at the front end.
 
 Two moves make it more than a straight line: the **walk-forward loop** (6) gates what reaches the surface, and the **decoupled grader** (7) joins only at the edge.
 
@@ -42,8 +42,8 @@ The split is about coupling, not the org chart: public data, private logic, deco
 
 ## 4. Delivery
 
-*   **Shiny dashboard** — ten linked views walking the model end to end (data health → groups & ranking → validation → decisions), ending in the **Lifecycle** decision board: enter / hold / exit calls on active selections.
-*   **WhatsApp push channel** — alerts on the standing selections; a push surface alongside the pull dashboard.
+*   **Shiny front end** — an interactive app with ten linked views walking the model end to end (data health → groups & ranking → validation → decisions), ending in the **Lifecycle** decision board: enter / hold / exit calls on active selections.
+*   **WhatsApp push channel** — alerts on the standing selections; a push surface alongside the pull front end.
 
 ---
 
