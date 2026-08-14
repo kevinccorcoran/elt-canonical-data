@@ -60,7 +60,7 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
     with Cluster("External APIs", graph_attr={"bgcolor": "white", "pencolor": "#BDBDBD", "style": "dashed"}):
         massive = InternetAlt1("Massive Data API")
         yfinance = InternetAlt1("Yahoo Finance API")
-        delisted = InternetAlt1("Polygon Delisted\n(Flat Files)")
+        delisted = InternetAlt1("Massive Delisted\n(Flat Files)")
 
     # LLM grader (external Anthropic API) — qualstream's only non-Postgres
     # dependency; kept in its own cluster so External APIs stays compact.
@@ -103,6 +103,10 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
             dashboard = R("Shiny Dashboard")
 
     analysts = Users("Analysts")
+
+    # Outbound alerts: a notifier reads the serving selections and pushes
+    # lifecycle / decision alerts through the WhatsApp Business API to analysts.
+    whatsapp = InternetAlt1("WhatsApp API\n(push alerts)")
 
     # Ingest
     massive >> Edge(**edge_cfg["ingest"], label="Fetch") >> ingestor
@@ -154,6 +158,11 @@ with Diagram("AlphaStream System Architecture", filename=out_name, show=False,
     monitoring >> Edge(**edge_cfg["serve"]) >> dashboard
     qual >> Edge(**edge_cfg["serve"], label="Qual grades") >> dashboard
     dashboard >> Edge(**edge_cfg["serve"], label="Explore") >> analysts
+
+    # Outbound push channel: serving selections trigger WhatsApp alerts,
+    # a second delivery surface alongside the dashboard.
+    serving >> Edge(**edge_cfg["serve"], label="Push alerts") >> whatsapp
+    whatsapp >> Edge(**edge_cfg["serve"], label="Notify") >> analysts
 
     # Feedback: walk-forward credibility gates the serving rollup
     validation >> Edge(**edge_cfg["feedback"], label="Credibility") >> serving

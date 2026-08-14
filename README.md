@@ -1,6 +1,6 @@
 # AlphaStream
 
-![Architecture Diagram](tools/alphastream_system_architecture.png?v=5)
+![Architecture Diagram](tools/alphastream_system_architecture.png?v=6)
 
 AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans it into a canonical layer, then ranks groups with unsupervised clustering and statistical scoring, and proves every ranking against periods it never trained on. A separate LLM layer grades each pick against a weighted qualitative rubric. An interactive dashboard sits on top.
 
@@ -41,7 +41,7 @@ Unsupervised clustering, statistical scoring, and walk-forward validation tables
 
 Ten linked views that walk the model end to end: check the data, find and rank the groups, confirm the ranking holds up, then see how past selections played out against the benchmark. Built with R, Shiny, Plotly, and PostgreSQL, in Docker.
 
-![The ten dashboard views, grouped into four workflow stages](tools/dashboard_tab_map.png?v=1)
+![The ten dashboard views, grouped into four workflow stages](tools/dashboard_tab_map.png?v=2)
 
 ### Transition Range
 
@@ -98,6 +98,17 @@ Supports:
 - A live out-of-sample log tracked on its own clock since the strategy went live.
 - Alpha, beta, and information ratio for the selected window.
 
+### Lifecycle
+
+<!-- image pending: tools/dashboard_lifecycle.jpg (sanitized screenshot) -->
+
+Sorts every active selection into enter, hold, or exit by its place in the hold window and whether it still clears the qualitative gate.
+
+Supports:
+- Enter, hold, and exit columns, each showing entry date and hold-window progress.
+- A hindsight view of the graded and gate-passing sets against the benchmark.
+- A follow-along simulator tracking adopted selections against the benchmark.
+
 ## Project Timeline
 
 **2024 — Foundation**
@@ -129,11 +140,12 @@ Supports:
 - Added a live out-of-sample log, grading each published pick as prices arrive
 - Gated forecasts to the rank ranges with proven edge
 - Integrated qualstream, a qualitative LLM grade on each selection
+- Built the Lifecycle decision board, sorting every active selection into enter, hold, or exit
 
-**Upcoming**
-- Build a decision board for today's keep-or-drop calls on active selections
-- Optimize and test the qualstream grading layer
-- Audit the design against a structured set of decision principles
+**Ongoing**
+- Adding a WhatsApp push channel for alerts on the standing selections
+- Optimizing and testing the qualstream grading layer
+- Auditing the design against a structured set of decision principles
 
 ---
 
