@@ -4,7 +4,7 @@ import pendulum
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 from utils.dbt_helpers import get_inference_dbt_bash_command
@@ -41,6 +41,26 @@ def _get_db_conn():
     )
     conn.autocommit = True
     return conn
+
+
+def _walk_forward_not_running() -> bool:
+    """Cross-DAG lock (incident 2026-08-14): this daily build once ran while
+    walk_forward_dbt_models was mid-rebuild and re-gated serving on a
+    half-written evidence generation. Skip the whole daily rebuild while a
+    walk-forward run is active or queued; the next daily run picks up cleanly.
+    """
+    from airflow.models import DagRun
+    from airflow.utils.state import State
+
+    active = DagRun.find(dag_id="walk_forward_dbt_models", state=State.RUNNING)
+    active += DagRun.find(dag_id="walk_forward_dbt_models", state=State.QUEUED)
+    if active:
+        print(
+            f"walk_forward_dbt_models has {len(active)} active/queued run(s); "
+            "skipping the serving rebuild to avoid mixed-generation evidence."
+        )
+        return False
+    return True
 
 
 def batch_create_transition_scored(**context):
@@ -204,6 +224,13 @@ with DAG(
     catchup=False,
     is_paused_upon_creation=False,
 ) as dag:
+
+    # Cross-DAG lock: hold the daily rebuild while a walk-forward re-mint is
+    # active, so serving never re-gates on a half-written evidence generation.
+    wf_not_running = ShortCircuitOperator(
+        task_id="wf_not_running",
+        python_callable=_walk_forward_not_running,
+    )
 
     # --- return_cluster_feature_set (VIEW - instant) ---
     bash_fs, env_fs = get_inference_dbt_bash_command(runtime_env, "return_cluster_feature_set")
@@ -406,6 +433,7 @@ with DAG(
     )
 
     # DEPENDENCIES
+    wf_not_running >> [dbt_run_feature_set, dbt_run_cell_credibility]
     dbt_run_feature_set >> batch_transition_scored >> [dbt_run_past_bucket_stats, dbt_run_future_bucket_stats] >> dbt_run_combined_bucket_stats
     dbt_run_feature_set >> dbt_run_lag_viability
     dbt_run_feature_set >> dbt_run_feature_set_current >> dbt_run_transition_scored_current

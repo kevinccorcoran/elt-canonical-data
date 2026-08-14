@@ -47,6 +47,25 @@ with DAG(
     max_active_runs=1,
 ) as dag:
 
+    # 0. Snapshot the LIVE evidence generation before anything overwrites it.
+    #    Incident 2026-08-13/14: the re-mint rebuilt validation.walk_forward_*
+    #    in place, the build was degenerate (slot-evidence collapse), the board
+    #    went empty, and there was nothing to restore from. The guard copies
+    #    the 8 evidence tables + their index DDL to wf_evidence_prev; the
+    #    verify task below restores from it if the new build fails sanity.
+    snapshot_evidence = BashOperator(
+        task_id="snapshot_evidence",
+        bash_command=(
+            "set -euo pipefail && "
+            "cd /opt/elt-inference-models && "
+            "python scripts/wf_evidence_guard.py snapshot"
+        ),
+        env={"ENV": runtime_env},
+        append_env=True,
+        do_xcom_push=False,
+        execution_timeout=timedelta(minutes=30),
+    )
+
     walk_forward = BashOperator(
         task_id="run_walk_forward_orchestrator",
         bash_command=(
@@ -126,6 +145,26 @@ with DAG(
         env=dbt_env_gate,
         append_env=True,
         do_xcom_push=False,
+    )
+
+    # 3b. Sanity-gate the fresh build BEFORE the serving side can see it.
+    #     Degenerate-build detectors (proven-id collapse, identical-score tie
+    #     explosion, IC sign flip, zero-score takeover). On failure the script
+    #     preserves the broken generation to wf_evidence_failed_<date>,
+    #     restores wf_evidence_prev into validation, and exits non-zero — so
+    #     the membership re-anchor and serving-IC grade below never run on a
+    #     bad build and the board keeps reading the last good generation.
+    verify_evidence = BashOperator(
+        task_id="verify_evidence_or_restore",
+        bash_command=(
+            "set -euo pipefail && "
+            "cd /opt/elt-inference-models && "
+            "python scripts/wf_evidence_guard.py verify"
+        ),
+        env={"ENV": runtime_env},
+        append_env=True,
+        do_xcom_push=False,
+        execution_timeout=timedelta(minutes=45),
     )
 
     # 4. Re-anchor the serving evidence_id remap: snapshot serving's
@@ -269,10 +308,12 @@ with DAG(
     )
 
     (
-        walk_forward
+        snapshot_evidence
+        >> walk_forward
         >> dbt_run_cluster_id_map
         >> run_ticker_ic
         >> dbt_run_gate_evidence
+        >> verify_evidence
         >> refresh_membership_snapshot
         >> run_serving_ic
     )
