@@ -100,7 +100,7 @@ Supports:
 
 ### Lifecycle
 
-<!-- image pending: tools/dashboard_lifecycle.jpg (sanitized screenshot) -->
+![Lifecycle: the enter, hold, or exit board for active selections](tools/dashboard_lifecycle.jpg?v=1)
 
 Sorts every active selection into enter, hold, or exit by its place in the hold window and whether it still clears the qualitative gate.
 
