@@ -100,7 +100,7 @@ Supports:
 
 ### Lifecycle
 
-![Lifecycle: the enter, hold, or exit board for active selections](tools/dashboard_lifecycle.jpg?v=1)
+![Lifecycle: the enter, hold, or exit board for active selections](tools/dashboard_lifecycle.jpg?v=2)
 
 Sorts every active selection into enter, hold, or exit by its place in the hold window and whether it still clears the qualitative gate.
 
@@ -111,12 +111,37 @@ Supports:
 
 ## Project Timeline
 
-- **2024 · Foundation:** ELT pipeline (Python, dbt, Airflow), first canonical model, separate dev and staging.
-- **2025 · Scale:** moved to a new data provider, consolidated sources into one pipeline, added a metrics layer, ran in the cloud.
-- **2026 Q1 · Production:** split into public-infra and private-logic repos, containerized with Docker, hosted on DigitalOcean managed PostgreSQL.
-- **2026 Q2 · Forecasting & Dashboard:** walk-forward validation and trust scoring, new dashboard views, automated data-quality rules, 300% coverage (survivorship bias removed).
-- **2026 Q3 · Reliability:** point-in-time forecast, backtest replay, live out-of-sample log, edge-gated forecasts, qualstream LLM grading, and the Lifecycle decision board.
-- **Ongoing:** WhatsApp alerts, qualstream tuning, and a design audit against decision principles.
+**2024 — Foundation**
+- ELT pipeline built on Python, dbt, and Airflow
+- Initial canonical data model
+- Separate dev and staging environments
+
+**2025 — Scale**
+- Migrated ingestion to a new data provider after the previous one was deprecated
+- Consolidated multiple sources into a single pipeline
+- Added a metrics layer over the historical dataset
+- Moved pipeline execution to the cloud
+
+**2026 Q1 — Production Infrastructure**
+- Codebase split into a public infrastructure repo and a private logic repo
+- Stack containerized with Docker
+- Hosting moved to DigitalOcean with managed PostgreSQL
+
+**2026 Q2 — Forecasting & Dashboard**
+- Reworked the forecasting layer with walk-forward validation and trust scoring
+- Expanded the dashboard with new views for ranges, coverage, and clusters
+- Added 300% data coverage, removing survivorship bias
+
+**2026 Q3 — Reliability & Data Quality**
+- Added point-in-time forecasting with a backtest replay and a live out-of-sample log
+- Gated forecasts to the rank ranges with proven edge
+- Integrated qualstream, a qualitative LLM grade on each selection
+- Built the Lifecycle decision board: enter, hold, or exit for every active selection
+
+**Ongoing**
+- Add a WhatsApp push channel for alerts on the standing selections
+- Optimize and test the qualstream grading layer
+- Audit the design against a structured set of decision principles
 
 ---
 
