@@ -7911,8 +7911,22 @@ server <- function(input, output, session) {
         }
         dd
       }, error = function(e) NULL)
+      # Sticky-buy SHADOW line (flip-instability fix 2026-08-14): the same
+      # signals run through a hysteresis state machine (monitoring table
+      # written daily by scripts/sticky_board_shadow.py in elt-inference-models).
+      # Parallel line only - the frozen board rule above is untouched; adoption
+      # is decided at a freeze checkpoint. NULL until the table exists.
+      shadow <- tryCatch(dbGetQuery(con, "
+        SELECT ticker, entered_at::text AS entered_at,
+               (CURRENT_DATE - entered_at + 1)::int AS dwell_days
+        FROM monitoring.sticky_board_shadow
+        WHERE run_date = (SELECT MAX(run_date) FROM monitoring.sticky_board_shadow)
+          AND state = 'BUY'
+        ORDER BY entered_at, ticker"),
+        error = function(e) NULL)
       dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
                   qs = qs, qscmp = qscmp, qscmp_detail = qscmp_detail, qscmp_anchor = qs_anchor,
+                  shadow = shadow,
                   qs_veto = if (!is.null(qsv) && nrow(qsv) > 0)
                               toupper(qsv$ticker[qsv$veto %in% TRUE])
                             else character(0))
@@ -8467,6 +8481,26 @@ server <- function(input, output, session) {
     closed_foot <- div(style = "color:#64748b; font-weight:600; font-size:0.85rem; margin:0.4rem 0 0.5rem;",
           sprintf("closed - exited over a month ago (%d) · detail in the table below",
                   length(closed)))
+    # Sticky shadow (teal): the hysteresis rule running in parallel since
+    # 2026-08-14 (monitoring.sticky_board_shadow, backfilled to the ledger
+    # epoch). Shown for comparison; the frozen board rule above is unchanged.
+    sh <- d$shadow
+    sh_ticks <- if (!is.null(sh) && nrow(sh) > 0) keep_id(sh$ticker) else character(0)
+    sh_i     <- if (length(sh_ticks)) match(sh_ticks, sh$ticker) else integer(0)
+    sh_note  <- if (length(sh_ticks))
+                  sprintf("%s · %dd", sh$entered_at[sh_i], sh$dwell_days[sh_i])
+                else character(0)
+    shadow_block <- if (!is.null(sh)) tagList(
+      section("sticky shadow - hysteresis rule, parallel to the frozen board (entry · days held)",
+              "#0d9488", sh_ticks, sh_note, max_h = 220),
+      note_line(paste(
+        "Teal = sticky shadow: the same signals through a hysteresis state",
+        "machine (enter: proven slot + BUY on >= 60% of the last month's runs",
+        "over >= 7 days; exit only on sustained failure: share < 40%, 5-run",
+        "gate-fail, 12-month maturity or delisting; 21-day re-entry cooldown).",
+        "Median dwell ~15 days vs 2 days for the raw gate. The frozen board",
+        "rule above is unchanged; adoption is decided at a freeze checkpoint.")))
+    else NULL
     if (identical(input$lcBoardLayout, "stacked")) {
       tagList(
         notes,
@@ -8474,6 +8508,7 @@ server <- function(input, output, session) {
         section(sprintf("%s (%d of %d shown)", buy_title_stacked,
                         length(buys_shown), length(buys_all)),
                 col_of[["buy"]], buys_shown, b_note2),
+        shadow_block,
         section("hold - the period's dropped recs, still open (entry · % of horizon)",
                 col_of[["hold"]], holds, h_note, max_h = 220),
         closed_foot)
@@ -8494,6 +8529,7 @@ server <- function(input, output, session) {
                      if (buys_qsonly) "qualstream + only · exit now · reason"
                      else "exit now · reason",
                      n_total = length(sells_all))),
+        shadow_block,
         closed_foot)
     }
   })
