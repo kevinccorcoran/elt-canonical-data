@@ -1,8 +1,8 @@
 # AlphaStream
 
-![Architecture Diagram](tools/alphastream_system_architecture.png?v=6)
+![Architecture Diagram](tools/alphastream_system_architecture.png?v=7)
 
-AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans it into a canonical layer, then ranks groups with unsupervised clustering and statistical scoring, and proves every ranking against periods it never trained on. A separate LLM layer grades each pick against a weighted qualitative rubric. An interactive dashboard sits on top.
+AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans it into a canonical layer, then ranks groups with unsupervised clustering and statistical scoring, and proves every ranking against periods it never trained on. A separate LLM layer grades each pick against a weighted qualitative rubric. An interactive front end sits on top.
 
 Over 2012–2024, its picks beat the benchmark by roughly 8 percentage points a year.
 
@@ -23,7 +23,7 @@ AlphaStream is organized into three repositories:
 
 ![Pipeline](tools/pipeline_grouped.png?v=3)
 
-The end-to-end flow, grouped by stage, each box labeled with the database schema it lands in. The pipeline pulls data in, screens it for quality, and standardizes it into a canonical layer, then splits it into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, and validates it before it reaches the dashboard. A parallel qualitative stage (qualstream) grades each pick against a weighted rubric with a single LLM call and feeds the same dashboard. The diagram flags the machine-learning and LLM stages.
+The end-to-end flow, grouped by stage, each box labeled with the database schema it lands in. The pipeline pulls data in, screens it for quality, and standardizes it into a canonical layer, then splits it into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, and validates it before it reaches the front end. A parallel qualitative stage (qualstream) grades each pick against a weighted rubric with a single LLM call and feeds the same front end. The diagram flags the machine-learning and LLM stages.
 
 ## Data Lineage
 
@@ -37,11 +37,11 @@ From raw ingestion to the standardized, deduplicated tables that serve as the si
 
 Unsupervised clustering, statistical scoring, and walk-forward validation tables that sit on top of the canonical layer.
 
-## Interactive Analytics Dashboard
+## Analytics Front End
 
 Ten linked views that walk the model end to end: check the data, find and rank the groups, confirm the ranking holds up, then see how past selections played out against the benchmark. Built with R, Shiny, Plotly, and PostgreSQL, in Docker.
 
-![The ten dashboard views, grouped into four workflow stages](tools/dashboard_tab_map.png?v=2)
+![The front end's ten views, grouped into four workflow stages](tools/dashboard_tab_map.png?v=2)
 
 ### Transition Range
 
@@ -127,9 +127,9 @@ Supports:
 - Stack containerized with Docker
 - Hosting moved to DigitalOcean with managed PostgreSQL
 
-**2026 Q2 — Forecasting & Dashboard**
+**2026 Q2 — Forecasting & Front End**
 - Reworked the forecasting layer with walk-forward validation and trust scoring
-- Expanded the dashboard with new views for ranges, coverage, and clusters
+- Expanded the front end with new views for ranges, coverage, and clusters
 - Added 300% data coverage, removing survivorship bias
 
 **2026 Q3 — Reliability & Data Quality**
