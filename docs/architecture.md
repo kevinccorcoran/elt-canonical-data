@@ -1,76 +1,76 @@
 # Architecture & Design
 
-![Production Environment Architecture](../production_environment:_elt_canonical_data.png)
+![AlphaStream System Architecture](../tools/alphastream_system_architecture.png)
 
-This document explains the system design, data flow, and environment strategy for the AlphaStream system.
-
----
-
-## 1. System Overview
-
-The system uses an **ELT (Extract, Load, Transform)** pattern:
-
-1.  **Extract**: Python scripts fetch data from APIs (Massive, Yahoo, Polygon).
-2.  **Load**: Raw data is saved immediately to PostgreSQL (`raw` schema).
-3.  **Transform**: dbt models clean and standardize data into the Canonical Data Model (`cdm` schema).
-
-This separation ensures the **source data is preserved** independently of transformation logic, allowing safe reprocessing if business rules change.
+A conceptual map of AlphaStream: the data flow, the three repositories, and how it runs. Written to be read top to bottom.
 
 ---
 
-## 2. Core Components
+## 1. What it is
 
-### Ingestion Layer
-*   **Role**: Fetches data from external vendors.
-*   **Behavior**: Resilient to API failures, handles rate limits, and performs automatic retries.
-*   **Target**: Writes directly to the `raw` schema.
-
-### Storage Layer
-*   **Technology**: DigitalOcean Managed PostgreSQL.
-*   **Structure**:
-    *   `raw`: Exact copy of vendor data (Landing Zone).
-    *   `cdm`: Clean, deduplicated, and standardized data (Serving Layer).
-*   **Backup**: Automated daily backups with point-in-time recovery.
-
-### Transformation Layer
-*   **Tool**: dbt (Data Build Tool).
-*   **Role**: Applies business logic (currency conversion, deduping, moving averages).
-*   **Quality**: Runs automated data tests before promoting data to production tables.
-
-### Orchestration Layer
-*   **Tool**: Apache Airflow.
-*   **Role**: Manages dependency execution (e.g., ensuring Ingestion completes before Transformation starts).
+AlphaStream refines raw time-series into ranked, quality-graded selections and serves them to an interactive dashboard. It follows an **ELT** pattern: raw source data is loaded before it is transformed, so the source is preserved independently of transformation logic and can be safely reprocessed if rules change.
 
 ---
 
-## 3. Environment Strategy
+## 2. Data flow — the refinement spine
 
-We use separate environments to ensure stability.
+Each stage is a PostgreSQL schema; data flows left to right, each layer more trustworthy than the last.
 
-| Feature | Local (Mac) | Production (Linux Server) |
+1. **Ingest → `raw`** — Python fetches from **Massive** (live API plus delisted flat-file backfill) and **Yahoo Finance**; vendor data lands unchanged.
+2. **Canonicalize → `cdm`** — dbt cleans, dedupes, and standardizes into the canonical data model: the single source of truth.
+3. **Feature & cluster → `features`, `clustering`, `analysis`** — benchmark-relative returns, plus unsupervised groups of lookalike items (a Python step segments the ranking).
+4. **Score → `scoring`** — forecasts direction and ranks every item.
+5. **Serve → `serving`, `monitoring`** — rolls scored picks into the served answer and logs every call.
+6. **Validate (feedback loop) → `validation`** — a walk-forward backtest replays past calls on data it never trained on; the resulting credibility gates which rank ranges are allowed to reach `serving`.
+7. **Grade (sidecar) → `qual`** — qualstream grades each pick with one point-in-time LLM call and writes its own schema, joined only at the dashboard.
+
+Two moves make it more than a straight line: the **walk-forward loop** (6) gates what reaches the surface, and the **decoupled grader** (7) joins only at the edge.
+
+---
+
+## 3. Three repositories — trust seams
+
+| Repo | Visibility | Owns |
 | :--- | :--- | :--- |
-| **Purpose** | Development & Testing | Live Execution & "Source of Truth" |
-| **Data** | Subset / Test Data | Full Historical Dataset |
-| **Infrastructure** | Docker Desktop | Docker on DigitalOcean Droplet |
-| **State** | Ephemeral | Persistent (Managed DB) |
+| `elt-canonical-data` | public | ingestion + canonical (`raw`, `cdm`), shared infra/docs |
+| `inference-models` | private | modeling (`features` → `scoring` → `serving`), `validation`, `monitoring` |
+| `qualstream` | decoupled | LLM qualitative grader (`qual`); shares only the database |
 
-**Deployment Rule**: The production server is an execution target only. All code changes are committed and tested locally before deployment.
+The split is about coupling, not the org chart: public data, private logic, decoupled grading. Each boundary contains a failure or a leak.
 
 ---
 
-## 4. Topology
+## 4. Delivery
 
-### Development (Local)
-*   **Code**: Local git repository.
-*   **Runtime**: Local Airflow via Docker.
-*   **DB**: Local PostgreSQL container.
+*   **Shiny dashboard** — ten linked views walking the model end to end (data health → groups & ranking → validation → decisions), ending in the **Lifecycle** decision board: enter / hold / exit calls on active selections.
+*   **WhatsApp push channel** — alerts on the standing selections; a push surface alongside the pull dashboard.
 
-### Production (Remote)
-*   **Code**: Pulled from GitHub `main` branch.
-*   **Runtime**: Authoritative Airflow instance.
-*   **DB**: Managed PostgreSQL (external to the app server).
+---
 
-### Security
-*   **Network**: Inbound traffic blocked by default. Only SSH (port 22) and Airflow UI (via tunnel) are accessible from whitelisted IPs.
-*   **Access**: SSH Keys only (no passwords).
-*   **Secrets**: Injected via environment variables at runtime; never stored in code.
+## 5. Runtime components
+
+*   **Ingestion** — Python; resilient to API failures, rate limits, and retries; writes `raw`.
+*   **Transformation** — dbt; applies business logic and runs automated data tests before promoting data.
+*   **Orchestration** — Apache Airflow; runs the DAGs in dependency order (ingest before transform).
+*   **Storage** — DigitalOcean Managed PostgreSQL; daily backups with point-in-time recovery.
+
+---
+
+## 6. Environment strategy
+
+| | Local (Mac) | Production (Linux server) |
+| :--- | :--- | :--- |
+| Purpose | development & testing | live execution, source of truth |
+| Data | subset / test | full historical dataset |
+| Infrastructure | Docker Desktop | Docker on a DigitalOcean droplet |
+| State | ephemeral | persistent (managed DB) |
+
+**Rule:** the production server is an execution target only. Code is committed and tested locally, then deployed from GitHub `main`.
+
+---
+
+## 7. Security
+
+*   **Network** — inbound blocked by default; only SSH and the Airflow UI (via tunnel) are reachable from whitelisted IPs.
+*   **Access** — SSH keys only, no passwords.
+*   **Secrets** — injected via environment variables at runtime; never stored in code.
