@@ -7924,9 +7924,23 @@ server <- function(input, output, session) {
           AND state = 'BUY'
         ORDER BY entered_at, ticker"),
         error = function(e) NULL)
+      # Evidence breadth (gap review 2026-08-15): n_weighted = the ticker's
+      # count of credibility-weighted 12-month cells at the LATEST walk-forward
+      # cutoff. Measured on prod: inside the two clusters holding most buys,
+      # narrow bin-1 names (<= 4 weighted cells) realized hit ~51-57% vs
+      # ~72-73% for broad (>= 8). Display-only; slow-moving between walks.
+      breadth <- tryCatch(dbGetQuery(con, "
+        SELECT ticker, MAX(n_weighted)::int AS n_weighted
+        FROM validation.walk_forward_ticker_rank
+        WHERE fut_lag = 12
+          AND train_cutoff_date = (SELECT MAX(train_cutoff_date)
+                                   FROM validation.walk_forward_ticker_rank
+                                   WHERE fut_lag = 12)
+        GROUP BY ticker"),
+        error = function(e) NULL)
       dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
                   qs = qs, qscmp = qscmp, qscmp_detail = qscmp_detail, qscmp_anchor = qs_anchor,
-                  shadow = shadow,
+                  shadow = shadow, breadth = breadth,
                   qs_veto = if (!is.null(qsv) && nrow(qsv) > 0)
                               toupper(qsv$ticker[qsv$veto %in% TRUE])
                             else character(0))
@@ -8250,7 +8264,16 @@ server <- function(input, output, session) {
     qs_top <- character(0)
     # chips are click-through: clicking one opens its state-history timeline
     # (lcBoardClick -> the modal observer). cursor + title signal it.
-    chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE) span(
+    # Evidence-breadth lookup (·n on chips): weighted fut-12 cells at the last
+    # walk-forward cutoff; amber when <= 4 (the historically weak narrow set).
+    nw_of <- if (!is.null(d$breadth) && nrow(d$breadth) > 0)
+               setNames(as.integer(d$breadth$n_weighted), toupper(d$breadth$ticker))
+             else setNames(integer(0), character(0))
+    nw_get <- function(t) {
+      v <- nw_of[toupper(t)]
+      if (length(v) == 1 && !is.na(v)) as.integer(v) else NA_integer_
+    }
+    chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE, nw = NA) span(
       style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
                              " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
                              " margin:2px; font-size:0.78rem; font-weight:600; cursor:pointer;%s"),
@@ -8259,7 +8282,13 @@ server <- function(input, output, session) {
       onclick = sprintf("Shiny.setInputValue('lcBoardClick','%s',{priority:'event'})", t),
       title = "click for state history",
       if (nzchar(note)) sprintf("%s · %s", t, note) else t,
-      if (plus) span("+", style = "color:#fb923c; font-weight:800; margin-left:3px;"))
+      if (plus) span("+", style = "color:#fb923c; font-weight:800; margin-left:3px;"),
+      if (!is.na(nw)) span(sprintf("·%d", nw),
+        style = if (nw <= 4)
+                  "color:#f59e0b; font-weight:800; margin-left:3px;"
+                else "color:#64748b; font-weight:600; margin-left:3px; opacity:0.85;",
+        title = sprintf("evidence breadth: %d weighted 12mo cells%s", nw,
+                        if (nw <= 4) " - NARROW (historically weaker)" else "")))
     section <- function(title, colr, ticks, notes, max_h = NA) {
       div(style = "margin-bottom:1rem;",
         div(style = sprintf("color:%s; font-weight:700; margin-bottom:0.35rem;", colr),
@@ -8268,7 +8297,7 @@ server <- function(input, output, session) {
               sprintf("display:flex; flex-wrap:wrap; max-height:%dpx; overflow-y:auto;", max_h)
             else "display:flex; flex-wrap:wrap;",
           mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks,
-                                      plus = t %in% qs_pass),
+                                      plus = t %in% qs_pass, nw = nw_get(t)),
                  ticks, notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)))
     }
     note_line <- function(txt) div(
@@ -8452,7 +8481,14 @@ server <- function(input, output, session) {
         span("+", style = "color:#fb923c; font-weight:800;"),
         sprintf(" passed qualstream: %s.",
           paste(sprintf("%s %d", qs_top,
-                        as.integer(round(qs_grade[qs_top]))), collapse = ", ")))))
+                        as.integer(round(qs_grade[qs_top]))), collapse = ", ")))),
+      note_line(tagList(
+        "·n on a chip = evidence breadth: how many credibility-weighted",
+        " 12-month cells backed the name at the last walk-forward cutoff. ",
+        span("Amber n <= 4 = narrow", style = "color:#f59e0b; font-weight:700;"),
+        ": in the two clusters holding most buys, narrow top-bin names",
+        " realized hit ~51-57% vs ~72-73% for broad (n >= 8) - prefer broad",
+        " names when sizing. Display only; the board rule is unchanged.")))
     # Kanban column: same chips as the stacked sections (chipf reused verbatim, so
     # orange +, delisted strikethrough and the notes are identical), only laid out
     # side by side. Chips still wrap inside each column and the column scrolls
@@ -8473,7 +8509,8 @@ server <- function(input, output, session) {
         div(style = sprintf(paste0("display:flex; flex-direction:column; align-items:flex-start;",
                                    " gap:2px; max-height:%dpx; overflow-y:auto;"), max_h),
           if (length(ticks))
-            mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks, plus = t %in% qs_pass),
+            mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks,
+                                        plus = t %in% qs_pass, nw = nw_get(t)),
                    ticks, ch_notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)
           else div(style = "color:#475569; font-size:0.75rem; font-style:italic; padding:0.3rem;",
                    "none")))
