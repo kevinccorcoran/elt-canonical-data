@@ -2514,6 +2514,14 @@ get_con <- function(input) {
   host_val <- input$db_host
   port_val <- suppressWarnings(as.integer(input$db_port))
   if (is.na(port_val)) stop("Port must be a number (e.g. 25060 for prod, 5432 for local).")
+  # Password: prefer the environment's OWN credential (DB_ENVIRONMENTS $pass_env,
+  # i.e. the container's PROD_DB_PASSWORD/DB_PASSWORD) over the typed field. This
+  # is a loopback, unauthenticated dashboard running on the box that already holds
+  # these creds, and a browser password-manager can silently overwrite the seeded
+  # field with a stale value (survives incognito/hard-refresh) -> spurious
+  # "password authentication failed for user doadmin". The field is only the
+  # fallback when the env carries no password (a manual custom host).
+  pass_val <- getenv_any(cfg$pass_env, input$db_pass)
   # sslmode from config; upgrade prefer->require if the host is non-loopback so a
   # remote host typed under a local preset still gets TLS.
   ssl_mode <- cfg$sslmode
@@ -2542,7 +2550,7 @@ get_con <- function(input) {
         host     = host_val,
         port     = port_val,
         user     = input$db_user,
-        password = input$db_pass,
+        password = pass_val,
         sslmode  = ssl_mode,
         connect_timeout = 5
       ),
