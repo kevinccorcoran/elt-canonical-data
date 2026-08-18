@@ -7087,6 +7087,92 @@ server <- function(input, output, session) {
     if (identical(lc_hist_tk(), tk)) lc_hist_tk(NULL) else lc_hist_tk(tk)
   })
 
+  # Chip "P&L" button -> modal: this name's flip history (each buy->exit trade)
+  # with its own return and return vs SPY, so you can tell at a glance whether
+  # the trades made money. Fired with stopPropagation, so it does NOT single the
+  # ticker out on the chart (that stays on the chip-body click / lcBoardClick).
+  observeEvent(input$lcFlipHist, {
+    tk <- toupper(trimws(as.character(input$lcFlipHist)))
+    if (!nzchar(tk)) return()
+    dv <- tryCatch(derivedLC(), error = function(e) NULL); d <- app_dataLC()
+    if (is.null(dv) || is.null(dv$M) || is.null(d))
+      return(showModal(modalDialog("Generate the board first.", easyClose = TRUE)))
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) return(showModal(modalDialog("DB unreachable.", easyClose = TRUE)))
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    prov_tk <- !is.null(dv$prov_of) && tk %in% names(dv$prov_of) && isTRUE(dv$prov_of[[tk]])
+    now_state <- if (tk %in% names(dv$state_now)) dv$state_now[[tk]] else NA_character_
+    dl_tk <- if (!is.null(d$meta) && any(toupper(d$meta$ticker) == tk))
+               suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == tk][1]))
+             else as.Date(NA)
+    trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
+                                     prov_tk, now_state, dv$hz, dl_tk), error = function(e) NULL)
+    pp <- tryCatch(lc_pos(), error = function(e) NULL)
+    sold_over <- if (!is.null(pp) && nrow(pp)) {
+      sd <- suppressWarnings(as.Date(as.character(pp$sold_date[toupper(pp$ticker) == tk])))
+      sd <- sd[!is.na(sd)]; if (length(sd)) max(sd) else as.Date(NA)
+    } else as.Date(NA)
+    px <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
+       WHERE ticker IN ('%s','SPY') ORDER BY ticker, date",
+      gsub("'", "''", tk, fixed = TRUE))), error = function(e) NULL)
+    if (is.null(px) || !nrow(px) || !any(px$ticker == "SPY") || !any(toupper(px$ticker) == tk))
+      return(showModal(modalDialog(sprintf("No prices for %s yet.", tk), easyClose = TRUE)))
+    px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
+    tp <- px[toupper(px$ticker) == tk, ]; sp <- px[px$ticker == "SPY", ]
+    asof <- function(df, dd) { s <- df$px[df$d <= dd]; if (!length(s)) NA_real_ else s[length(s)] }
+    last_d <- max(sp$d)
+    ev <- if (!is.null(trail) && nrow(trail))
+            trail[trail$state %in% c("buy", "hold", "sell"), , drop = FALSE] else NULL
+    eps <- list(); open_e <- as.Date(NA)
+    if (!is.null(ev) && nrow(ev)) for (i in seq_len(nrow(ev))) {
+      s <- ev$state[i]; dt <- as.Date(ev$date[i])
+      if (s == "buy" && is.na(open_e)) open_e <- dt
+      else if (s == "sell" && !is.na(open_e)) {
+        eps[[length(eps) + 1]] <- list(entry = open_e, exit = dt, open = FALSE); open_e <- as.Date(NA) }
+    }
+    if (!is.na(open_e)) {
+      if (!is.na(sold_over) && sold_over >= open_e)
+        eps[[length(eps) + 1]] <- list(entry = open_e, exit = sold_over, open = FALSE)
+      else eps[[length(eps) + 1]] <- list(entry = open_e, exit = last_d, open = TRUE)
+    }
+    if (!length(eps))
+      return(showModal(modalDialog(sprintf("%s has no buy episodes in this window.", tk), easyClose = TRUE)))
+    rows <- lapply(eps, function(e) {
+      ep <- asof(tp, e$entry); xp <- asof(tp, e$exit)
+      es <- asof(sp, e$entry); xs <- asof(sp, e$exit)
+      ret <- if (is.na(ep) || ep == 0) NA_real_ else (xp / ep - 1) * 100
+      spy <- if (is.na(es) || es == 0) NA_real_ else (xs / es - 1) * 100
+      data.frame(entry = format(e$entry), exit = if (e$open) "open" else format(e$exit),
+                 days = as.integer(e$exit - e$entry), ret = ret, spy = spy, vs = ret - spy,
+                 stringsAsFactors = FALSE)
+    })
+    tab <- do.call(rbind, rows)
+    fmtpct <- function(x) ifelse(is.na(x), "-", sprintf("%+.1f%%", x))
+    col <- function(x) ifelse(is.na(x), "#64748b", ifelse(x >= 0, "#10b981", "#dc2626"))
+    trow <- function(r) tags$tr(
+      tags$td(r$entry, style = "padding:3px 10px;"),
+      tags$td(r$exit, style = "padding:3px 10px;"),
+      tags$td(sprintf("%dd", r$days), style = "padding:3px 10px; text-align:right; color:#94a3b8;"),
+      tags$td(fmtpct(r$ret), style = sprintf("padding:3px 10px; text-align:right; font-weight:700; color:%s;", col(r$ret))),
+      tags$td(fmtpct(r$spy), style = "padding:3px 10px; text-align:right; color:#64748b;"),
+      tags$td(fmtpct(r$vs), style = sprintf("padding:3px 10px; text-align:right; font-weight:700; color:%s;", col(r$vs))))
+    n_ok <- sum(tab$vs > 0, na.rm = TRUE); n_tot <- sum(!is.na(tab$vs))
+    showModal(modalDialog(
+      title = sprintf("%s - flip history & return vs SPY", tk), size = "l", easyClose = TRUE,
+      div(style = sprintf("font-size:0.9rem; margin-bottom:0.6rem; font-weight:700; color:%s;",
+                          col(mean(tab$vs, na.rm = TRUE))),
+          sprintf("%d trade(s) - avg return %s, avg vs SPY %s - beat SPY on %d of %d",
+                  nrow(tab), fmtpct(mean(tab$ret, na.rm = TRUE)),
+                  fmtpct(mean(tab$vs, na.rm = TRUE)), n_ok, n_tot)),
+      tags$table(style = "border-collapse:collapse; width:100%; font-size:0.85rem;",
+        tags$thead(tags$tr(lapply(c("Entry", "Exit", "Held", "Return", "SPY", "vs SPY"), function(h)
+          tags$th(h, style = "padding:4px 10px; text-align:left; color:#94a3b8; border-bottom:1px solid #334155;")))),
+        tags$tbody(lapply(seq_len(nrow(tab)), function(i) trow(tab[i, ])))),
+      div(style = "color:#64748b; font-size:0.72rem; margin-top:0.6rem;",
+          "Return = the name's own price move over each held window; vs SPY = that minus SPY over the same window. Open = still held, marked to the latest close.")))
+  })
+
   # Tracking basis for MODEL rows (radio next to the chart filter): "epoch" =
   # the strategy's record since the regime epoch (default); "stored" = only the
   # user's own cash flows since each row was added. Threaded into every
@@ -8336,12 +8422,16 @@ server <- function(input, output, session) {
       title = "click for state history",
       if (nzchar(note)) sprintf("%s · %s", t, note) else t,
       if (plus) span("+", style = "color:#fb923c; font-weight:800; margin-left:3px;"),
-      if (!is.na(nw)) span(sprintf("·%d", nw),
-        style = if (nw <= 4)
-                  "color:#f59e0b; font-weight:800; margin-left:3px;"
-                else "color:#64748b; font-weight:600; margin-left:3px; opacity:0.85;",
-        title = sprintf("evidence breadth: %d weighted 12mo cells%s", nw,
-                        if (nw <= 4) " - NARROW (historically weaker)" else "")))
+      span("P&L",
+        style = sprintf(paste0("margin-left:5px; cursor:pointer; font-size:0.62rem;",
+                               " font-weight:700; border-radius:4px; padding:1px 4px;%s"),
+          if (!is.na(nw) && nw <= 4) " color:#f59e0b; border:1px solid #f59e0b88;"
+          else " color:#94a3b8; border:1px solid #94a3b855;"),
+        onclick = sprintf(paste0("event.stopPropagation();",
+                          "Shiny.setInputValue('lcFlipHist','%s',{priority:'event'})"), t),
+        title = if (!is.na(nw) && nw <= 4)
+                  "thin evidence - click: flip history & return vs SPY"
+                else "click: flip history & return vs SPY"))
     section <- function(title, colr, ticks, notes, max_h = NA) {
       div(style = "margin-bottom:1rem;",
         div(style = sprintf("color:%s; font-weight:700; margin-bottom:0.35rem;", colr),
