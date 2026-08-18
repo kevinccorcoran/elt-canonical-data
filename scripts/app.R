@@ -7215,6 +7215,14 @@ server <- function(input, output, session) {
     all_nm <- names(dv$state_now)
     ok <- if (!is.null(dv$board_ok)) dv$board_ok[all_nm] else rep(TRUE, length(all_nm))
     universe <- toupper(all_nm[!is.na(ok) & ok])
+    # "only the qs are trades" (Kevin 2026-08-18): follow the board's qualstream+picks
+    # filter. On (default) -> count only qualstream-passed names (grade >= QS_MIN, the
+    # orange +), matching the columns; untick it to count every proven board trade.
+    if (isTRUE(input$lcBuyQSonly) && !is.null(dv$qs_grade) && length(dv$qs_grade)) {
+      g  <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+      qp <- names(g)[!is.na(g) & g >= QS_MIN]
+      universe <- intersect(universe, qp)
+    }
     if (!length(universe)) return(NULL)
     con <- tryCatch(get_con(input), error = function(e) NULL)
     if (is.null(con)) return(NULL)
@@ -8822,7 +8830,8 @@ server <- function(input, output, session) {
     # the same per-ticker episode logic as the flip-history modal, so a clicked chip
     # reconciles with the aggregate. Duration-fair by design: vs SPY spans each
     # trade's own window and win rate is one vote per trade - no per-day/annualising.
-    # Full since-inception universe: NOT narrowed by the cluster-id filter. The
+    # Universe follows the qualstream+picks filter (default on = qs-passed names only,
+    # "only the qs are trades"); never narrowed by the cluster-id filter. The
     # compounded "how much money" view is the portfolio panel below.
     track_strip <- local({
       tr <- tryCatch(lc_track_record(), error = function(e) NULL)
@@ -8851,9 +8860,11 @@ server <- function(input, output, session) {
           pill("win rate", if (is.na(tr$win)) "n/a" else sprintf("%.0f%%", tr$win),
                sprintf("beat SPY on %d of %d", tr$n_win, tr$n_vs), "#a78bfa", pctcol(tr$win))),
         div(style = "color:#64748b; font-size:0.66rem; margin-top:0.25rem;",
-          sprintf(paste0("realized record of every board trade since the %s epoch - a trade = buy to sell",
+          sprintf(paste0("realized record of every %s since the %s epoch - a trade = buy to sell",
             " (holds are mid-trade, not closes); sold banked, open marked to today. Compounded $ view:",
-            " the portfolio panel below."), format(as.Date(LEDGER_EPOCH), "%b %d"))))
+            " the portfolio panel below."),
+            if (isTRUE(input$lcBuyQSonly)) "qualstream+ trade" else "board trade",
+            format(as.Date(LEDGER_EPOCH), "%b %d"))))
     })
     if (identical(input$lcBoardLayout, "stacked")) {
       tagList(
