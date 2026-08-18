@@ -7608,6 +7608,14 @@ server <- function(input, output, session) {
     if (is.null(ln) || !nrow(ln)) return(NULL)
     line_at <- function(dd) { s <- ln$y[ln$d <= dd]
       if (!length(s)) ln$y[1] else s[length(s)] }
+    # User overrides live in the tracker (lc_pos sold_date), NOT in derivedLC's
+    # pure model state_now, so the pin layer must apply them itself to agree with
+    # the board's sell column. Map ticker -> sold_date for the hand-sold names.
+    pp_sold  <- tryCatch(lc_pos(), error = function(e) NULL)
+    pos_sold <- if (!is.null(pp_sold) && nrow(pp_sold)) {
+      sdv <- suppressWarnings(as.Date(as.character(pp_sold$sold_date)))
+      keep <- !is.na(sdv); setNames(sdv[keep], toupper(pp_sold$ticker)[keep])
+    } else setNames(as.Date(character(0)), character(0))
     out <- list()
     for (tk in tks) {
       tkr <- px[toupper(px$ticker) == toupper(tk), , drop = FALSE]
@@ -7626,6 +7634,12 @@ server <- function(input, output, session) {
       ev <- data.frame(date = as.Date(trail$date), state = trail$state,
                        stringsAsFactors = FALSE)
       ev <- ev[ev$date >= anchor & ev$state %in% c("buy", "hold", "sell"), , drop = FALSE]
+      # hand-sold override: drop model events on/after the sell date and pin a
+      # sell there, so the sketch matches the board's sell column for this name.
+      sold_d <- if (toupper(tk) %in% names(pos_sold)) pos_sold[[toupper(tk)]] else as.Date(NA)
+      if (!is.na(sold_d) && sold_d >= anchor)
+        ev <- rbind(ev[ev$date < sold_d, , drop = FALSE],
+                    data.frame(date = sold_d, state = "sell", stringsAsFactors = FALSE))
       if (!nrow(ev)) next
       ev$own <- vapply(ev$date, function(dd) { p <- asof(tkr, dd)
         if (is.na(p)) NA_real_ else (p / base_tk - 1) * 100 }, numeric(1))
@@ -8284,7 +8298,13 @@ server <- function(input, output, session) {
       if (length(heldtk)) { st[heldtk] <- "hold"; why[heldtk] <- "paused by user" }
       soldtk <- toupper(pp$ticker[!is.na(ps) & nzchar(ps)])
       soldtk <- intersect(soldtk, names(st))
-      if (length(soldtk)) { st[soldtk] <- "sell"; why[soldtk] <- "sold by user" }
+      if (length(soldtk)) {
+        st[soldtk] <- "sell"
+        # show the actual sell date on the chip (model sells carry their exit
+        # date in the reason; a hand-sold name should too) instead of a bare label
+        sd_by_tk <- setNames(ps, toupper(pp$ticker))
+        why[soldtk] <- paste("sold", sd_by_tk[soldtk])
+      }
     }
     col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
     # qualstream grades per ticker (latest non-vetoed); the top-20 AMONG THE
