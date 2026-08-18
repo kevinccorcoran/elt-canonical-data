@@ -1851,11 +1851,16 @@ ui <- navbarPage(
     # (see server(), 2026-07-23: it replays sessions into the busy event loop
     # and segfaults), so a dropped websocket otherwise sits grey until a manual
     # reload. Instead: on a real drop, reload the tab after a short backoff, and
-    # reset the counter once we reconnect. Caps at MAX quick tries so a server
-    # that is genuinely down is not hammered (overlay is left for the user).
+    # reset the counter once we reconnect. Caps at MAX tries so a server that is
+    # genuinely down is not hammered (overlay is left for the user). MAX was 5,
+    # which a run of dev restarts (each a disconnect) exhausted BEFORE the ~80s
+    # boot finished reconnecting - stranding the tab on a stale frame while the
+    # server ran fresh code. The ready() poll below already gates every reload on
+    # a real 200, so a down server is never hammered regardless of MAX; the cap is
+    # only a far backstop, so raise it to 40 to survive repeated restarts.
     tags$script(HTML("
       (function(){
-        var KEY = 'wf_reconnectTries', MAX = 5;
+        var KEY = 'wf_reconnectTries', MAX = 40;
         $(document).on('shiny:connected', function(){
           try { sessionStorage.removeItem(KEY); } catch (e) {}
         });
