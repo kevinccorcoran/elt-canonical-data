@@ -7356,6 +7356,25 @@ server <- function(input, output, session) {
   #    over the id filter). Tickers, not indices, so sorts/removals can't shift
   #    the meaning.
   lc_chart_ids_sel <- reactiveVal(NULL)
+
+  # Reset every tab's viz back to its default (blank) state when the Environment
+  # (database) is switched, so a chart from the previous DB never lingers until
+  # the next Generate. Companion to setup_env_switcher (which reseeds the connect
+  # fields). ignoreInit: fire only on a real switch, not the initial page load.
+  observeEvent(input$db_env, {
+    app_dataT(NULL);         status_msgT("Ready")
+    app_dataV(NULL);         status_msgV("Ready")
+    app_dataK(NULL);         status_msgK("Not connected.")
+    app_dataP(NULL);         status_msgP("Ready")
+    app_dataRS_slot(NULL);   app_dataRS_heatmap(NULL); app_dataRS_meta(NULL)
+    app_dataRS_allIds(NULL); status_msgRS("Ready")
+    app_dataMV_ic(NULL);     app_dataMV_payoff(NULL);  app_dataMV_tiers(NULL)
+    app_dataMV_forest(NULL); status_msgMV("Ready")
+    app_dataBL(NULL);        chart_rowsBL(0);          status_msgBL("Ready")
+    app_dataFC(NULL);        status_msgFC("Ready")
+    app_dataLC(NULL);        lc_chart_ids_sel(NULL);   status_msgLC("Ready")
+  }, ignoreInit = TRUE)
+
   observeEvent(input$lcChartIds, {
     v <- if (is.null(input$lcChartIds)) character(0) else as.character(input$lcChartIds)
     allc <- as.character(isolate(lc_holding_cids()))
