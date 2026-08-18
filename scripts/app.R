@@ -376,6 +376,12 @@ lc_board_trail <- function(M, dates, tk, led, epoch, prov, now_state,
   }
   if (length(open_j) && !is.na(now_state) && now_state %in% c("buy", "hold"))
     row[open_j[length(open_j)]] <- now_state
+  # A current SELL with no model sell in the matrix is a hand-sold / gate-flip-
+  # today name (a dev override, or state_now flipping to sell before the ledger
+  # records it). Pin it at the last open day so the sketch shows the sell instead
+  # of silently dropping the name to its last buy/hold state.
+  if (length(open_j) && identical(now_state, "sell") && !any(row == "sell"))
+    row[open_j[length(open_j)]] <- "sell"
   keep <- which(nzchar(row))
   if (!length(keep)) return(NULL)
   st <- unname(row[keep]); dt <- as.character(dates[keep])
