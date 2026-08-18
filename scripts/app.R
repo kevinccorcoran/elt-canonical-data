@@ -9110,9 +9110,12 @@ server <- function(input, output, session) {
              xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
              ax = 0, ay = -11 - 13 * lvl[i], font = list(color = cc, size = 9),
-             # OPAQUE bg (see single-overlay flags): the green basket line the
-             # dots ride bleeds through a transparent box and washes the label
-             bgcolor = "#0b1220", bordercolor = cc, borderwidth = 1,
+             # OPAQUE bg: the bright green basket line the dots ride bleeds through
+             # and washes the label to a pale box (Kevin, recurring). A plain hex
+             # should be opaque, but pin opacity=1 explicitly to rule out any
+             # inherited annotation alpha, use solid black, and a 2px border so a
+             # live redraw is unmistakable vs a stale cached figure.
+             opacity = 1, bgcolor = "#000000", bordercolor = cc, borderwidth = 2,
              borderpad = 1)
       })
       ann <- c(ann, apann)
