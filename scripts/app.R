@@ -6812,6 +6812,9 @@ server <- function(input, output, session) {
     # sketch to lines-only so the white line + pins never outlive the filter.
     lc_hist_tk(NULL)
   }, ignoreNULL = FALSE, ignoreInit = TRUE)
+  # switching the hold-length horizon also clears any singled-out ticker overlay
+  # (the white line), so a horizon change gives a clean lines-only sketch.
+  observeEvent(input$holdLC, lc_hist_tk(NULL), ignoreInit = TRUE)
   output$statusMessageLC <- renderText({ status_msgLC() })
 
   # ── Personal portfolio: strategy follower (model DCA + ladder sells) ──────
@@ -8412,7 +8415,43 @@ server <- function(input, output, session) {
       v <- nw_of[toupper(t)]
       if (length(v) == 1 && !is.na(v)) as.integer(v) else NA_integer_
     }
-    chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE, nw = NA) span(
+    # Current-trade return per board name: the name's own price move from this
+    # open episode's entry (dv$entry_of) to today, or to its sell date if
+    # hand-sold. Shown as the clickable number on each chip (click -> full flip
+    # history modal). One price query for all board names + SPY.
+    board_ret <- local({
+      tks <- toupper(names(st)); res <- setNames(rep(NA_real_, length(tks)), tks)
+      con2 <- tryCatch(get_con(input), error = function(e) NULL)
+      if (!is.null(con2) && length(tks)) {
+        on.exit({ if (DBI::dbIsValid(con2)) dbDisconnect(con2) }, add = TRUE)
+        inl <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
+        px <- tryCatch(dbGetQuery(con2, sprintf(
+          "SELECT ticker, date::text d, adj_close px FROM cdm.ingest_combined
+           WHERE ticker IN (%s,'SPY') AND date >= DATE '2025-01-01' ORDER BY ticker, date", inl)),
+          error = function(e) NULL)
+        if (!is.null(px) && nrow(px)) {
+          px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
+          lastd <- suppressWarnings(max(px$d[px$ticker == "SPY"]))
+          pmap <- split(px[, c("d", "px")], toupper(px$ticker))
+          pp <- tryCatch(lc_pos(), error = function(e) NULL)
+          sold_map <- if (!is.null(pp) && nrow(pp))
+            setNames(suppressWarnings(as.Date(as.character(pp$sold_date))), toupper(pp$ticker)) else NULL
+          asof <- function(sub, dd) { v <- sub$px[sub$d <= dd]; if (!length(v)) NA_real_ else v[length(v)] }
+          for (tk in tks) {
+            sub <- pmap[[tk]]; if (is.null(sub) || !nrow(sub)) next
+            en_raw <- if (!is.null(dv$entry_of) && tk %in% names(dv$entry_of)) dv$entry_of[[tk]] else NA
+            en <- suppressWarnings(as.Date(en_raw)); if (is.na(en)) next
+            ex <- if (!is.null(sold_map) && tk %in% names(sold_map) &&
+                      !is.na(sold_map[[tk]]) && sold_map[[tk]] >= en) sold_map[[tk]] else lastd
+            ep <- asof(sub, en); xp <- asof(sub, ex)
+            if (!is.na(ep) && ep != 0 && !is.na(xp)) res[[tk]] <- (xp / ep - 1) * 100
+          }
+        }
+      }
+      res
+    })
+    ret_get <- function(t) { u <- toupper(t); if (u %in% names(board_ret)) board_ret[[u]] else NA_real_ }
+    chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE, nw = NA, ret = NA) span(
       style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
                              " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
                              " margin:2px; font-size:0.78rem; font-weight:600; cursor:pointer;%s"),
@@ -8422,16 +8461,27 @@ server <- function(input, output, session) {
       title = "click for state history",
       if (nzchar(note)) sprintf("%s · %s", t, note) else t,
       if (plus) span("+", style = "color:#fb923c; font-weight:800; margin-left:3px;"),
-      span("P&L",
-        style = sprintf(paste0("margin-left:5px; cursor:pointer; font-size:0.62rem;",
-                               " font-weight:700; border-radius:4px; padding:1px 4px;%s"),
-          if (!is.na(nw) && nw <= 4) " color:#f59e0b; border:1px solid #f59e0b88;"
-          else " color:#94a3b8; border:1px solid #94a3b855;"),
-        onclick = sprintf(paste0("event.stopPropagation();",
-                          "Shiny.setInputValue('lcFlipHist','%s',{priority:'event'})"), t),
-        title = if (!is.na(nw) && nw <= 4)
-                  "thin evidence - click: flip history & return vs SPY"
-                else "click: flip history & return vs SPY"))
+      # The RETURN number itself is the button: shows this name's current-trade
+      # return (green/red), click opens the full flip history vs SPY. stopPropagation
+      # so it never also singles the ticker out on the chart. Falls back to a "P&L"
+      # label when the return can't be priced yet.
+      local({
+        oc <- sprintf(paste0("event.stopPropagation();",
+                "Shiny.setInputValue('lcFlipHist','%s',{priority:'event'})"), t)
+        ttl <- if (!is.na(nw) && nw <= 4) "thin evidence - click: flip history & return vs SPY"
+               else "click: flip history & return vs SPY"
+        if (!is.na(ret)) {
+          rc <- if (ret >= 0) "#10b981" else "#dc2626"
+          span(sprintf("%+.1f%%", ret),
+            style = sprintf(paste0("margin-left:5px; cursor:pointer; font-size:0.7rem;",
+                     " font-weight:700; border-radius:4px; padding:1px 5px; color:%s; border:1px solid %s55;"),
+                     rc, rc),
+            onclick = oc, title = ttl)
+        } else span("P&L",
+          style = paste0("margin-left:5px; cursor:pointer; font-size:0.62rem; font-weight:700;",
+                   " border-radius:4px; padding:1px 4px; color:#94a3b8; border:1px solid #94a3b855;"),
+          onclick = oc, title = ttl)
+      }))
     section <- function(title, colr, ticks, notes, max_h = NA) {
       div(style = "margin-bottom:1rem;",
         div(style = sprintf("color:%s; font-weight:700; margin-bottom:0.35rem;", colr),
@@ -8440,7 +8490,7 @@ server <- function(input, output, session) {
               sprintf("display:flex; flex-wrap:wrap; max-height:%dpx; overflow-y:auto;", max_h)
             else "display:flex; flex-wrap:wrap;",
           mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks,
-                                      plus = t %in% qs_pass, nw = nw_get(t)),
+                                      plus = t %in% qs_pass, nw = nw_get(t), ret = ret_get(t)),
                  ticks, notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)))
     }
     note_line <- function(txt) div(
@@ -8653,7 +8703,7 @@ server <- function(input, output, session) {
                                    " gap:2px; max-height:%dpx; overflow-y:auto;"), max_h),
           if (length(ticks))
             mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks,
-                                        plus = t %in% qs_pass, nw = nw_get(t)),
+                                        plus = t %in% qs_pass, nw = nw_get(t), ret = ret_get(t)),
                    ticks, ch_notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)
           else div(style = "color:#475569; font-size:0.75rem; font-style:italic; padding:0.3rem;",
                    "none")))
