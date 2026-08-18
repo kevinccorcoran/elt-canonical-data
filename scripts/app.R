@@ -8541,7 +8541,23 @@ server <- function(input, output, session) {
       }
       res
     })
-    ret_get <- function(t) { u <- toupper(t); if (u %in% names(board_ret)) board_ret[[u]] else NA_real_ }
+    # Prefer the return the track-record strip already computed for this open trade
+    # (reuses its single fetch, so chip and strip/modal always agree). board_ret is
+    # the fallback for names the strip doesn't cover (non-qs when the filter is on)
+    # or if it didn't load - so one path missing can't blank every chip's number.
+    strip_ret <- local({
+      tt <- tryCatch(lc_track_record()$table, error = function(e) NULL)
+      if (is.null(tt) || !nrow(tt)) return(setNames(numeric(0), character(0)))
+      op <- tt[tt$open %in% TRUE & !is.na(tt$ret), , drop = FALSE]
+      if (!nrow(op)) return(setNames(numeric(0), character(0)))
+      keep <- !duplicated(toupper(op$ticker), fromLast = TRUE)
+      setNames(op$ret[keep], toupper(op$ticker)[keep])
+    })
+    ret_get <- function(t) {
+      u <- toupper(t)
+      if (u %in% names(strip_ret)) return(strip_ret[[u]])
+      if (u %in% names(board_ret)) board_ret[[u]] else NA_real_
+    }
     chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE, nw = NA, ret = NA) span(
       style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
                              " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
