@@ -7326,9 +7326,19 @@ server <- function(input, output, session) {
     if (is.null(p) || !nrow(p) || !isTRUE(input$lcBuyQSonly)) return(p)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     if (is.null(dv) || !length(dv$qs_grade)) return(p)
-    g_v <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
-    gp  <- g_v[toupper(p$ticker)]
-    p[!is.na(gp) & gp >= QS_MIN, , drop = FALSE]
+    tk   <- toupper(p$ticker)
+    g_v  <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+    keep <- !is.na(g_v[tk]) & g_v[tk] >= QS_MIN
+    # match the board's orange-+ set: qs pass AND still ON the board (board_ok =
+    # cohort entry or proven at horizon today). A paused / dropped name keeps its
+    # old grade but is no longer a current board pick, so it leaves the qs-only
+    # view - which is why the board shows one qs hold (COKE) but the raw book
+    # carried nine more. Untick the box to see every position again.
+    if (!is.null(dv$board_ok)) {
+      bo   <- setNames(as.logical(dv$board_ok), toupper(names(dv$board_ok)))[tk]
+      keep <- keep & !is.na(bo) & bo
+    }
+    p[keep, , drop = FALSE]
   })
 
   lc_port_series <- reactive({
