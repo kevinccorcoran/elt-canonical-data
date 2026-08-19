@@ -9108,43 +9108,49 @@ server <- function(input, output, session) {
           hovertemplate = "%{text}<extra></extra>")
       }
       ap <- ap[order(ap$date), , drop = FALSE]
-      xs <- as.numeric(ap$date)
+      # ONE text flag per ticker (its earliest event) so a re-firing name
+      # (buy->hold->buy, e.g. AVGO/CASY) shows a single label instead of a
+      # stack of duplicates. The colored dots above still mark EVERY event;
+      # only the ticker flags dedupe, which also thins the dense cluster.
+      aplab <- ap[!duplicated(ap$ticker), , drop = FALSE]
+      xs <- as.numeric(aplab$date)
       xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
       span <- max(xhi - xlo, 1)
-      labw <- vapply(seq_len(nrow(ap)), function(i)
-        (nchar(ap$ticker[i]) * 6 + 16) * span / 760, numeric(1))
-      lvl <- integer(nrow(ap)); MAXLVL <- 8L
-      for (i in seq_len(nrow(ap))) {
+      # OVERESTIMATE each flag's x-footprint (size-9 text + 2px border + pad):
+      # ~7px/char + 22px chrome so the packer never calls a near-miss a "fit".
+      labw <- vapply(seq_len(nrow(aplab)), function(i)
+        (nchar(aplab$ticker[i]) * 7 + 22) * span / 760, numeric(1))
+      # Stack colliding flags upward with NO level cap and a 20px step (> the
+      # ~16px flag height) so two flags can never overlap: horizontally the
+      # packer skips to a clear lane, vertically the levels stay 20px apart.
+      lvl <- integer(nrow(aplab))
+      for (i in seq_len(nrow(aplab))) {
         L <- 0L
-        while (L < MAXLVL) {
-          prev <- which(seq_len(nrow(ap)) < i & lvl == L)
+        repeat {
+          prev <- which(seq_len(nrow(aplab)) < i & lvl == L)
           if (!any(abs(xs[i] - xs[prev]) < (labw[i] + labw[prev]) / 2)) break
           L <- L + 1L
         }
         lvl[i] <- L
       }
-      apann <- lapply(seq_len(nrow(ap)), function(i) {
-        cc <- apcol[[ap$state[i]]]
-        list(x = format(ap$date[i]), y = ap$ret[i], xref = "x", yref = "y",
-             text = ap$ticker[i],
+      apann <- lapply(seq_len(nrow(aplab)), function(i) {
+        cc <- apcol[[aplab$state[i]]]
+        list(x = format(aplab$date[i]), y = aplab$ret[i], xref = "x", yref = "y",
+             text = aplab$ticker[i],
              xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
-             ax = 0, ay = -11 - 13 * lvl[i], font = list(color = cc, size = 9),
-             # OPAQUE bg: the bright green basket line the dots ride bleeds through
-             # and washes the label to a pale box (Kevin, recurring). A plain hex
-             # should be opaque, but pin opacity=1 explicitly to rule out any
-             # inherited annotation alpha, use solid black, and a 2px border so a
-             # live redraw is unmistakable vs a stale cached figure.
+             ax = 0, ay = -12 - 20 * lvl[i], font = list(color = cc, size = 9),
+             # OPAQUE solid-black bg so the bright basket line the dots ride
+             # cannot bleed through and wash the flag to a pale/white box.
              opacity = 1, bgcolor = "#000000", bordercolor = cc, borderwidth = 2,
              borderpad = 1)
       })
       ann <- c(ann, apann)
-      # headroom so the upward label stack never clips against the plot top
-      # (tuned to the tighter 13px-per-level stack + size-9 labels above)
+      # headroom scales with the tallest stack (20px/level) so flags never clip
       yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
       ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
-      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.085 * max(lvl)))
+      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.13 * max(lvl)))
       ap_suffix <- " · all qualstream pins"
     }
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
