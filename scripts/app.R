@@ -76,9 +76,9 @@ save_portfolio <- function(df) {
 
 # Qualstream orange-+ rule, shared by the board's mark AND the portfolio's
 # QS_MIN marks the orange + on board chips (grade threshold, Kevin's call
-# 2026-08-11) AND gates the portfolio seed (Kevin's call 2026-08-19: the
-# portfolio shows only qs picks by default). The seed takes every validated-
-# board BUY graded >= QS_MIN, ranked by grade, vetoed names
+# 2026-08-11). The SEED no longer gates on it: one retroactive grade vintage
+# cannot validate a 68 cut, so the seed takes every validated-board BUY,
+# ranked by grade (ungraded rank after, by signal persistence), vetoed names
 # excluded, capped at QS_CAP overall and QS_CLUSTER_CAP per cluster id
 # (concentration guard: the seed set has clustered ~7+7 across two cluster
 # models before, so one cluster-gate flip would move a large block of the board
@@ -6916,27 +6916,6 @@ server <- function(input, output, session) {
         return()   # let the write settle; the next pass handles seeding
       }
     }
-    # prune stale non-qs model seeds: Kevin's call 2026-08-19 - the strategy
-    # follower shows ONLY qs picks. Untouched model-seed rows graded below
-    # QS_MIN (or never graded) are dropped here so the existing book self-heals,
-    # not just future seeds. Guarded by the non-empty qs_buys checked above (a
-    # non-empty queue means grades are loaded, since the seed now gates on
-    # QS_MIN), so the synchronized grade-expiry cliff never wipes the portfolio.
-    # Manual / adopted rows and any stamped (held/sold) row are never touched;
-    # pruned names are NOT dismissed, so a name that re-qualifies reseeds.
-    if (nrow(cur)) {
-      g <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
-      e <- as.character(cur$end_date); s <- as.character(cur$sold_date)
-      clean <- (is.na(e) | !nzchar(e)) & (is.na(s) | !nzchar(s))
-      is_seed <- grepl("-seed", cur$id, fixed = TRUE) & cur$mode == "model" & clean
-      gr_cur  <- g[toupper(cur$ticker)]
-      non_qs  <- is_seed & (is.na(gr_cur) | gr_cur < QS_MIN)
-      if (any(non_qs, na.rm = TRUE)) {
-        cur <- cur[!non_qs, , drop = FALSE]
-        persist_positions(cur); lc_pos(cur)
-        return()   # let the write settle; the next pass handles seeding
-      }
-    }
     toAdd <- setdiff(dv$qs_buys, union(toupper(cur$ticker), dis))
     if (!length(toAdd)) return()
     now <- format(Sys.time())
@@ -7336,8 +7315,24 @@ server <- function(input, output, session) {
     val
   })
 
-  lc_port_series <- reactive({
+  # Positions AS DISPLAYED: honors the "Show qualstream + picks only" checkbox
+  # (default on) so the table, the headline count and the money curve/chart all
+  # filter to qualstream passers (grade >= QS_MIN) together, and show every
+  # position when it is unticked. DISPLAY ONLY - the seed, adopt, remove/hold/
+  # sell and persistence paths keep reading lc_pos() (the full book). Guarded on
+  # a loaded grade set so a grade-expiry cliff never blanks the view.
+  lc_pos_disp <- reactive({
     p <- lc_pos()
+    if (is.null(p) || !nrow(p) || !isTRUE(input$lcBuyQSonly)) return(p)
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    if (is.null(dv) || !length(dv$qs_grade)) return(p)
+    g_v <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+    gp  <- g_v[toupper(p$ticker)]
+    p[!is.na(gp) & gp >= QS_MIN, , drop = FALSE]
+  })
+
+  lc_port_series <- reactive({
+    p <- lc_pos_disp()
     if (is.null(p) || nrow(p) == 0) return(NULL)
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     con <- tryCatch(get_con(input), error = function(e) NULL)
@@ -7379,7 +7374,7 @@ server <- function(input, output, session) {
   # expansion as lc_row_perf, run through LC_PORTFOLIO_TICKER_SQL: tidy
   # (d, ticker, ret_pct) with a '__SPY__' benchmark line.
   lc_ticker_series <- reactive({
-    p <- lc_pos(); if (is.null(p) || !nrow(p)) return(NULL)
+    p <- lc_pos_disp(); if (is.null(p) || !nrow(p)) return(NULL)
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     d <- app_dataLC(); led <- if (!is.null(d)) d$led else NULL
     basis <- lc_track_basis()
@@ -7405,10 +7400,18 @@ server <- function(input, output, session) {
   })
 
   output$lcPosTable <- DT::renderDT({
-    p <- lc_pos()
-    if (is.null(p) || nrow(p) == 0)
+    praw <- lc_pos()
+    if (is.null(praw) || nrow(praw) == 0)
       return(DT::datatable(
         data.frame(Note = "No positions yet - Generate to auto-load the qualstream buys, or adopt a model BUY / add a manual plan above."),
+        rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
+    # the qualstream-only checkbox (default on) filters the shown positions via
+    # lc_pos_disp; untick it to see every position. This note shows only when the
+    # filter removes them all, never when the book is genuinely empty (above).
+    p <- lc_pos_disp()
+    if (is.null(p) || nrow(p) == 0)
+      return(DT::datatable(
+        data.frame(Note = "No qualstream picks in the book - untick 'Show qualstream + picks only' to see all positions."),
         rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
     dv  <- tryCatch(derivedLC(), error = function(e) NULL)
     d   <- app_dataLC()
@@ -7953,7 +7956,7 @@ server <- function(input, output, session) {
   })
 
   output$lcPortSummary <- renderUI({
-    p <- lc_pos(); n <- if (is.null(p)) 0L else nrow(p)
+    p <- lc_pos_disp(); n <- if (is.null(p)) 0L else nrow(p)
     ser <- tryCatch(lc_port_series(), error = function(e) NULL)
     txt <- if (is.null(ser) || !nrow(ser)) sprintf(" - %d position%s", n, if (n == 1) "" else "s")
       else { last <- ser[nrow(ser), ]
@@ -8390,17 +8393,15 @@ server <- function(input, output, session) {
                   setNames(suppressWarnings(as.numeric(d$qs$grade)), d$qs$ticker)
                 else setNames(numeric(0), character(0))
     buy_univ <- tickers[board_ok[tickers] & state_now[tickers] == "buy"]
-    # seed candidates: qualstream PASSERS among the validated-board BUYs
-    # (grade >= QS_MIN). Kevin's call 2026-08-19 - the portfolio should show
-    # only qs picks by default, so the seed re-gates on the >= QS_MIN cut
-    # instead of taking every validated BUY. Vetoed names stay out (a veto is
-    # an active thumbs-down). Ungraded / sub-68 names drop from the queue;
-    # remaining names rank by grade, then by signal persistence. Tradeoff: on
-    # the synchronized grade-expiry cliff (QS_MAX_AGE_DAYS) the seed adds
-    # nothing until grades refresh - existing positions are never pruned.
+    # seed candidates: EVERY validated-board BUY. The grade RANKS the queue,
+    # it no longer gates it - one retroactive grade vintage cannot validate a
+    # 68 cut, and the hard gate collapsed the buy list to the 15 graded
+    # passers while 3x as many validated names sat invisible. Vetoed names
+    # stay out (a veto is an active thumbs-down; no grade is not). Ranking:
+    # graded names first by grade, ungraded after by signal persistence.
+    # The qualstream-only VIEW is a display filter on the table (lcBuyQSonly),
+    # not a seed gate, so unticking the box still shows every seeded name.
     qs_ok    <- setdiff(buy_univ, if (!is.null(d$qs_veto)) d$qs_veto else character(0))
-    g_seed   <- as.numeric(qs_grade[qs_ok])
-    qs_ok    <- qs_ok[!is.na(g_seed) & g_seed >= QS_MIN]
     gr_rank  <- as.numeric(qs_grade[qs_ok]); gr_rank[is.na(gr_rank)] <- -Inf
     pr_rank  <- as.numeric(runs_of[qs_ok]);  pr_rank[is.na(pr_rank)] <- 0
     # concentration guard: within the ranked queue, keep at most
