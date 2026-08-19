@@ -6916,6 +6916,27 @@ server <- function(input, output, session) {
         return()   # let the write settle; the next pass handles seeding
       }
     }
+    # prune stale non-qs model seeds: Kevin's call 2026-08-19 - the strategy
+    # follower shows ONLY qs picks. Untouched model-seed rows graded below
+    # QS_MIN (or never graded) are dropped here so the existing book self-heals,
+    # not just future seeds. Guarded by the non-empty qs_buys checked above (a
+    # non-empty queue means grades are loaded, since the seed now gates on
+    # QS_MIN), so the synchronized grade-expiry cliff never wipes the portfolio.
+    # Manual / adopted rows and any stamped (held/sold) row are never touched;
+    # pruned names are NOT dismissed, so a name that re-qualifies reseeds.
+    if (nrow(cur)) {
+      g <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+      e <- as.character(cur$end_date); s <- as.character(cur$sold_date)
+      clean <- (is.na(e) | !nzchar(e)) & (is.na(s) | !nzchar(s))
+      is_seed <- grepl("-seed", cur$id, fixed = TRUE) & cur$mode == "model" & clean
+      gr_cur  <- g[toupper(cur$ticker)]
+      non_qs  <- is_seed & (is.na(gr_cur) | gr_cur < QS_MIN)
+      if (any(non_qs, na.rm = TRUE)) {
+        cur <- cur[!non_qs, , drop = FALSE]
+        persist_positions(cur); lc_pos(cur)
+        return()   # let the write settle; the next pass handles seeding
+      }
+    }
     toAdd <- setdiff(dv$qs_buys, union(toupper(cur$ticker), dis))
     if (!length(toAdd)) return()
     now <- format(Sys.time())
