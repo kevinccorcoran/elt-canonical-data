@@ -427,6 +427,35 @@ lc_trade_episodes <- function(trail, sold_over = as.Date(NA), last_d = as.Date(N
   eps
 }
 
+# Buy-RUN windows: segment the trail into contiguous BUY runs; each window ends
+# at its transition -> kind "hold" (downgraded to hold), "sell" (exited straight
+# from buy), or "current" (still buying, run open to today). A re-buy after a
+# hold opens a NEW window. A sell that fires from a hold state is not a buy-run,
+# so it is not counted as buy->sell. Same row shape as lc_trade_episodes so
+# lc_price_episodes prices each window vs SPY over its own dates.
+lc_buyrun_episodes <- function(trail, sold_over = as.Date(NA), last_d = as.Date(NA)) {
+  ev <- if (!is.null(trail) && nrow(trail))
+          trail[trail$state %in% c("buy", "hold", "sell"), , drop = FALSE] else NULL
+  eps <- list(); run_start <- as.Date(NA)
+  if (!is.null(ev) && nrow(ev)) for (i in seq_len(nrow(ev))) {
+    s <- ev$state[i]; dt <- as.Date(ev$date[i])
+    if (s == "buy") { if (is.na(run_start)) run_start <- dt }
+    else if (s == "hold") { if (!is.na(run_start)) {
+      eps[[length(eps) + 1]] <- list(entry = run_start, exit = dt, kind = "hold", open = FALSE)
+      run_start <- as.Date(NA) } }
+    else if (s == "sell") { if (!is.na(run_start)) {
+      eps[[length(eps) + 1]] <- list(entry = run_start, exit = dt, kind = "sell", open = FALSE)
+      run_start <- as.Date(NA) } }
+  }
+  if (!is.na(run_start)) {
+    if (!is.na(sold_over) && sold_over >= run_start)
+      eps[[length(eps) + 1]] <- list(entry = run_start, exit = sold_over, kind = "sell", open = FALSE)
+    else
+      eps[[length(eps) + 1]] <- list(entry = run_start, exit = last_d, kind = "current", open = TRUE)
+  }
+  eps
+}
+
 # Price a list of episodes for one ticker. tp / sp = the ticker's and SPY's
 # (d, px) frames (d = Date, px = numeric, sorted). Returns one row per episode:
 # entry, exit ("open" if still held), days, ret (own %), spy (%), vs (pp), open.
@@ -7240,7 +7269,7 @@ server <- function(input, output, session) {
     meta_dl <- if (!is.null(d$meta) && "delisted_date" %in% names(d$meta))
       setNames(suppressWarnings(as.Date(as.character(d$meta$delisted_date))), toupper(d$meta$ticker)) else NULL
     epoch <- as.Date(LEDGER_EPOCH)
-    rows <- list()
+    rows <- list(); brows <- list()
     for (tk in universe) {
       tp <- pmap[[tk]]; if (is.null(tp) || !nrow(tp)) next
       prov <- !is.null(dv$prov_of) && tk %in% names(dv$prov_of) && isTRUE(dv$prov_of[[tk]])
@@ -7253,15 +7282,31 @@ server <- function(input, output, session) {
       eps <- Filter(function(e) !is.na(e$entry) && e$entry >= epoch, eps)
       rr  <- lc_price_episodes(eps, tp, sp)
       if (!is.null(rr) && nrow(rr)) { rr$ticker <- tk; rows[[length(rows) + 1]] <- rr }
+      # buy-RUN windows (buy->hold / buy->sell / buy->now), each vs SPY same dates
+      beps <- lc_buyrun_episodes(trail, so, last_d)
+      beps <- Filter(function(e) !is.na(e$entry) && e$entry >= epoch, beps)
+      if (length(beps)) {
+        br <- lc_price_episodes(beps, tp, sp)
+        if (!is.null(br) && nrow(br)) {
+          br$kind <- vapply(beps, function(e) e$kind, ""); br$ticker <- tk
+          brows[[length(brows) + 1]] <- br }
+      }
     }
     if (!length(rows)) return(NULL)
     A <- do.call(rbind, rows)
     n_vs <- sum(!is.na(A$vs)); n_win <- sum(A$vs > 0, na.rm = TRUE)
+    B <- if (length(brows)) do.call(rbind, brows) else NULL
+    vsk <- function(k) { if (is.null(B)) return(list(v = NA_real_, n = 0L))
+      vv <- B$vs[B$kind == k]
+      list(v = if (any(!is.na(vv))) mean(vv, na.rm = TRUE) else NA_real_, n = sum(!is.na(vv))) }
+    wh <- vsk("hold"); ws <- vsk("sell"); wc <- vsk("current")
     list(n = nrow(A), closed = sum(!A$open), open = sum(A$open),
          avg_ret = mean(A$ret, na.rm = TRUE), avg_vs = mean(A$vs, na.rm = TRUE),
          n_vs = n_vs, n_win = n_win,
          win = if (n_vs) n_win / n_vs * 100 else NA_real_,
-         asof = last_d, table = A)
+         vs_hold = wh$v, n_hold = wh$n, vs_sell = ws$v, n_sell = ws$n,
+         vs_now = wc$v, n_now = wc$n,
+         asof = last_d, table = A, wtable = B)
   })
 
   # Tracking basis for MODEL rows (radio next to the chart filter): "epoch" =
@@ -8878,6 +8923,7 @@ server <- function(input, output, session) {
       tr <- tryCatch(lc_track_record(), error = function(e) NULL)
       signcol <- function(v) if (is.na(v)) "#94a3b8" else if (v >= 0) "#10b981" else "#dc2626"
       pctcol  <- function(v) if (is.na(v)) "#94a3b8" else if (v >= 50) "#10b981" else "#dc2626"
+      fmtpp   <- function(v) if (is.na(v)) "n/a" else sprintf("%+.1fpp", v)
       if (is.null(tr) || !isTRUE(tr$n > 0))
         return(div(style = "color:#64748b; font-size:0.72rem; margin:0.2rem 0 0.7rem;",
                    "No board trades priced yet since the epoch - Generate, or wait for the first close."))
@@ -8896,15 +8942,21 @@ server <- function(input, output, session) {
                sprintf("%d closed · %d open", tr$closed, tr$open), "#64748b"),
           pill("avg return", sprintf("%+.1f%%", tr$avg_ret),
                "own move, per trade", "#10b981", signcol(tr$avg_ret)),
-          pill("avg vs spy", sprintf("%+.1fpp", tr$avg_vs),
-               "each vs its own window", "#3b82f6", signcol(tr$avg_vs)),
+          pill("vs spy · to hold", fmtpp(tr$vs_hold),
+               sprintf("%d downgraded", tr$n_hold), "#3b82f6", signcol(tr$vs_hold)),
+          pill("vs spy · to sell", fmtpp(tr$vs_sell),
+               sprintf("%d sold from buy", tr$n_sell), "#3b82f6", signcol(tr$vs_sell)),
+          pill("vs spy · buying", fmtpp(tr$vs_now),
+               sprintf("%d still buy", tr$n_now), "#3b82f6", signcol(tr$vs_now)),
           pill("win rate", if (is.na(tr$win)) "n/a" else sprintf("%.0f%%", tr$win),
                sprintf("beat SPY on %d of %d", tr$n_win, tr$n_vs), "#a78bfa", pctcol(tr$win))),
         div(style = "color:#64748b; font-size:0.66rem; margin-top:0.25rem;",
-          sprintf(paste0("realized record of every %s since the %s epoch - a trade = buy to sell",
-            " (holds are mid-trade, not closes); sold banked, open marked to today. Compounded $ view:",
-            " the portfolio panel below."),
-            if (isTRUE(input$lcBuyQSonly)) "qualstream+ trade" else "board trade",
+          sprintf(paste0("every %s since the %s epoch. trades / avg return / win rate = full buy->sell",
+            " round trips (holds mid-trade). vs SPY is split by how each active-buy RUN ended - to hold",
+            " (downgraded), to sell (exited straight from buy), or still buying (open, to today) - each",
+            " vs SPY over that run's own dates; a re-buy opens a new run and a sell from a hold is outside",
+            " to-sell. Compounded $ view: the portfolio panel below."),
+            if (isTRUE(input$lcBuyQSonly)) "qualstream+ name" else "board name",
             format(as.Date(LEDGER_EPOCH), "%b %d"))))
     })
     if (identical(input$lcBoardLayout, "stacked")) {
