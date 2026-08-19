@@ -719,6 +719,22 @@ hr {
 /* row-select checkboxes: accent-tinted, centered, compact select column */
 #lcPosTable td.pf-sel, #lcPosTable th.pf-sel { width: 30px; text-align: center; padding-left: 4px; padding-right: 4px; }
 #lcPosTable input.pfrow, #lcPosTable input.pfall { accent-color: #38bdf8; cursor: pointer; width: 15px; height: 15px; vertical-align: middle; }
+/* portfolio table (Kevin 2026-08-19): single-line compact rows so the Start date
+   no longer wraps to two lines and every column is visible; horizontal scroll
+   (scrollX) reaches any column that overflows a narrow window. */
+#lcPosTable table.dataTable tbody td,
+#lcPosTable table.dataTable thead th { white-space: nowrap; }
+#lcPosTable table.dataTable.compact tbody td,
+#lcPosTable table.dataTable.compact thead th { padding: 3px 7px; font-size: 0.8rem; }
+#lcPosTable .dataTables_scrollBody { overflow-x: auto; }
+#lcPosTable .dataTables_scrollBody::-webkit-scrollbar { height: 9px; }
+#lcPosTable .dataTables_scrollBody::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+/* portfolio panel breaks out of the 8/12 main column to use the empty space to
+   its left (the sidebar ends well above it), so the wide table shows every
+   column at once. Wide screens only; narrow/mobile keeps it in the column. */
+@media (min-width: 1200px) {
+  details.pf-wide { margin-left: -22vw; width: calc(100% + 22vw); box-sizing: border-box; }
+}
 
 /* Global loading progress bar: an estimated-progress overlay shown whenever
    Shiny is busy (Connect, Generate, any heavy render), on every tab. Real query
@@ -2491,7 +2507,7 @@ ui <- navbarPage(
         uiOutput("qsCompareNoteLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1rem;"),
         # --- My portfolio: strategy follower (model-linked DCA + ladder sells) ---
-        tags$details(open = NA,
+        tags$details(open = NA, class = "pf-wide",
           style = "border:1px solid #1e293b; border-radius:8px; padding:0.6rem 0.9rem; margin-bottom:1rem;",
           tags$summary("My portfolio - strategy follower",
             uiOutput("lcPortSummary", inline = TRUE)),
@@ -7511,8 +7527,8 @@ server <- function(input, output, session) {
       # sortable, default sorted by cluster id ascending. data-row / cell_edit both
       # key on the data index (stable under sort), so the checkbox->chart map and
       # the $/buy edit stay correct however the user orders the rows.
-      options = list(dom = "t", ordering = TRUE, pageLength = 50,
-        order = list(list(1, "asc")),
+      options = list(dom = "t", ordering = TRUE, pageLength = 50, scrollX = TRUE,
+        autoWidth = FALSE, order = list(list(1, "asc")),
         columnDefs = list(
           list(targets = 0, orderable = FALSE, className = "dt-center pf-sel"),
           list(targets = 1, className = "dt-center", render = DT::JS(
