@@ -76,9 +76,9 @@ save_portfolio <- function(df) {
 
 # Qualstream orange-+ rule, shared by the board's mark AND the portfolio's
 # QS_MIN marks the orange + on board chips (grade threshold, Kevin's call
-# 2026-08-11). The SEED no longer gates on it: one retroactive grade vintage
-# cannot validate a 68 cut, so the seed takes every validated-board BUY,
-# ranked by grade (ungraded rank after, by signal persistence), vetoed names
+# 2026-08-11) AND gates the portfolio seed (Kevin's call 2026-08-19: the
+# portfolio shows only qs picks by default). The seed takes every validated-
+# board BUY graded >= QS_MIN, ranked by grade, vetoed names
 # excluded, capped at QS_CAP overall and QS_CLUSTER_CAP per cluster id
 # (concentration guard: the seed set has clustered ~7+7 across two cluster
 # models before, so one cluster-gate flip would move a large block of the board
@@ -8369,13 +8369,17 @@ server <- function(input, output, session) {
                   setNames(suppressWarnings(as.numeric(d$qs$grade)), d$qs$ticker)
                 else setNames(numeric(0), character(0))
     buy_univ <- tickers[board_ok[tickers] & state_now[tickers] == "buy"]
-    # seed candidates: EVERY validated-board BUY. The grade RANKS the queue,
-    # it no longer gates it - one retroactive grade vintage cannot validate a
-    # 68 cut, and the hard gate collapsed the buy list to the 15 graded
-    # passers while 3x as many validated names sat invisible. Vetoed names
-    # stay out (a veto is an active thumbs-down; no grade is not). Ranking:
-    # graded names first by grade, ungraded after by signal persistence.
+    # seed candidates: qualstream PASSERS among the validated-board BUYs
+    # (grade >= QS_MIN). Kevin's call 2026-08-19 - the portfolio should show
+    # only qs picks by default, so the seed re-gates on the >= QS_MIN cut
+    # instead of taking every validated BUY. Vetoed names stay out (a veto is
+    # an active thumbs-down). Ungraded / sub-68 names drop from the queue;
+    # remaining names rank by grade, then by signal persistence. Tradeoff: on
+    # the synchronized grade-expiry cliff (QS_MAX_AGE_DAYS) the seed adds
+    # nothing until grades refresh - existing positions are never pruned.
     qs_ok    <- setdiff(buy_univ, if (!is.null(d$qs_veto)) d$qs_veto else character(0))
+    g_seed   <- as.numeric(qs_grade[qs_ok])
+    qs_ok    <- qs_ok[!is.na(g_seed) & g_seed >= QS_MIN]
     gr_rank  <- as.numeric(qs_grade[qs_ok]); gr_rank[is.na(gr_rank)] <- -Inf
     pr_rank  <- as.numeric(runs_of[qs_ok]);  pr_rank[is.na(pr_rank)] <- 0
     # concentration guard: within the ranked queue, keep at most
