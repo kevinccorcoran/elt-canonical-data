@@ -8480,7 +8480,13 @@ server <- function(input, output, session) {
       pe <- as.character(pp$end_date); ps <- as.character(pp$sold_date)
       heldtk <- toupper(pp$ticker[!is.na(pe) & nzchar(pe) & (is.na(ps) | !nzchar(ps))])
       heldtk <- intersect(heldtk, names(st))
-      if (length(heldtk)) { st[heldtk] <- "hold"; why[heldtk] <- "paused by user" }
+      if (length(heldtk)) {
+        st[heldtk] <- "hold"
+        # show the date the user paused it (mirrors the sold override showing its
+        # sell date) instead of a bare "paused by user" label
+        pe_by_tk <- setNames(pe, toupper(pp$ticker))
+        why[heldtk] <- paste("paused", pe_by_tk[heldtk])
+      }
       soldtk <- toupper(pp$ticker[!is.na(ps) & nzchar(ps)])
       soldtk <- intersect(soldtk, names(st))
       if (length(soldtk)) {
@@ -8705,7 +8711,7 @@ server <- function(input, output, session) {
     hz_days <- round(hz * 30.44)
     h_pct <- pmin(100L, as.integer(round(100 *
                as.numeric(Sys.Date() - as.Date(dv$entry_of[holds])) / hz_days)))
-    h_note <- ifelse(grepl("^matures", why[holds]) | why[holds] == "paused by user",
+    h_note <- ifelse(grepl("^matures", why[holds]) | grepl("^paused", why[holds]),
                      unname(why[holds]),
                      sprintf("%s · %d%%", dv$entry_of[holds], h_pct))
     # sell column: same qualstream filter while ticked, ordered by the exit
