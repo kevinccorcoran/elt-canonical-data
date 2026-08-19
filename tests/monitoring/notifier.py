@@ -1,5 +1,5 @@
 """Board transition notifier: diff each qualstream-graded ticker's board column
-against the last run and WhatsApp every change.
+against the last run and notify (Telegram) every change.
 
 Run it on a schedule (cron/Airflow) after the ledger + gate DAGs, and once daily
 (maturities change the board with no DB write):
@@ -44,13 +44,15 @@ def diff_states(prev: dict[str, str], cur: dict[str, BoardName]) -> list[tuple]:
     return out
 
 
-def format_message(ticker: str, old: str | None, new: str, grade: float | None) -> str:
+def format_message(ticker: str, old: str | None, new: str, grade: float | None,
+                   reason: str | None = None) -> str:
     g = f" ({grade:.0f})" if grade is not None else ""
+    r = f" · {reason}" if reason else ""      # why it flipped (gate/matured/etc)
     if old is None:
-        return f"\U0001F7E2 {ticker}{g} entered board → {new}"
+        return f"\U0001F7E2 {ticker}{g} entered board → {new}{r}"
     if new == "off-board":
         return f"⚪ {ticker} left the board (was {old})"
-    return f"{_ICON.get(new, '•')} {ticker}{g}: {old} → {new}"
+    return f"{_ICON.get(new, '•')} {ticker}{g}: {old} → {new}{r}"
 
 
 def run_once(conn, notify_fn, *, hz: int = DEFAULT_HZ, today: dt.date | None = None,
@@ -65,7 +67,8 @@ def run_once(conn, notify_fn, *, hz: int = DEFAULT_HZ, today: dt.date | None = N
     transitions = [] if not prev else diff_states(prev, current)  # empty snapshot -> silent baseline
 
     for ticker, old, new, grade in transitions:
-        notify_fn(format_message(ticker, old, new, grade))
+        reason = current[ticker].reason if ticker in current else None
+        notify_fn(format_message(ticker, old, new, grade, reason))
 
     with conn.cursor() as cur:
         cur.execute(f"DELETE FROM {snapshot_table}")
@@ -87,7 +90,7 @@ if __name__ == "__main__":
 
     load_dotenv(pathlib.Path(__file__).resolve().parents[1] / ".env")
     from tests.utilities.db import get_conn
-    from tests.utilities.notify import send_whatsapp
+    from tests.utilities.notify import send_notification
 
     # every message carries the watched environment ("[dev] ...", "[prod] ..."),
     # so one phone receiving from several notifiers stays unambiguous.
@@ -95,7 +98,7 @@ if __name__ == "__main__":
     env_label = os.getenv("BOARD_ENV") or os.getenv("DB_NAME") or "db"
 
     def _notify(text: str) -> bool:
-        return send_whatsapp(f"[{env_label}] {text}")
+        return send_notification(f"[{env_label}] {text}")
 
     connection = get_conn()
     try:

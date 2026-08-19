@@ -1,10 +1,16 @@
-"""WhatsApp delivery via CallMeBot (a free relay).
+"""Notification delivery via a Telegram bot.
 
-To change transport (e.g. to Meta's official WhatsApp Cloud API), swap this one
-file — callers only ever use send_whatsapp(text). Setup for CallMeBot:
-  1. add +34 623 80 11 90 to your phone contacts
-  2. WhatsApp it: "I allow callmebot to send me messages"
-  3. it replies with your apikey -> put it (and your number) in tests/.env
+Callers only ever use send_notification(text). One-time setup (~2 min, no account
+signup, no template approval, no phone verification):
+  1. In Telegram, message @BotFather -> /newbot -> pick a name + a username ->
+     it replies with a bot token.
+  2. Open your new bot and tap Start (send it any message) so a chat exists.
+  3. put the token in tests/.env as TELEGRAM_BOT_TOKEN. The chat id is discovered
+     from getUpdates on first send; set TELEGRAM_CHAT_ID to pin it (recommended,
+     and required for the Airflow failure alert which does not auto-discover).
+
+Telegram bots send free-form text to any user who has started them -- no template,
+no 24h customer-service window. Only trade-off vs WhatsApp: it's Telegram.
 """
 from __future__ import annotations
 
@@ -13,30 +19,60 @@ import os
 
 import requests
 
-CALLMEBOT_URL = "https://api.callmebot.com/whatsapp.php"
+_API = "https://api.telegram.org/bot{token}/{method}"
 
 
-def send_whatsapp(text: str, *, phone: str | None = None,
-                  apikey: str | None = None, timeout: int = 20) -> bool:
-    """Send one WhatsApp message. Returns True if sent, False if unconfigured
-    (logs a warning instead of raising, so an unconfigured cron run is harmless)."""
-    phone = phone or os.getenv("WHATSAPP_PHONE")
-    apikey = apikey or os.getenv("CALLMEBOT_APIKEY")
-    if not phone or not apikey:
+def _resolve_chat_id(token: str, timeout: int) -> str | None:
+    """Best-effort chat id from the most recent update the bot received
+    (getUpdates). Works once you've tapped Start. Pin TELEGRAM_CHAT_ID to skip
+    this -- getUpdates only returns the last ~24h and clashes with a webhook."""
+    try:
+        resp = requests.get(_API.format(token=token, method="getUpdates"),
+                            timeout=timeout)
+        data = resp.json()
+    except (requests.RequestException, ValueError):
+        return None
+    for upd in reversed(data.get("result", []) or []):
+        chat = ((upd.get("message") or upd.get("my_chat_member") or {})
+                .get("chat") or {})
+        if chat.get("id") is not None:
+            return str(chat["id"])
+    return None
+
+
+def send_notification(text: str, *, chat_id: str | None = None,
+                      token: str | None = None, timeout: int = 20) -> bool:
+    """Send one Telegram message. Returns True if delivered, False if unconfigured
+    or rejected (logs a warning instead of raising, so an unconfigured cron run is
+    harmless)."""
+    token = token or os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
+    if not token:
         logging.warning(
-            "WhatsApp not configured (set WHATSAPP_PHONE + CALLMEBOT_APIKEY in "
-            "tests/.env); message NOT sent:\n%s", text)
+            "Telegram not configured (set TELEGRAM_BOT_TOKEN in tests/.env); "
+            "message NOT sent:\n%s", text)
         return False
-    resp = requests.get(
-        CALLMEBOT_URL,
-        params={"phone": phone, "text": text, "apikey": apikey},
+    if not chat_id:
+        chat_id = _resolve_chat_id(token, timeout)
+        if not chat_id:
+            logging.warning(
+                "Telegram chat id unknown -- message the bot once (tap Start), or "
+                "set TELEGRAM_CHAT_ID in tests/.env; message NOT sent:\n%s", text)
+            return False
+
+    resp = requests.post(
+        _API.format(token=token, method="sendMessage"),
+        json={"chat_id": chat_id, "text": text},
         timeout=timeout,
     )
-    resp.raise_for_status()
-    # CallMeBot returns HTTP 200 even for failures (bad apikey, rate limit) -
-    # only the body says whether the message was accepted.
-    if "message queued" not in resp.text.lower():
-        logging.warning("CallMeBot did not queue the message: %s",
-                        resp.text[:200])
-        return False
-    return True
+    # Bot API: HTTP 200 + {"ok": true, ...} on success; otherwise
+    # {"ok": false, "description": ...}. Don't raise -- log & return.
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    if resp.status_code == 200 and body.get("ok"):
+        return True
+    logging.warning("Telegram did not send (HTTP %s): %s",
+                    resp.status_code, body.get("description") or resp.text[:200])
+    return False
