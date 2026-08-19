@@ -2467,26 +2467,11 @@ ui <- navbarPage(
                                 "7 months" = "7", "12 months" = "12",
                                 "20 months" = "20", "33 months" = "33"),
                     selected = "12"),
-        tags$span(paste("Pick horizon AND hold duration: the board replays the model's",
-                        "hz-month strategy. Entries come from the model's own record:",
-                        "quarterly walk-forward top slots (proven bins only, win rate",
-                        ">= 55% on >= 100 graded picks) plus the daily live ledger.",
-                        "A held name flips to sell when the recorded gate flips to SELL,",
-                        "when this horizon fully elapses (matured), or when the series",
-                        "is delisted."),
+        tags$span(paste("Pick horizon + hold: the board replays the model's hz-month strategy",
+                        "from its own record (walk-forward top slots + daily ledger)."),
                   style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
-        tags$p(paste("A decision board of the model's calls, by company name.",
-                     "sell = exit now (gate flipped, matured lately, or delisted).",
-                     "buy = the period's standing recs: proven rank slots backed by",
-                     "the majority of the last month's recorded runs (a rolling",
-                     "monthly evaluation, so one off-day cannot demote a durable",
-                     "name), ranked by persistence over the trailing 4-month review",
-                     "window (chip: win rate + BUY on n of N recorded runs).",
-                     "hold = the period's dropped recs, still inside their hold",
-                     "window; the chip shows entry date and % of horizon elapsed.",
-                     "closed = matured more than a month ago, collapsed to a count",
-                     "(full detail in the table). Unproven gate names live in the",
-                     "table only, flagged."),
+        tags$p(paste("buy = standing rec · hold = dropped but still in its window ·",
+                     "sell = exit (gate flip / matured / delisted) · closed = exited >1mo."),
                style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;"),
         radioButtons("lcBoardLayout", "Board layout",
                      choices = c("Columns (board)" = "columns", "Stacked" = "stacked"),
@@ -2513,18 +2498,9 @@ ui <- navbarPage(
             uiOutput("lcPortSummary", inline = TRUE)),
           div(
             div(style = "color:#64748b; font-size:0.72rem; margin-bottom:0.6rem;",
-                paste("Starts with every current BUY that passes qualstream (the board's",
-                      "orange +), auto-added as a $100/monthly plan on Generate. By default",
-                      "model holdings show the strategy's track record since the regime epoch;",
-                      "flip the radio by the chart to 'My money since I added' to see only your",
-                      "own cash flows. Remove any",
-                      "you don't want and it stays removed; Clear all resets to the current",
-                      "qualstream defaults. Add your own manual plans below.",
-                      "Model-linked buys pause when a name leaves the buy list and resume",
-                      "if it returns; a sell state winds the position down on a per-stock ladder",
-                      "(safe/good/best levels from the stock's own history). Simulated fills at",
-                      "daily closes; the SPY benchmark mirrors every buy and sell; sale proceeds",
-                      "sit in cash on both legs.")),
+                paste("Auto-seeds every current qualstream BUY as a $100 plan on Generate; buys pause",
+                      "when a name leaves the buy list, sell winds down on a ladder. Remove / Clear to",
+                      "edit; add manual plans below. Simulated fills at daily closes vs a same-cash SPY.")),
             uiOutput("lcAdoptRow"),
             div(style = "color:#94a3b8; font-size:0.72rem; margin:0.5rem 0 0.15rem; font-weight:600;",
                 "Or add a manual plan"),
@@ -8881,26 +8857,12 @@ server <- function(input, output, session) {
     closed_foot <- div(style = "color:#64748b; font-weight:600; font-size:0.85rem; margin:0.4rem 0 0.5rem;",
           sprintf("closed - exited over a month ago (%d) · detail in the table below",
                   length(closed)))
-    # Sticky shadow (teal): the hysteresis rule running in parallel since
-    # 2026-08-14 (monitoring.sticky_board_shadow, backfilled to the ledger
-    # epoch). Shown for comparison; the frozen board rule above is unchanged.
-    sh <- d$shadow
-    sh_ticks <- if (!is.null(sh) && nrow(sh) > 0) keep_id(sh$ticker) else character(0)
-    sh_i     <- if (length(sh_ticks)) match(sh_ticks, sh$ticker) else integer(0)
-    sh_note  <- if (length(sh_ticks))
-                  sprintf("%s · %dd", sh$entered_at[sh_i], sh$dwell_days[sh_i])
-                else character(0)
-    shadow_block <- if (!is.null(sh)) tagList(
-      section("sticky shadow - hysteresis rule, parallel to the frozen board (entry · days held)",
-              "#0d9488", sh_ticks, sh_note, max_h = 220),
-      note_line(paste(
-        "Teal = sticky shadow: the same signals through a hysteresis state",
-        "machine (enter: proven slot + BUY on >= 60% of the last month's runs",
-        "over >= 7 days; exit only on sustained failure: share < 40%, 5-run",
-        "gate-fail, 12-month maturity or delisting; 21-day re-entry cooldown).",
-        "Median dwell ~15 days vs 2 days for the raw gate. The frozen board",
-        "rule above is unchanged; adoption is decided at a freeze checkpoint.")))
-    else NULL
+    # Sticky-shadow board hidden from the daily view (Kevin 2026-08-19): it is
+    # checkpoint research (the hysteresis alternative), not the live board, and
+    # was too much on-screen. The shadow still computes in monitoring for the
+    # freeze eval; only its board section is dropped here. The sketch's qualstream
+    # pins are a separate overlay (lc_all_pins) and are unaffected.
+    shadow_block <- NULL
     # Realized track-record strip (Kevin 2026-08-18): at-a-glance stats for every
     # name the board has TRADED since the ledger epoch - a trade = one buy->sell
     # episode (buy<->hold flips are held-through, NOT closes). Sold trades banked,
@@ -9274,19 +9236,10 @@ server <- function(input, output, session) {
       else NULL
     tagList(ov_note, ap_note,
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
-      sprintf(paste("Descriptive, not a walk-forward test: qualstream has a single grade run",
-                    "(as of %s) applied across the whole window. The basket is ALL %d names qualstream",
-                    "graded (every non-vetoed scorecard), NOT just today's board buys; the green line is",
-                    "the %d that scored >= 68. So this %d is a broader set than the board's buy list -",
-                    "only the passers that are also current standing buys wear the orange + (the rest",
-                    "are on hold, matured, or off the board). Both lines are equal-weight, held from %s",
-                    "(the current 4-month window). Membership is retroactive (today's grades applied",
-                    "backward), which flatters both against SPY; the graded-vs-passed comparison is",
-                    "unaffected since both carry the same tilt. One retroactive grade set cannot yet",
-                    "prove qualstream adds return; that needs several cadence cycles of point-in-time",
-                    "grades.%s"),
-              if (is.na(qs_ran)) "n/a" else format(qs_ran), n_g, n_p, n_p,
-              format(d$qscmp_anchor), cliff)))
+      sprintf(paste("Descriptive, not a walk-forward test: one retroactive grade run (%s) applied",
+                    "backward, so membership is hindsight-picked - trust green-vs-orange, not either",
+                    "line vs SPY.%s"),
+              if (is.na(qs_ran)) "n/a" else format(qs_ran), cliff)))
   })
   observeEvent(input$qsClearOverlay, lc_hist_tk(NULL))
 
