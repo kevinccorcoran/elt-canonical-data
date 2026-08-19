@@ -474,6 +474,33 @@ lc_price_episodes <- function(eps, tp, sp) {
   do.call(rbind, rows)
 }
 
+# Aggregate the round-trip table (A) and buy-run window table (B) into the strip's
+# summary numbers. Split out so the whole-board record (lc_track_record) and the
+# cluster-filtered view (the strip) compute identically. Windows are
+# DURATION-WEIGHTED (weight = days held, >= 1) so a brief buy<->hold flip barely
+# counts; nm = distinct tickers per kind, exposing flip churn.
+lc_track_agg <- function(A, B) {
+  n_vs  <- if (is.null(A)) 0L else sum(!is.na(A$vs))
+  n_win <- if (is.null(A)) 0L else sum(A$vs > 0, na.rm = TRUE)
+  vsk <- function(k) {
+    if (is.null(B)) return(list(v = NA_real_, n = 0L, nm = 0L))
+    sub <- B[B$kind == k & !is.na(B$vs), , drop = FALSE]
+    if (!nrow(sub)) return(list(v = NA_real_, n = 0L, nm = 0L))
+    w <- pmax(sub$days, 1)
+    list(v = sum(sub$vs * w) / sum(w), n = nrow(sub), nm = length(unique(sub$ticker))) }
+  wh <- vsk("hold"); ws <- vsk("sell"); wc <- vsk("current")
+  list(n = if (is.null(A)) 0L else nrow(A),
+       closed = if (is.null(A)) 0L else sum(!A$open),
+       open   = if (is.null(A)) 0L else sum(A$open),
+       avg_ret = if (is.null(A)) NA_real_ else mean(A$ret, na.rm = TRUE),
+       avg_vs  = if (is.null(A)) NA_real_ else mean(A$vs,  na.rm = TRUE),
+       n_vs = n_vs, n_win = n_win,
+       win = if (n_vs) n_win / n_vs * 100 else NA_real_,
+       vs_hold = wh$v, n_hold = wh$n, nm_hold = wh$nm,
+       vs_sell = ws$v, n_sell = ws$n, nm_sell = ws$nm,
+       vs_now  = wc$v, n_now  = wc$n, nm_now  = wc$nm)
+}
+
 latest_qa_run <- function(history) {
   if (is.null(history) || nrow(history) == 0) return(NULL)
   latest_ts <- max(history$run_at)
@@ -1880,7 +1907,7 @@ FROM vdates v JOIN bv ON bv.d=v.d GROUP BY v.d ORDER BY v.d;"
 
 # ─── Define UI ───
 ui <- navbarPage(
-  title = "Analysis Dashboard",
+  title = "AlphaStream",
   id = "mainNav",   # active-tab input; gates the Lifecycle auto-refresh timer
   # the ONE shared connection, rendered on every tab above its content, plus the
   # global loading overlay (toggled by the shiny:busy/idle handler in head)
@@ -7294,27 +7321,10 @@ server <- function(input, output, session) {
     }
     if (!length(rows)) return(NULL)
     A <- do.call(rbind, rows)
-    n_vs <- sum(!is.na(A$vs)); n_win <- sum(A$vs > 0, na.rm = TRUE)
     B <- if (length(brows)) do.call(rbind, brows) else NULL
-    # DURATION-WEIGHTED per kind: weight each window's vs by its days held so a
-    # brief buy<->hold flip (near-0 days) barely counts and a flippy name can't
-    # dominate. Also report distinct tickers (nm) so the window/name ratio shows
-    # the churn directly.
-    vsk <- function(k) {
-      if (is.null(B)) return(list(v = NA_real_, n = 0L, nm = 0L))
-      sub <- B[B$kind == k & !is.na(B$vs), , drop = FALSE]
-      if (!nrow(sub)) return(list(v = NA_real_, n = 0L, nm = 0L))
-      w <- pmax(sub$days, 1)
-      list(v = sum(sub$vs * w) / sum(w), n = nrow(sub), nm = length(unique(sub$ticker))) }
-    wh <- vsk("hold"); ws <- vsk("sell"); wc <- vsk("current")
-    list(n = nrow(A), closed = sum(!A$open), open = sum(A$open),
-         avg_ret = mean(A$ret, na.rm = TRUE), avg_vs = mean(A$vs, na.rm = TRUE),
-         n_vs = n_vs, n_win = n_win,
-         win = if (n_vs) n_win / n_vs * 100 else NA_real_,
-         vs_hold = wh$v, n_hold = wh$n, nm_hold = wh$nm,
-         vs_sell = ws$v, n_sell = ws$n, nm_sell = ws$nm,
-         vs_now = wc$v, n_now = wc$n, nm_now = wc$nm,
-         asof = last_d, table = A, wtable = B)
+    # Whole-board record; the strip re-aggregates a cluster-filtered slice via
+    # lc_track_agg on A/B, so this reactive stays independent of the cluster filter.
+    c(lc_track_agg(A, B), list(asof = last_d, table = A, wtable = B))
   })
 
   # Tracking basis for MODEL rows (radio next to the chart filter): "epoch" =
@@ -8925,16 +8935,33 @@ server <- function(input, output, session) {
     # reconciles with the aggregate. Duration-fair by design: vs SPY spans each
     # trade's own window and win rate is one vote per trade - no per-day/annualising.
     # Universe follows the qualstream+picks filter (default on = qs-passed names only,
-    # "only the qs are trades"); never narrowed by the cluster-id filter. The
-    # compounded "how much money" view is the portfolio panel below.
+    # "only the qs are trades") AND, in the strip, the board's cluster-id view filter
+    # (re-aggregated downstream) so the numbers match the columns/sketch you are
+    # viewing. The compounded "how much money" view is the portfolio panel below.
     track_strip <- local({
       tr <- tryCatch(lc_track_record(), error = function(e) NULL)
       signcol <- function(v) if (is.na(v)) "#94a3b8" else if (v >= 0) "#10b981" else "#dc2626"
       pctcol  <- function(v) if (is.na(v)) "#94a3b8" else if (v >= 50) "#10b981" else "#dc2626"
       fmtpp   <- function(v) if (is.na(v)) "n/a" else sprintf("%+.1fpp", v)
-      if (is.null(tr) || !isTRUE(tr$n > 0))
+      if (is.null(tr))
         return(div(style = "color:#64748b; font-size:0.72rem; margin:0.2rem 0 0.7rem;",
                    "No board trades priced yet since the epoch - Generate, or wait for the first close."))
+      # Cluster-aware: apply the board's SAME cluster-id view filter (id_of/sel_id)
+      # to the whole-board record's episode tables, then re-aggregate, so the strip
+      # matches the columns/sketch. Filtering here (not in lc_track_record) keeps the
+      # price query cached across cluster toggles. Names with no cluster id show.
+      idu <- setNames(as.integer(id_of), toupper(names(id_of)))
+      insel <- function(tk) { tk <- toupper(tk)
+        if (is.null(sel_id)) return(rep(TRUE, length(tk)))
+        if (!length(sel_id)) return(rep(FALSE, length(tk)))
+        ii <- idu[tk]; unname(is.na(ii) | ii %in% as.integer(sel_id)) }
+      A <- tr$table; B <- tr$wtable
+      if (!is.null(A) && nrow(A)) A <- A[insel(A$ticker), , drop = FALSE]
+      if (!is.null(B) && nrow(B)) B <- B[insel(B$ticker), , drop = FALSE]
+      tr <- lc_track_agg(A, B)
+      if (!isTRUE(tr$n > 0))
+        return(div(style = "color:#64748b; font-size:0.72rem; margin:0.2rem 0 0.7rem;",
+                   "No board trades in the selected clusters - adjust the cluster-id filter."))
       pill <- function(lab, big, sub, accent, valcol = "#e2e8f0")
         div(style = paste0("flex:1 1 0; min-width:120px; background:rgba(148,163,184,0.04);",
               " border:1px solid #1e293b; border-left:3px solid ", accent,
@@ -8968,7 +8995,7 @@ server <- function(input, output, session) {
           pill("still buying", fmtpp(tr$vs_now),
                sprintf("%d windows · %d names", tr$n_now, tr$nm_now), "#3b82f6", signcol(tr$vs_now))),
         div(style = "color:#64748b; font-size:0.66rem; margin-top:0.35rem;",
-          sprintf(paste0("every %s since the %s epoch - small sample, read as directional not proof.",
+          sprintf(paste0("every %s in the selected clusters since the %s epoch - small sample, read as directional not proof.",
             " Top row = full buy->sell round trips (one vote per position, holds held through). Bottom =",
             " each active-buy RUN vs SPY over its own dates, DURATION-WEIGHTED so a brief buy<->hold flip",
             " barely counts; a re-buy opens a new run, and 'windows vs names' shows the flip churn. buy->hold",
