@@ -7850,6 +7850,22 @@ server <- function(input, output, session) {
       dv$board_ok[dv$tickers] %in% TRUE &
       dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
       !is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN]
+    # cluster-id view filter (match the board + the sketch lines): keep only names
+    # in the selected clusters; names with no current cluster (delisted/closed)
+    # still show. NULL = filter untouched -> show all; character(0) = deselect-all.
+    sel_id <- lc_board_ids_sel()
+    if (!is.null(sel_id)) {
+      idc <- if (!is.null(d$gate$id))
+               setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker))
+             else setNames(integer(0), character(0))
+      if (!is.null(d$coh) && nrow(d$coh) > 0) {
+        ex <- d$coh[!(toupper(d$coh$ticker) %in% names(idc)), c("ticker", "id")]
+        ex <- ex[!duplicated(toupper(ex$ticker)), , drop = FALSE]
+        if (nrow(ex)) idc <- c(idc, setNames(as.integer(ex$id), toupper(ex$ticker)))
+      }
+      if (!length(sel_id)) tks <- tks[FALSE]
+      else { ii <- idc[toupper(tks)]; tks <- tks[is.na(ii) | ii %in% as.integer(sel_id)] }
+    }
     # focus mode: while a chip is selected, hide the overview so its single-ticker
     # overlay renders clean (the pre-all-pins behavior). Clear the chip to return.
     clk <- lc_hist_tk()
