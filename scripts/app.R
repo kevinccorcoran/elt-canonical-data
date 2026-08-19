@@ -9108,65 +9108,43 @@ server <- function(input, output, session) {
           hovertemplate = "%{text}<extra></extra>")
       }
       ap <- ap[order(ap$date), , drop = FALSE]
-      # ONE text flag per ticker (its earliest event) so a re-firing name
-      # (buy->hold->buy, e.g. AVGO/CASY) shows a single label instead of a
-      # stack of duplicates. The colored dots above still mark EVERY event;
-      # only the ticker flags dedupe, which also thins the dense cluster.
-      aplab <- ap[!duplicated(ap$ticker), , drop = FALSE]
-      xs <- as.numeric(aplab$date)
+      xs <- as.numeric(ap$date)
       xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
       span <- max(xhi - xlo, 1)
-      # Lay the flags out in DATA coordinates (axref/ayref='x'/'y') so spacing
-      # does NOT depend on the unknown rendered plot size (the bug that let flags
-      # overlap when the real plot was wider than an assumed pixel width). Size
-      # each flag against a CONSERVATIVE min plot (470x300 px); the real plot is
-      # bigger, so gaps only grow. Flags sit in a short banded ribbon above the
-      # data, spread horizontally (relaxed apart, and into open space to the left
-      # of an edge cluster) with a thin leader line down to each dot. Guarantee:
-      # within a row, x-gaps >= half-widths; rows share a common y, rowdy apart
-      # (> flag height) => no two flags can overlap at any real plot >= the min.
-      apax <- 470; apay <- 300
-      wdx <- (nchar(aplab$ticker) * 7 + 24) * span / apax     # flag width, data-x
-      pad <- 6 * span / apax
-      ymin <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
-      ymax <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
-      yspan <- max(ymax - ymin, 1)
-      rowdy <- 22 * yspan / apay; bandy <- ymax + 26 * yspan / apay
-      n <- nrow(aplab); ord <- order(xs)
-      nrows <- max(1L, ceiling(sum(wdx) / (span * 0.96)))     # rows to fit the width
-      rowix <- integer(n); rowix[ord] <- (seq_len(n) - 1L) %% nrows   # interleave by x
-      axv <- xs; ayv <- numeric(n)
-      for (rr in unique(rowix)) {
-        mem <- ord[rowix[ord] == rr]; p <- xs[mem]            # this row's flags, x order
-        for (iter in seq_len(400)) {                          # relax neighbours apart
-          moved <- FALSE
-          if (length(mem) >= 2) for (k in seq_len(length(mem) - 1L)) {
-            need <- (wdx[mem[k]] + wdx[mem[k + 1L]]) / 2 + pad
-            ov <- need - (p[k + 1L] - p[k])
-            if (ov > 1e-9) { p[k] <- p[k] - ov / 2; p[k + 1L] <- p[k + 1L] + ov / 2; moved <- TRUE }
-          }
-          p <- pmin(pmax(p, xlo + wdx[mem] / 2), xhi - wdx[mem] / 2)
-          if (!moved) break
+      labw <- vapply(seq_len(nrow(ap)), function(i)
+        (nchar(ap$ticker[i]) * 6 + 16) * span / 760, numeric(1))
+      lvl <- integer(nrow(ap)); MAXLVL <- 8L
+      for (i in seq_len(nrow(ap))) {
+        L <- 0L
+        while (L < MAXLVL) {
+          prev <- which(seq_len(nrow(ap)) < i & lvl == L)
+          if (!any(abs(xs[i] - xs[prev]) < (labw[i] + labw[prev]) / 2)) break
+          L <- L + 1L
         }
-        axv[mem] <- p; ayv[mem] <- bandy + rr * rowdy
+        lvl[i] <- L
       }
-      apann <- lapply(seq_len(n), function(i) {
-        cc <- apcol[[aplab$state[i]]]
-        list(x = format(aplab$date[i]), y = aplab$ret[i], xref = "x", yref = "y",
-             axref = "x", ayref = "y",                        # place flag in data coords
-             ax = format(as.Date(round(axv[i]), origin = "1970-01-01")), ay = ayv[i],
-             text = aplab$ticker[i],
+      apann <- lapply(seq_len(nrow(ap)), function(i) {
+        cc <- apcol[[ap$state[i]]]
+        list(x = format(ap$date[i]), y = ap$ret[i], xref = "x", yref = "y",
+             text = ap$ticker[i],
+             xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
-             font = list(color = cc, size = 9),
-             # OPAQUE solid-black bg so the bright basket line the dots ride
-             # cannot bleed through and wash the flag to a pale/white box.
+             ax = 0, ay = -11 - 13 * lvl[i], font = list(color = cc, size = 9),
+             # OPAQUE bg: the bright green basket line the dots ride bleeds through
+             # and washes the label to a pale box (Kevin, recurring). A plain hex
+             # should be opaque, but pin opacity=1 explicitly to rule out any
+             # inherited annotation alpha, use solid black, and a 2px border so a
+             # live redraw is unmistakable vs a stale cached figure.
              opacity = 1, bgcolor = "#000000", bordercolor = cc, borderwidth = 2,
              borderpad = 1)
       })
       ann <- c(ann, apann)
-      # headroom = the top of the label band plus one row's clearance
+      # headroom so the upward label stack never clips against the plot top
+      # (tuned to the tighter 13px-per-level stack + size-9 labels above)
+      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
       ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, 0), na.rm = TRUE)
-      ap_yrange <- c(ylo - yspan * 0.05, bandy + nrows * rowdy)
+      yspan <- max(yhi - ylo, 1)
+      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.085 * max(lvl)))
       ap_suffix <- " · all qualstream pins"
     }
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
