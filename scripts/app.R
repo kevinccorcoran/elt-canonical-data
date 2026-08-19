@@ -376,6 +376,12 @@ lc_board_trail <- function(M, dates, tk, led, epoch, prov, now_state,
   }
   if (length(open_j) && !is.na(now_state) && now_state %in% c("buy", "hold"))
     row[open_j[length(open_j)]] <- now_state
+  # A current SELL with no model sell in the matrix is a hand-sold / gate-flip-
+  # today name (a dev override, or state_now flipping to sell before the ledger
+  # records it). Pin it at the last open day so the sketch shows the sell instead
+  # of silently dropping the name to its last buy/hold state.
+  if (length(open_j) && identical(now_state, "sell") && !any(row == "sell"))
+    row[open_j[length(open_j)]] <- "sell"
   keep <- which(nzchar(row))
   if (!length(keep)) return(NULL)
   st <- unname(row[keep]); dt <- as.character(dates[keep])
@@ -396,6 +402,47 @@ lc_board_trail <- function(M, dates, tk, led, epoch, prov, now_state,
     if (is.finite(true_d) && true_d < as.Date(wd)) out$date[k] <- format(true_d)
   }
   out
+}
+
+# Pair a per-ticker board trail (lc_board_trail output) into buy->sell episodes =
+# realized trades. An open buy with a hand-sold override (sold_over, from the
+# positions table) closes at that date; otherwise it stays open and is marked to
+# last_d. Returns a list of list(entry, exit, open). Shared by the flip-history
+# modal and the board-wide track-record strip so a clicked chip always reconciles.
+lc_trade_episodes <- function(trail, sold_over = as.Date(NA), last_d = as.Date(NA)) {
+  ev <- if (!is.null(trail) && nrow(trail))
+          trail[trail$state %in% c("buy", "hold", "sell"), , drop = FALSE] else NULL
+  eps <- list(); open_e <- as.Date(NA)
+  if (!is.null(ev) && nrow(ev)) for (i in seq_len(nrow(ev))) {
+    s <- ev$state[i]; dt <- as.Date(ev$date[i])
+    if (s == "buy" && is.na(open_e)) open_e <- dt
+    else if (s == "sell" && !is.na(open_e)) {
+      eps[[length(eps) + 1]] <- list(entry = open_e, exit = dt, open = FALSE); open_e <- as.Date(NA) }
+  }
+  if (!is.na(open_e)) {
+    if (!is.na(sold_over) && sold_over >= open_e)
+      eps[[length(eps) + 1]] <- list(entry = open_e, exit = sold_over, open = FALSE)
+    else eps[[length(eps) + 1]] <- list(entry = open_e, exit = last_d, open = TRUE)
+  }
+  eps
+}
+
+# Price a list of episodes for one ticker. tp / sp = the ticker's and SPY's
+# (d, px) frames (d = Date, px = numeric, sorted). Returns one row per episode:
+# entry, exit ("open" if still held), days, ret (own %), spy (%), vs (pp), open.
+lc_price_episodes <- function(eps, tp, sp) {
+  if (!length(eps)) return(NULL)
+  asof <- function(df, dd) { s <- df$px[df$d <= dd]; if (!length(s)) NA_real_ else s[length(s)] }
+  rows <- lapply(eps, function(e) {
+    ep <- asof(tp, e$entry); xp <- asof(tp, e$exit)
+    es <- asof(sp, e$entry); xs <- asof(sp, e$exit)
+    ret <- if (is.na(ep) || ep == 0) NA_real_ else (xp / ep - 1) * 100
+    spy <- if (is.na(es) || es == 0) NA_real_ else (xs / es - 1) * 100
+    data.frame(entry = format(e$entry), exit = if (e$open) "open" else format(e$exit),
+               days = as.integer(e$exit - e$entry), ret = ret, spy = spy, vs = ret - spy,
+               open = isTRUE(e$open), stringsAsFactors = FALSE)
+  })
+  do.call(rbind, rows)
 }
 
 latest_qa_run <- function(history) {
@@ -1804,11 +1851,16 @@ ui <- navbarPage(
     # (see server(), 2026-07-23: it replays sessions into the busy event loop
     # and segfaults), so a dropped websocket otherwise sits grey until a manual
     # reload. Instead: on a real drop, reload the tab after a short backoff, and
-    # reset the counter once we reconnect. Caps at MAX quick tries so a server
-    # that is genuinely down is not hammered (overlay is left for the user).
+    # reset the counter once we reconnect. Caps at MAX tries so a server that is
+    # genuinely down is not hammered (overlay is left for the user). MAX was 5,
+    # which a run of dev restarts (each a disconnect) exhausted BEFORE the ~80s
+    # boot finished reconnecting - stranding the tab on a stale frame while the
+    # server ran fresh code. The ready() poll below already gates every reload on
+    # a real 200, so a down server is never hammered regardless of MAX; the cap is
+    # only a far backstop, so raise it to 40 to survive repeated restarts.
     tags$script(HTML("
       (function(){
-        var KEY = 'wf_reconnectTries', MAX = 5;
+        var KEY = 'wf_reconnectTries', MAX = 40;
         $(document).on('shiny:connected', function(){
           try { sessionStorage.removeItem(KEY); } catch (e) {}
         });
@@ -6806,6 +6858,9 @@ server <- function(input, output, session) {
     # sketch to lines-only so the white line + pins never outlive the filter.
     lc_hist_tk(NULL)
   }, ignoreNULL = FALSE, ignoreInit = TRUE)
+  # switching the hold-length horizon also clears any singled-out ticker overlay
+  # (the white line), so a horizon change gives a clean lines-only sketch.
+  observeEvent(input$holdLC, lc_hist_tk(NULL), ignoreInit = TRUE)
   output$statusMessageLC <- renderText({ status_msgLC() })
 
   # ── Personal portfolio: strategy follower (model DCA + ladder sells) ──────
@@ -7079,6 +7134,142 @@ server <- function(input, output, session) {
       showNotification("Generate the board first to see the timeline.", type = "message"); return() }
     # click the same chip again to clear the overlay; a different chip switches it
     if (identical(lc_hist_tk(), tk)) lc_hist_tk(NULL) else lc_hist_tk(tk)
+  })
+
+  # Chip "P&L" button -> modal: this name's flip history (each buy->exit trade)
+  # with its own return and return vs SPY, so you can tell at a glance whether
+  # the trades made money. Fired with stopPropagation, so it does NOT single the
+  # ticker out on the chart (that stays on the chip-body click / lcBoardClick).
+  observeEvent(input$lcFlipHist, {
+    tk <- toupper(trimws(as.character(input$lcFlipHist)))
+    if (!nzchar(tk)) return()
+    dv <- tryCatch(derivedLC(), error = function(e) NULL); d <- app_dataLC()
+    if (is.null(dv) || is.null(dv$M) || is.null(d))
+      return(showModal(modalDialog("Generate the board first.", easyClose = TRUE)))
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) return(showModal(modalDialog("DB unreachable.", easyClose = TRUE)))
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    prov_tk <- !is.null(dv$prov_of) && tk %in% names(dv$prov_of) && isTRUE(dv$prov_of[[tk]])
+    now_state <- if (tk %in% names(dv$state_now)) dv$state_now[[tk]] else NA_character_
+    dl_tk <- if (!is.null(d$meta) && any(toupper(d$meta$ticker) == tk))
+               suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == tk][1]))
+             else as.Date(NA)
+    trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
+                                     prov_tk, now_state, dv$hz, dl_tk), error = function(e) NULL)
+    pp <- tryCatch(lc_pos(), error = function(e) NULL)
+    sold_over <- if (!is.null(pp) && nrow(pp)) {
+      sd <- suppressWarnings(as.Date(as.character(pp$sold_date[toupper(pp$ticker) == tk])))
+      sd <- sd[!is.na(sd)]; if (length(sd)) max(sd) else as.Date(NA)
+    } else as.Date(NA)
+    px <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
+       WHERE ticker IN ('%s','SPY') ORDER BY ticker, date",
+      gsub("'", "''", tk, fixed = TRUE))), error = function(e) NULL)
+    if (is.null(px) || !nrow(px) || !any(px$ticker == "SPY") || !any(toupper(px$ticker) == tk))
+      return(showModal(modalDialog(sprintf("No prices for %s yet.", tk), easyClose = TRUE)))
+    px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
+    tp <- px[toupper(px$ticker) == tk, ]; sp <- px[px$ticker == "SPY", ]
+    last_d <- max(sp$d)
+    eps <- lc_trade_episodes(trail, sold_over, last_d)
+    if (!length(eps))
+      return(showModal(modalDialog(sprintf("%s has no buy episodes in this window.", tk), easyClose = TRUE)))
+    tab <- lc_price_episodes(eps, tp, sp)
+    fmtpct <- function(x) ifelse(is.na(x), "-", sprintf("%+.1f%%", x))
+    col <- function(x) ifelse(is.na(x), "#64748b", ifelse(x >= 0, "#10b981", "#dc2626"))
+    trow <- function(r) tags$tr(
+      tags$td(r$entry, style = "padding:3px 10px;"),
+      tags$td(r$exit, style = "padding:3px 10px;"),
+      tags$td(sprintf("%dd", r$days), style = "padding:3px 10px; text-align:right; color:#94a3b8;"),
+      tags$td(fmtpct(r$ret), style = sprintf("padding:3px 10px; text-align:right; font-weight:700; color:%s;", col(r$ret))),
+      tags$td(fmtpct(r$spy), style = "padding:3px 10px; text-align:right; color:#64748b;"),
+      tags$td(fmtpct(r$vs), style = sprintf("padding:3px 10px; text-align:right; font-weight:700; color:%s;", col(r$vs))))
+    n_ok <- sum(tab$vs > 0, na.rm = TRUE); n_tot <- sum(!is.na(tab$vs))
+    showModal(modalDialog(
+      title = sprintf("%s - flip history & return vs SPY", tk), size = "l", easyClose = TRUE,
+      div(style = sprintf("font-size:0.9rem; margin-bottom:0.6rem; font-weight:700; color:%s;",
+                          col(mean(tab$vs, na.rm = TRUE))),
+          sprintf("%d trade(s) - avg return %s, avg vs SPY %s - beat SPY on %d of %d",
+                  nrow(tab), fmtpct(mean(tab$ret, na.rm = TRUE)),
+                  fmtpct(mean(tab$vs, na.rm = TRUE)), n_ok, n_tot)),
+      tags$table(style = "border-collapse:collapse; width:100%; font-size:0.85rem;",
+        tags$thead(tags$tr(lapply(c("Entry", "Exit", "Held", "Return", "SPY", "vs SPY"), function(h)
+          tags$th(h, style = "padding:4px 10px; text-align:left; color:#94a3b8; border-bottom:1px solid #334155;")))),
+        tags$tbody(lapply(seq_len(nrow(tab)), function(i) trow(tab[i, ])))),
+      div(style = "color:#64748b; font-size:0.72rem; margin-top:0.6rem;",
+          "Return = the name's own price move over each held window; vs SPY = that minus SPY over the same window. Open = still held, marked to the latest close.")))
+  })
+
+  # Realized board track record (Kevin 2026-08-18): aggregate stats for every name
+  # the board has traded since the ledger epoch, for the top-of-board strip. One
+  # trade = a buy->sell episode (buy<->hold flips are NOT closes - the position is
+  # held through); sold trades banked, open trades marked to today. Reuses the exact
+  # per-ticker episode logic as the flip-history modal (lc_trade_episodes /
+  # lc_price_episodes) so a clicked chip's numbers reconcile with the aggregate.
+  # Episodes whose entry predates the epoch (old walk-forward cohort picks) are
+  # dropped: this is the LIVE following record, not the backtest. Its own reactive
+  # so board layout / cluster-filter toggles don't trigger the price query + rebuild.
+  lc_track_record <- reactive({
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    d  <- tryCatch(app_dataLC(), error = function(e) NULL)
+    if (is.null(dv) || is.null(dv$M) || is.null(d)) return(NULL)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    # Universe = names that actually SHOW on the board (proven at horizon, board_ok),
+    # not the full raw gate in state_now (~972 single-run blips since the epoch). This
+    # is Kevin's "every ticker that showed on the board at one point". Not narrowed by
+    # the cluster-id filter - the record is the whole board since inception.
+    all_nm <- names(dv$state_now)
+    ok <- if (!is.null(dv$board_ok)) dv$board_ok[all_nm] else rep(TRUE, length(all_nm))
+    universe <- toupper(all_nm[!is.na(ok) & ok])
+    # "only the qs are trades" (Kevin 2026-08-18): follow the board's qualstream+picks
+    # filter. On (default) -> count only qualstream-passed names (grade >= QS_MIN, the
+    # orange +), matching the columns; untick it to count every proven board trade.
+    if (isTRUE(input$lcBuyQSonly) && !is.null(dv$qs_grade) && length(dv$qs_grade)) {
+      g  <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+      qp <- names(g)[!is.na(g) & g >= QS_MIN]
+      universe <- intersect(universe, qp)
+    }
+    if (!length(universe)) return(NULL)
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    inl <- paste(sprintf("'%s'", gsub("'", "''", universe, fixed = TRUE)), collapse = ",")
+    px <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
+       WHERE ticker IN (%s,'SPY') AND date >= DATE '2026-06-01' ORDER BY ticker, date", inl)),
+      error = function(e) NULL)
+    if (is.null(px) || !nrow(px) || !any(toupper(px$ticker) == "SPY")) return(NULL)
+    px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
+    sp <- px[toupper(px$ticker) == "SPY", c("d", "px")]
+    last_d <- suppressWarnings(max(sp$d))
+    pmap <- split(px[, c("d", "px")], toupper(px$ticker))
+    pp <- tryCatch(lc_pos(), error = function(e) NULL)
+    sold_map <- if (!is.null(pp) && nrow(pp))
+      setNames(suppressWarnings(as.Date(as.character(pp$sold_date))), toupper(pp$ticker)) else NULL
+    meta_dl <- if (!is.null(d$meta) && "delisted_date" %in% names(d$meta))
+      setNames(suppressWarnings(as.Date(as.character(d$meta$delisted_date))), toupper(d$meta$ticker)) else NULL
+    epoch <- as.Date(LEDGER_EPOCH)
+    rows <- list()
+    for (tk in universe) {
+      tp <- pmap[[tk]]; if (is.null(tp) || !nrow(tp)) next
+      prov <- !is.null(dv$prov_of) && tk %in% names(dv$prov_of) && isTRUE(dv$prov_of[[tk]])
+      ns   <- if (tk %in% names(dv$state_now)) dv$state_now[[tk]] else NA_character_
+      dl   <- if (!is.null(meta_dl) && tk %in% names(meta_dl)) meta_dl[[tk]] else as.Date(NA)
+      trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
+                                       prov, ns, dv$hz, dl), error = function(e) NULL)
+      so  <- if (!is.null(sold_map) && tk %in% names(sold_map)) sold_map[[tk]] else as.Date(NA)
+      eps <- lc_trade_episodes(trail, so, last_d)
+      eps <- Filter(function(e) !is.na(e$entry) && e$entry >= epoch, eps)
+      rr  <- lc_price_episodes(eps, tp, sp)
+      if (!is.null(rr) && nrow(rr)) { rr$ticker <- tk; rows[[length(rows) + 1]] <- rr }
+    }
+    if (!length(rows)) return(NULL)
+    A <- do.call(rbind, rows)
+    n_vs <- sum(!is.na(A$vs)); n_win <- sum(A$vs > 0, na.rm = TRUE)
+    list(n = nrow(A), closed = sum(!A$open), open = sum(A$open),
+         avg_ret = mean(A$ret, na.rm = TRUE), avg_vs = mean(A$vs, na.rm = TRUE),
+         n_vs = n_vs, n_win = n_win,
+         win = if (n_vs) n_win / n_vs * 100 else NA_real_,
+         asof = last_d, table = A)
   })
 
   # Tracking basis for MODEL rows (radio next to the chart filter): "epoch" =
@@ -7356,6 +7547,25 @@ server <- function(input, output, session) {
   #    over the id filter). Tickers, not indices, so sorts/removals can't shift
   #    the meaning.
   lc_chart_ids_sel <- reactiveVal(NULL)
+
+  # Reset every tab's viz back to its default (blank) state when the Environment
+  # (database) is switched, so a chart from the previous DB never lingers until
+  # the next Generate. Companion to setup_env_switcher (which reseeds the connect
+  # fields). ignoreInit: fire only on a real switch, not the initial page load.
+  observeEvent(input$db_env, {
+    app_dataT(NULL);         status_msgT("Ready")
+    app_dataV(NULL);         status_msgV("Ready")
+    app_dataK(NULL);         status_msgK("Not connected.")
+    app_dataP(NULL);         status_msgP("Ready")
+    app_dataRS_slot(NULL);   app_dataRS_heatmap(NULL); app_dataRS_meta(NULL)
+    app_dataRS_allIds(NULL); status_msgRS("Ready")
+    app_dataMV_ic(NULL);     app_dataMV_payoff(NULL);  app_dataMV_tiers(NULL)
+    app_dataMV_forest(NULL); status_msgMV("Ready")
+    app_dataBL(NULL);        chart_rowsBL(0);          status_msgBL("Ready")
+    app_dataFC(NULL);        status_msgFC("Ready")
+    app_dataLC(NULL);        lc_chart_ids_sel(NULL);   status_msgLC("Ready")
+  }, ignoreInit = TRUE)
+
   observeEvent(input$lcChartIds, {
     v <- if (is.null(input$lcChartIds)) character(0) else as.character(input$lcChartIds)
     allc <- as.character(isolate(lc_holding_cids()))
@@ -7583,6 +7793,14 @@ server <- function(input, output, session) {
     if (is.null(ln) || !nrow(ln)) return(NULL)
     line_at <- function(dd) { s <- ln$y[ln$d <= dd]
       if (!length(s)) ln$y[1] else s[length(s)] }
+    # User overrides live in the tracker (lc_pos sold_date), NOT in derivedLC's
+    # pure model state_now, so the pin layer must apply them itself to agree with
+    # the board's sell column. Map ticker -> sold_date for the hand-sold names.
+    pp_sold  <- tryCatch(lc_pos(), error = function(e) NULL)
+    pos_sold <- if (!is.null(pp_sold) && nrow(pp_sold)) {
+      sdv <- suppressWarnings(as.Date(as.character(pp_sold$sold_date)))
+      keep <- !is.na(sdv); setNames(sdv[keep], toupper(pp_sold$ticker)[keep])
+    } else setNames(as.Date(character(0)), character(0))
     out <- list()
     for (tk in tks) {
       tkr <- px[toupper(px$ticker) == toupper(tk), , drop = FALSE]
@@ -7601,6 +7819,12 @@ server <- function(input, output, session) {
       ev <- data.frame(date = as.Date(trail$date), state = trail$state,
                        stringsAsFactors = FALSE)
       ev <- ev[ev$date >= anchor & ev$state %in% c("buy", "hold", "sell"), , drop = FALSE]
+      # hand-sold override: drop model events on/after the sell date and pin a
+      # sell there, so the sketch matches the board's sell column for this name.
+      sold_d <- if (toupper(tk) %in% names(pos_sold)) pos_sold[[toupper(tk)]] else as.Date(NA)
+      if (!is.na(sold_d) && sold_d >= anchor)
+        ev <- rbind(ev[ev$date < sold_d, , drop = FALSE],
+                    data.frame(date = sold_d, state = "sell", stringsAsFactors = FALSE))
       if (!nrow(ev)) next
       ev$own <- vapply(ev$date, function(dd) { p <- asof(tkr, dd)
         if (is.na(p)) NA_real_ else (p / base_tk - 1) * 100 }, numeric(1))
@@ -8256,10 +8480,22 @@ server <- function(input, output, session) {
       pe <- as.character(pp$end_date); ps <- as.character(pp$sold_date)
       heldtk <- toupper(pp$ticker[!is.na(pe) & nzchar(pe) & (is.na(ps) | !nzchar(ps))])
       heldtk <- intersect(heldtk, names(st))
-      if (length(heldtk)) { st[heldtk] <- "hold"; why[heldtk] <- "paused by user" }
+      if (length(heldtk)) {
+        st[heldtk] <- "hold"
+        # show the date the user paused it (mirrors the sold override showing its
+        # sell date) instead of a bare "paused by user" label
+        pe_by_tk <- setNames(pe, toupper(pp$ticker))
+        why[heldtk] <- paste("paused", pe_by_tk[heldtk])
+      }
       soldtk <- toupper(pp$ticker[!is.na(ps) & nzchar(ps)])
       soldtk <- intersect(soldtk, names(st))
-      if (length(soldtk)) { st[soldtk] <- "sell"; why[soldtk] <- "sold by user" }
+      if (length(soldtk)) {
+        st[soldtk] <- "sell"
+        # show the actual sell date on the chip (model sells carry their exit
+        # date in the reason; a hand-sold name should too) instead of a bare label
+        sd_by_tk <- setNames(ps, toupper(pp$ticker))
+        why[soldtk] <- paste("sold", sd_by_tk[soldtk])
+      }
     }
     col_of <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626")
     # qualstream grades per ticker (latest non-vetoed); the top-20 AMONG THE
@@ -8281,7 +8517,59 @@ server <- function(input, output, session) {
       v <- nw_of[toupper(t)]
       if (length(v) == 1 && !is.na(v)) as.integer(v) else NA_integer_
     }
-    chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE, nw = NA) span(
+    # Current-trade return per board name: the name's own price move from this
+    # open episode's entry (dv$entry_of) to today, or to its sell date if
+    # hand-sold. Shown as the clickable number on each chip (click -> full flip
+    # history modal). One price query for all board names + SPY.
+    board_ret <- local({
+      tks <- toupper(names(st)); res <- setNames(rep(NA_real_, length(tks)), tks)
+      con2 <- tryCatch(get_con(input), error = function(e) NULL)
+      if (!is.null(con2) && length(tks)) {
+        on.exit({ if (DBI::dbIsValid(con2)) dbDisconnect(con2) }, add = TRUE)
+        inl <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
+        px <- tryCatch(dbGetQuery(con2, sprintf(
+          "SELECT ticker, date::text d, adj_close px FROM cdm.ingest_combined
+           WHERE ticker IN (%s,'SPY') AND date >= DATE '2025-01-01' ORDER BY ticker, date", inl)),
+          error = function(e) NULL)
+        if (!is.null(px) && nrow(px)) {
+          px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
+          lastd <- suppressWarnings(max(px$d[px$ticker == "SPY"]))
+          pmap <- split(px[, c("d", "px")], toupper(px$ticker))
+          pp <- tryCatch(lc_pos(), error = function(e) NULL)
+          sold_map <- if (!is.null(pp) && nrow(pp))
+            setNames(suppressWarnings(as.Date(as.character(pp$sold_date))), toupper(pp$ticker)) else NULL
+          asof <- function(sub, dd) { v <- sub$px[sub$d <= dd]; if (!length(v)) NA_real_ else v[length(v)] }
+          for (tk in tks) {
+            sub <- pmap[[tk]]; if (is.null(sub) || !nrow(sub)) next
+            en_raw <- if (!is.null(dv$entry_of) && tk %in% names(dv$entry_of)) dv$entry_of[[tk]] else NA
+            en <- suppressWarnings(as.Date(en_raw)); if (is.na(en)) next
+            ex <- if (!is.null(sold_map) && tk %in% names(sold_map) &&
+                      !is.na(sold_map[[tk]]) && sold_map[[tk]] >= en) sold_map[[tk]] else lastd
+            ep <- asof(sub, en); xp <- asof(sub, ex)
+            if (!is.na(ep) && ep != 0 && !is.na(xp)) res[[tk]] <- (xp / ep - 1) * 100
+          }
+        }
+      }
+      res
+    })
+    # Prefer the return the track-record strip already computed for this open trade
+    # (reuses its single fetch, so chip and strip/modal always agree). board_ret is
+    # the fallback for names the strip doesn't cover (non-qs when the filter is on)
+    # or if it didn't load - so one path missing can't blank every chip's number.
+    strip_ret <- local({
+      tt <- tryCatch(lc_track_record()$table, error = function(e) NULL)
+      if (is.null(tt) || !nrow(tt)) return(setNames(numeric(0), character(0)))
+      op <- tt[tt$open %in% TRUE & !is.na(tt$ret), , drop = FALSE]
+      if (!nrow(op)) return(setNames(numeric(0), character(0)))
+      keep <- !duplicated(toupper(op$ticker), fromLast = TRUE)
+      setNames(op$ret[keep], toupper(op$ticker)[keep])
+    })
+    ret_get <- function(t) {
+      u <- toupper(t)
+      if (u %in% names(strip_ret)) return(strip_ret[[u]])
+      if (u %in% names(board_ret)) board_ret[[u]] else NA_real_
+    }
+    chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE, nw = NA, ret = NA) span(
       style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
                              " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
                              " margin:2px; font-size:0.78rem; font-weight:600; cursor:pointer;%s"),
@@ -8291,12 +8579,27 @@ server <- function(input, output, session) {
       title = "click for state history",
       if (nzchar(note)) sprintf("%s · %s", t, note) else t,
       if (plus) span("+", style = "color:#fb923c; font-weight:800; margin-left:3px;"),
-      if (!is.na(nw)) span(sprintf("·%d", nw),
-        style = if (nw <= 4)
-                  "color:#f59e0b; font-weight:800; margin-left:3px;"
-                else "color:#64748b; font-weight:600; margin-left:3px; opacity:0.85;",
-        title = sprintf("evidence breadth: %d weighted 12mo cells%s", nw,
-                        if (nw <= 4) " - NARROW (historically weaker)" else "")))
+      # The RETURN number itself is the button: shows this name's current-trade
+      # return (green/red), click opens the full flip history vs SPY. stopPropagation
+      # so it never also singles the ticker out on the chart. Falls back to a "P&L"
+      # label when the return can't be priced yet.
+      local({
+        oc <- sprintf(paste0("event.stopPropagation();",
+                "Shiny.setInputValue('lcFlipHist','%s',{priority:'event'})"), t)
+        ttl <- if (!is.na(nw) && nw <= 4) "thin evidence - click: flip history & return vs SPY"
+               else "click: flip history & return vs SPY"
+        if (!is.na(ret)) {
+          rc <- if (ret >= 0) "#10b981" else "#dc2626"
+          span(sprintf("%+.1f%%", ret),
+            style = sprintf(paste0("margin-left:5px; cursor:pointer; font-size:0.7rem;",
+                     " font-weight:700; border-radius:4px; padding:1px 5px; color:%s; border:1px solid %s55;"),
+                     rc, rc),
+            onclick = oc, title = ttl)
+        } else span("P&L",
+          style = paste0("margin-left:5px; cursor:pointer; font-size:0.62rem; font-weight:700;",
+                   " border-radius:4px; padding:1px 4px; color:#94a3b8; border:1px solid #94a3b855;"),
+          onclick = oc, title = ttl)
+      }))
     section <- function(title, colr, ticks, notes, max_h = NA) {
       div(style = "margin-bottom:1rem;",
         div(style = sprintf("color:%s; font-weight:700; margin-bottom:0.35rem;", colr),
@@ -8305,7 +8608,7 @@ server <- function(input, output, session) {
               sprintf("display:flex; flex-wrap:wrap; max-height:%dpx; overflow-y:auto;", max_h)
             else "display:flex; flex-wrap:wrap;",
           mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks,
-                                      plus = t %in% qs_pass, nw = nw_get(t)),
+                                      plus = t %in% qs_pass, nw = nw_get(t), ret = ret_get(t)),
                  ticks, notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)))
     }
     note_line <- function(txt) div(
@@ -8408,7 +8711,7 @@ server <- function(input, output, session) {
     hz_days <- round(hz * 30.44)
     h_pct <- pmin(100L, as.integer(round(100 *
                as.numeric(Sys.Date() - as.Date(dv$entry_of[holds])) / hz_days)))
-    h_note <- ifelse(grepl("^matures", why[holds]) | why[holds] == "paused by user",
+    h_note <- ifelse(grepl("^matures", why[holds]) | grepl("^paused", why[holds]),
                      unname(why[holds]),
                      sprintf("%s · %d%%", dv$entry_of[holds], h_pct))
     # sell column: same qualstream filter while ticked, ordered by the exit
@@ -8518,7 +8821,7 @@ server <- function(input, output, session) {
                                    " gap:2px; max-height:%dpx; overflow-y:auto;"), max_h),
           if (length(ticks))
             mapply(function(t, n) chipf(t, colr, n, t %in% del_ticks,
-                                        plus = t %in% qs_pass, nw = nw_get(t)),
+                                        plus = t %in% qs_pass, nw = nw_get(t), ret = ret_get(t)),
                    ticks, ch_notes, SIMPLIFY = FALSE, USE.NAMES = FALSE)
           else div(style = "color:#475569; font-size:0.75rem; font-style:italic; padding:0.3rem;",
                    "none")))
@@ -8546,9 +8849,54 @@ server <- function(input, output, session) {
         "Median dwell ~15 days vs 2 days for the raw gate. The frozen board",
         "rule above is unchanged; adoption is decided at a freeze checkpoint.")))
     else NULL
+    # Realized track-record strip (Kevin 2026-08-18): at-a-glance stats for every
+    # name the board has TRADED since the ledger epoch - a trade = one buy->sell
+    # episode (buy<->hold flips are held-through, NOT closes). Sold trades banked,
+    # open marked to today; pre-epoch walk-forward cohort picks excluded (this is the
+    # LIVE following record, not the backtest). Numbers come from lc_track_record(),
+    # the same per-ticker episode logic as the flip-history modal, so a clicked chip
+    # reconciles with the aggregate. Duration-fair by design: vs SPY spans each
+    # trade's own window and win rate is one vote per trade - no per-day/annualising.
+    # Universe follows the qualstream+picks filter (default on = qs-passed names only,
+    # "only the qs are trades"); never narrowed by the cluster-id filter. The
+    # compounded "how much money" view is the portfolio panel below.
+    track_strip <- local({
+      tr <- tryCatch(lc_track_record(), error = function(e) NULL)
+      signcol <- function(v) if (is.na(v)) "#94a3b8" else if (v >= 0) "#10b981" else "#dc2626"
+      pctcol  <- function(v) if (is.na(v)) "#94a3b8" else if (v >= 50) "#10b981" else "#dc2626"
+      if (is.null(tr) || !isTRUE(tr$n > 0))
+        return(div(style = "color:#64748b; font-size:0.72rem; margin:0.2rem 0 0.7rem;",
+                   "No board trades priced yet since the epoch - Generate, or wait for the first close."))
+      pill <- function(lab, big, sub, accent, valcol = "#e2e8f0")
+        div(style = paste0("flex:1 1 0; min-width:120px; background:rgba(148,163,184,0.04);",
+              " border:1px solid #1e293b; border-left:3px solid ", accent,
+              "; border-radius:7px; padding:0.4rem 0.7rem;"),
+          div(style = paste0("color:#94a3b8; font-size:0.66rem; font-weight:600;",
+                " text-transform:uppercase; letter-spacing:0.03em;"), lab),
+          div(style = sprintf(paste0("color:%s; font-size:1.15rem; font-weight:800;",
+                " font-variant-numeric:tabular-nums;"), valcol), big),
+          if (nzchar(sub)) div(style = "color:#64748b; font-size:0.64rem; margin-top:0.1rem;", sub))
+      div(style = "margin:0.2rem 0 0.7rem;",
+        div(style = "display:flex; gap:0.5rem; flex-wrap:wrap; align-items:stretch;",
+          pill("trades", as.character(tr$n),
+               sprintf("%d closed · %d open", tr$closed, tr$open), "#64748b"),
+          pill("avg return", sprintf("%+.1f%%", tr$avg_ret),
+               "own move, per trade", "#10b981", signcol(tr$avg_ret)),
+          pill("avg vs spy", sprintf("%+.1fpp", tr$avg_vs),
+               "each vs its own window", "#3b82f6", signcol(tr$avg_vs)),
+          pill("win rate", if (is.na(tr$win)) "n/a" else sprintf("%.0f%%", tr$win),
+               sprintf("beat SPY on %d of %d", tr$n_win, tr$n_vs), "#a78bfa", pctcol(tr$win))),
+        div(style = "color:#64748b; font-size:0.66rem; margin-top:0.25rem;",
+          sprintf(paste0("realized record of every %s since the %s epoch - a trade = buy to sell",
+            " (holds are mid-trade, not closes); sold banked, open marked to today. Compounded $ view:",
+            " the portfolio panel below."),
+            if (isTRUE(input$lcBuyQSonly)) "qualstream+ trade" else "board trade",
+            format(as.Date(LEDGER_EPOCH), "%b %d"))))
+    })
     if (identical(input$lcBoardLayout, "stacked")) {
       tagList(
         notes,
+        track_strip,
         section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
         section(sprintf("%s (%d of %d shown)", buy_title_stacked,
                         length(buys_shown), length(buys_all)),
@@ -8562,6 +8910,7 @@ server <- function(input, output, session) {
       # "exit now" state, kept red so urgency still reads at a glance).
       tagList(
         notes,
+        track_strip,
         div(style = paste0("display:grid; grid-template-columns:repeat(3, minmax(0,1fr));",
                            " gap:0.6rem; align-items:stretch; margin-bottom:0.5rem;"),
           kanban_col("buy", col_of[["buy"]], buys_shown, b_note2, buy_sub,
@@ -8767,9 +9116,12 @@ server <- function(input, output, session) {
              xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
              ax = 0, ay = -11 - 13 * lvl[i], font = list(color = cc, size = 9),
-             # OPAQUE bg (see single-overlay flags): the green basket line the
-             # dots ride bleeds through a transparent box and washes the label
-             bgcolor = "#0b1220", bordercolor = cc, borderwidth = 1,
+             # OPAQUE bg: the bright green basket line the dots ride bleeds through
+             # and washes the label to a pale box (Kevin, recurring). A plain hex
+             # should be opaque, but pin opacity=1 explicitly to rule out any
+             # inherited annotation alpha, use solid black, and a 2px border so a
+             # live redraw is unmistakable vs a stale cached figure.
+             opacity = 1, bgcolor = "#000000", bordercolor = cc, borderwidth = 2,
              borderpad = 1)
       })
       ann <- c(ann, apann)
