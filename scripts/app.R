@@ -7296,16 +7296,24 @@ server <- function(input, output, session) {
     A <- do.call(rbind, rows)
     n_vs <- sum(!is.na(A$vs)); n_win <- sum(A$vs > 0, na.rm = TRUE)
     B <- if (length(brows)) do.call(rbind, brows) else NULL
-    vsk <- function(k) { if (is.null(B)) return(list(v = NA_real_, n = 0L))
-      vv <- B$vs[B$kind == k]
-      list(v = if (any(!is.na(vv))) mean(vv, na.rm = TRUE) else NA_real_, n = sum(!is.na(vv))) }
+    # DURATION-WEIGHTED per kind: weight each window's vs by its days held so a
+    # brief buy<->hold flip (near-0 days) barely counts and a flippy name can't
+    # dominate. Also report distinct tickers (nm) so the window/name ratio shows
+    # the churn directly.
+    vsk <- function(k) {
+      if (is.null(B)) return(list(v = NA_real_, n = 0L, nm = 0L))
+      sub <- B[B$kind == k & !is.na(B$vs), , drop = FALSE]
+      if (!nrow(sub)) return(list(v = NA_real_, n = 0L, nm = 0L))
+      w <- pmax(sub$days, 1)
+      list(v = sum(sub$vs * w) / sum(w), n = nrow(sub), nm = length(unique(sub$ticker))) }
     wh <- vsk("hold"); ws <- vsk("sell"); wc <- vsk("current")
     list(n = nrow(A), closed = sum(!A$open), open = sum(A$open),
          avg_ret = mean(A$ret, na.rm = TRUE), avg_vs = mean(A$vs, na.rm = TRUE),
          n_vs = n_vs, n_win = n_win,
          win = if (n_vs) n_win / n_vs * 100 else NA_real_,
-         vs_hold = wh$v, n_hold = wh$n, vs_sell = ws$v, n_sell = ws$n,
-         vs_now = wc$v, n_now = wc$n,
+         vs_hold = wh$v, n_hold = wh$n, nm_hold = wh$nm,
+         vs_sell = ws$v, n_sell = ws$n, nm_sell = ws$nm,
+         vs_now = wc$v, n_now = wc$n, nm_now = wc$nm,
          asof = last_d, table = A, wtable = B)
   })
 
@@ -8937,25 +8945,35 @@ server <- function(input, output, session) {
                 " font-variant-numeric:tabular-nums;"), valcol), big),
           if (nzchar(sub)) div(style = "color:#64748b; font-size:0.64rem; margin-top:0.1rem;", sub))
       div(style = "margin:0.2rem 0 0.7rem;",
+        # PRIMARY: the full buy->sell round-trip record (one economic position each)
         div(style = "display:flex; gap:0.5rem; flex-wrap:wrap; align-items:stretch;",
           pill("trades", as.character(tr$n),
                sprintf("%d closed · %d open", tr$closed, tr$open), "#64748b"),
           pill("avg return", sprintf("%+.1f%%", tr$avg_ret),
-               "own move, per trade", "#10b981", signcol(tr$avg_ret)),
-          pill("vs spy · to hold", fmtpp(tr$vs_hold),
-               sprintf("%d downgraded", tr$n_hold), "#3b82f6", signcol(tr$vs_hold)),
-          pill("vs spy · to sell", fmtpp(tr$vs_sell),
-               sprintf("%d sold from buy", tr$n_sell), "#3b82f6", signcol(tr$vs_sell)),
-          pill("vs spy · buying", fmtpp(tr$vs_now),
-               sprintf("%d still buy", tr$n_now), "#3b82f6", signcol(tr$vs_now)),
+               "own move, per round trip", "#10b981", signcol(tr$avg_ret)),
+          pill("vs spy", fmtpp(tr$avg_vs),
+               "per round trip, own window", "#3b82f6", signcol(tr$avg_vs)),
           pill("win rate", if (is.na(tr$win)) "n/a" else sprintf("%.0f%%", tr$win),
                sprintf("beat SPY on %d of %d", tr$n_win, tr$n_vs), "#a78bfa", pctcol(tr$win))),
-        div(style = "color:#64748b; font-size:0.66rem; margin-top:0.25rem;",
-          sprintf(paste0("every %s since the %s epoch. trades / avg return / win rate = full buy->sell",
-            " round trips (holds mid-trade). vs SPY is split by how each active-buy RUN ended - to hold",
-            " (downgraded), to sell (exited straight from buy), or still buying (open, to today) - each",
-            " vs SPY over that run's own dates; a re-buy opens a new run and a sell from a hold is outside",
-            " to-sell. Compounded $ view: the portfolio panel below."),
+        # DIAGNOSTIC: each active-buy RUN vs SPY, duration-weighted. "windows · names"
+        # exposes flip churn - a flippy name spawns many windows but few names.
+        div(style = paste0("color:#94a3b8; font-size:0.62rem; margin:0.5rem 0 0.2rem;",
+              " text-transform:uppercase; letter-spacing:0.03em;"),
+          "vs SPY by active-buy window · duration-weighted"),
+        div(style = "display:flex; gap:0.5rem; flex-wrap:wrap; align-items:stretch;",
+          pill("to hold", fmtpp(tr$vs_hold),
+               sprintf("%d windows · %d names", tr$n_hold, tr$nm_hold), "#3b82f6", signcol(tr$vs_hold)),
+          pill("to sell", fmtpp(tr$vs_sell),
+               sprintf("%d windows · %d names", tr$n_sell, tr$nm_sell), "#3b82f6", signcol(tr$vs_sell)),
+          pill("still buying", fmtpp(tr$vs_now),
+               sprintf("%d windows · %d names", tr$n_now, tr$nm_now), "#3b82f6", signcol(tr$vs_now))),
+        div(style = "color:#64748b; font-size:0.66rem; margin-top:0.35rem;",
+          sprintf(paste0("every %s since the %s epoch - small sample, read as directional not proof.",
+            " Top row = full buy->sell round trips (one vote per position, holds held through). Bottom =",
+            " each active-buy RUN vs SPY over its own dates, DURATION-WEIGHTED so a brief buy<->hold flip",
+            " barely counts; a re-buy opens a new run, and 'windows vs names' shows the flip churn. buy->hold",
+            " ends at the downgrade; to-sell is a direct buy->sell (a sell from a hold sits in the round-trip",
+            " number). Compounded $ view: the portfolio panel below."),
             if (isTRUE(input$lcBuyQSonly)) "qualstream+ name" else "board name",
             format(as.Date(LEDGER_EPOCH), "%b %d"))))
     })
