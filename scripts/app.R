@@ -9116,35 +9116,47 @@ server <- function(input, output, session) {
       xs <- as.numeric(aplab$date)
       xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
       span <- max(xhi - xlo, 1)
-      PXW <- 760                                  # assumed plot width, px
-      px  <- (xs - xlo) / span * PXW              # each dot's screen-x, px
-      wpx <- nchar(aplab$ticker) * 7 + 22         # each flag's width, px (over-est)
-      # SHELF-PACK so no two flags overlap AND the stack never towers: place each
-      # flag above its dot; if it would touch the previous flag on that row, push
-      # it right; if that runs off the right edge, drop to the next row. A burst
-      # of same-day pins fans sideways across a couple of short rows (leader lines
-      # back to each dot) instead of piling into one tall column. Same row => a
-      # guaranteed >=half-width gap; different row => 20px apart (> flag height).
-      nrw <- nrow(aplab); rowof <- integer(nrw); sx <- numeric(nrw)
-      rowend <- rep(-1e9, 64)                     # right edge (px) of each row so far
-      for (i in seq_len(nrw)) {
-        r <- 0L
-        repeat {
-          want <- max(px[i], rowend[r + 1] + wpx[i] / 2 + 4)
-          if (want + wpx[i] / 2 > PXW - 2) want <- PXW - 2 - wpx[i] / 2
-          fits <- rowend[r + 1] < -1e8 || want >= rowend[r + 1] + wpx[i] / 2 + 4
-          if (fits || r >= 8L) break
-          r <- r + 1L
+      # Lay the flags out in DATA coordinates (axref/ayref='x'/'y') so spacing
+      # does NOT depend on the unknown rendered plot size (the bug that let flags
+      # overlap when the real plot was wider than an assumed pixel width). Size
+      # each flag against a CONSERVATIVE min plot (470x300 px); the real plot is
+      # bigger, so gaps only grow. Flags sit in a short banded ribbon above the
+      # data, spread horizontally (relaxed apart, and into open space to the left
+      # of an edge cluster) with a thin leader line down to each dot. Guarantee:
+      # within a row, x-gaps >= half-widths; rows share a common y, rowdy apart
+      # (> flag height) => no two flags can overlap at any real plot >= the min.
+      apax <- 470; apay <- 300
+      wdx <- (nchar(aplab$ticker) * 7 + 24) * span / apax     # flag width, data-x
+      pad <- 6 * span / apax
+      ymin <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
+      ymax <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
+      yspan <- max(ymax - ymin, 1)
+      rowdy <- 22 * yspan / apay; bandy <- ymax + 26 * yspan / apay
+      n <- nrow(aplab); ord <- order(xs)
+      nrows <- max(1L, ceiling(sum(wdx) / (span * 0.96)))     # rows to fit the width
+      rowix <- integer(n); rowix[ord] <- (seq_len(n) - 1L) %% nrows   # interleave by x
+      axv <- xs; ayv <- numeric(n)
+      for (rr in unique(rowix)) {
+        mem <- ord[rowix[ord] == rr]; p <- xs[mem]            # this row's flags, x order
+        for (iter in seq_len(400)) {                          # relax neighbours apart
+          moved <- FALSE
+          if (length(mem) >= 2) for (k in seq_len(length(mem) - 1L)) {
+            need <- (wdx[mem[k]] + wdx[mem[k + 1L]]) / 2 + pad
+            ov <- need - (p[k + 1L] - p[k])
+            if (ov > 1e-9) { p[k] <- p[k] - ov / 2; p[k + 1L] <- p[k + 1L] + ov / 2; moved <- TRUE }
+          }
+          p <- pmin(pmax(p, xlo + wdx[mem] / 2), xhi - wdx[mem] / 2)
+          if (!moved) break
         }
-        rowof[i] <- r; sx[i] <- want; rowend[r + 1] <- want + wpx[i] / 2
+        axv[mem] <- p; ayv[mem] <- bandy + rr * rowdy
       }
-      apann <- lapply(seq_len(nrw), function(i) {
+      apann <- lapply(seq_len(n), function(i) {
         cc <- apcol[[aplab$state[i]]]
         list(x = format(aplab$date[i]), y = aplab$ret[i], xref = "x", yref = "y",
+             axref = "x", ayref = "y",                        # place flag in data coords
+             ax = format(as.Date(round(axv[i]), origin = "1970-01-01")), ay = ayv[i],
              text = aplab$ticker[i],
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
-             ax = sx[i] - px[i],                  # px: fan sideways to the slot
-             ay = -16 - 20 * rowof[i],            # px: 20px rows above the dot
              font = list(color = cc, size = 9),
              # OPAQUE solid-black bg so the bright basket line the dots ride
              # cannot bleed through and wash the flag to a pale/white box.
@@ -9152,11 +9164,9 @@ server <- function(input, output, session) {
              borderpad = 1)
       })
       ann <- c(ann, apann)
-      # headroom scales with the tallest stack (20px/level) so flags never clip
-      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
+      # headroom = the top of the label band plus one row's clearance
       ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, 0), na.rm = TRUE)
-      yspan <- max(yhi - ylo, 1)
-      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.13 * max(rowof)))
+      ap_yrange <- c(ylo - yspan * 0.05, bandy + nrows * rowdy)
       ap_suffix <- " · all qualstream pins"
     }
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
