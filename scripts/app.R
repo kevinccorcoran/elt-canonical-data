@@ -9116,30 +9116,36 @@ server <- function(input, output, session) {
       xs <- as.numeric(aplab$date)
       xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
       span <- max(xhi - xlo, 1)
-      # OVERESTIMATE each flag's x-footprint (size-9 text + 2px border + pad):
-      # ~7px/char + 22px chrome so the packer never calls a near-miss a "fit".
-      labw <- vapply(seq_len(nrow(aplab)), function(i)
-        (nchar(aplab$ticker[i]) * 7 + 22) * span / 760, numeric(1))
-      # Stack colliding flags upward with NO level cap and a 20px step (> the
-      # ~16px flag height) so two flags can never overlap: horizontally the
-      # packer skips to a clear lane, vertically the levels stay 20px apart.
-      lvl <- integer(nrow(aplab))
-      for (i in seq_len(nrow(aplab))) {
-        L <- 0L
+      PXW <- 760                                  # assumed plot width, px
+      px  <- (xs - xlo) / span * PXW              # each dot's screen-x, px
+      wpx <- nchar(aplab$ticker) * 7 + 22         # each flag's width, px (over-est)
+      # SHELF-PACK so no two flags overlap AND the stack never towers: place each
+      # flag above its dot; if it would touch the previous flag on that row, push
+      # it right; if that runs off the right edge, drop to the next row. A burst
+      # of same-day pins fans sideways across a couple of short rows (leader lines
+      # back to each dot) instead of piling into one tall column. Same row => a
+      # guaranteed >=half-width gap; different row => 20px apart (> flag height).
+      nrw <- nrow(aplab); rowof <- integer(nrw); sx <- numeric(nrw)
+      rowend <- rep(-1e9, 64)                     # right edge (px) of each row so far
+      for (i in seq_len(nrw)) {
+        r <- 0L
         repeat {
-          prev <- which(seq_len(nrow(aplab)) < i & lvl == L)
-          if (!any(abs(xs[i] - xs[prev]) < (labw[i] + labw[prev]) / 2)) break
-          L <- L + 1L
+          want <- max(px[i], rowend[r + 1] + wpx[i] / 2 + 4)
+          if (want + wpx[i] / 2 > PXW - 2) want <- PXW - 2 - wpx[i] / 2
+          fits <- rowend[r + 1] < -1e8 || want >= rowend[r + 1] + wpx[i] / 2 + 4
+          if (fits || r >= 8L) break
+          r <- r + 1L
         }
-        lvl[i] <- L
+        rowof[i] <- r; sx[i] <- want; rowend[r + 1] <- want + wpx[i] / 2
       }
-      apann <- lapply(seq_len(nrow(aplab)), function(i) {
+      apann <- lapply(seq_len(nrw), function(i) {
         cc <- apcol[[aplab$state[i]]]
         list(x = format(aplab$date[i]), y = aplab$ret[i], xref = "x", yref = "y",
              text = aplab$ticker[i],
-             xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
-             ax = 0, ay = -12 - 20 * lvl[i], font = list(color = cc, size = 9),
+             ax = sx[i] - px[i],                  # px: fan sideways to the slot
+             ay = -16 - 20 * rowof[i],            # px: 20px rows above the dot
+             font = list(color = cc, size = 9),
              # OPAQUE solid-black bg so the bright basket line the dots ride
              # cannot bleed through and wash the flag to a pale/white box.
              opacity = 1, bgcolor = "#000000", bordercolor = cc, borderwidth = 2,
@@ -9150,7 +9156,7 @@ server <- function(input, output, session) {
       yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
       ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
-      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.13 * max(lvl)))
+      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.13 * max(rowof)))
       ap_suffix <- " · all qualstream pins"
     }
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
