@@ -46,9 +46,14 @@ TRANSFORM_SCRIPT = (
 # CONFIG
 # ──────────────────────────────────────────────
 
-# Runtime environment is driven by Environment Variables (fast)
-# or Airflow Variables if env vars are missing.
-runtime_env = os.environ.get("ENV", "dev")
+# Runtime environment: prefer the shell ENV var (fast), fall back to the Airflow
+# ENV Variable (set to "prod" on the prod scheduler, same as the metrics /
+# inference / walk_forward DAGs). Reading os.environ alone silently resolved
+# "dev" after the 2026-08-15 scheduler-container recreation dropped the shell
+# ENV, so every dbt task targeted a nonexistent "dev" database and the whole
+# chain died 5 min in. The Variable fallback makes the env independent of the
+# container's shell.
+runtime_env = os.environ.get("ENV") or Variable.get("ENV", default_var="dev")
 
 # Number of parallel ingestion slices
 # Chosen to balance API load and DB pressure
