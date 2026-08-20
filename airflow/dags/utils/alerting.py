@@ -34,16 +34,29 @@ def cred(name: str) -> str:
 
 
 def notify(text: str) -> bool:
-    """Deliver one Telegram message via the repo's single sender, creds pulled
-    from Variables. Returns False (never raises) when unconfigured or rejected."""
-    if PROJECT_ROOT not in sys.path:
-        sys.path.insert(0, PROJECT_ROOT)
-    from tests.utilities.notify import send_notification
-    return send_notification(
-        text,
-        token=cred("TELEGRAM_BOT_TOKEN") or None,
-        chat_id=cred("TELEGRAM_CHAT_ID") or None,
+    """Deliver one Telegram message, creds pulled from Variables. Self-contained
+    (stdlib only) - the prod container image does NOT mount the repo tests/ dir,
+    so importing tests.utilities.notify here fails in-container. Returns False
+    (never raises) when unconfigured or rejected."""
+    tok = cred("TELEGRAM_BOT_TOKEN")
+    cid = cred("TELEGRAM_CHAT_ID")
+    if not tok or not cid:
+        log.warning("Telegram not configured (TELEGRAM_BOT_TOKEN/CHAT_ID "
+                    "Variables); not sent: %s", text)
+        return False
+    import json
+    import urllib.request
+    req = urllib.request.Request(
+        "https://api.telegram.org/bot%s/sendMessage" % tok,
+        data=json.dumps({"chat_id": cid, "text": text}).encode(),
+        headers={"Content-Type": "application/json"},
     )
+    try:
+        resp = urllib.request.urlopen(req, timeout=20)
+        return getattr(resp, "status", resp.getcode()) == 200
+    except Exception as e:  # network / API rejection - log, never raise
+        log.warning("Telegram send failed: %s", e)
+        return False
 
 
 def on_failure_telegram(context) -> None:
