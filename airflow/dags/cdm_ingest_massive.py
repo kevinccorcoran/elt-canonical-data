@@ -9,6 +9,7 @@ from airflow.operators.bash import BashOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.task_group import TaskGroup
 
+from utils.alerting import on_failure_telegram
 from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command
 
 
@@ -71,6 +72,10 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
     # Fixed historical start date; catchup is disabled below
     "start_date": pendulum.datetime(2023, 1, 1, tz=local_tz),
+    # Telegram ping on any task failure (creds from Airflow Variables; silent
+    # no-op while unconfigured). This DAG died silently for 12 days in Aug 2026
+    # because nothing alerted - the root of the chain must never fail quietly.
+    "on_failure_callback": on_failure_telegram,
 }
 
 
