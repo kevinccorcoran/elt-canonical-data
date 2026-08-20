@@ -588,7 +588,7 @@ lineage_order <- function(schemas, tables) {
 
 # Custom CSS matching the returns_analyzer.html dark theme
 custom_css <- "
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
 
 body {
   background-color: #0f172a !important;
@@ -597,6 +597,7 @@ body {
     radial-gradient(at 100% 100%, rgba(239, 68, 68, 0.1) 0px, transparent 50%);
   color: #f8fafc !important;
   font-family: 'Inter', sans-serif !important;
+  font-variant-numeric: tabular-nums;
   min-height: 100vh;
 }
 
@@ -609,7 +610,10 @@ body {
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 .navbar .navbar-brand, .navbar-default .navbar-brand {
-  color: #f8fafc !important; font-weight: 600;
+  color: #f8fafc !important;
+  font-family: 'Space Grotesk', 'Inter', sans-serif !important;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 .navbar-nav > li > a, .navbar-nav .nav-link {
   color: #94a3b8 !important; background: transparent !important;
@@ -2298,8 +2302,7 @@ ui <- navbarPage(
         tags$br(),
         actionButton("execute_all_RS", "Generate small-multiples for ALL ids",
                      class = "btn-primary", style = "margin-bottom: 1rem;"),
-        h5("All 19 ids - green = model was right (sign-adjusted: longs up = green, shorts down = profitable short). Combo - longs (id 1-12): gray=neither, blue=hit only, gold=Bessembinder, green=both high. Shorts (id 13-19): gray=neither, light purple=hit only, medium purple=Bessembinder, deep purple=both high (shorting worked).",
-           style = "color: #f8fafc; font-weight: 600;"),
+        uiOutput("rsAllIdsCap"),
         plotlyOutput("allIdsGridRS", height = "1200px")
       ))
     )
@@ -3732,8 +3735,12 @@ server <- function(input, output, session) {
     tryCatch({
       con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      # fut_lag <= 33 matches every render path in the tab: an id whose only
+      # evidence is at the banned 54/88mo horizons (e.g. id 1) would otherwise
+      # list here but chart empty, so keep it out of the selector.
       id_vals <- dbGetQuery(con,
-        "SELECT DISTINCT id FROM validation.walk_forward_pctile_summary ORDER BY id")
+        "SELECT DISTINCT id FROM validation.walk_forward_pctile_summary
+         WHERE fut_lag <= 33 ORDER BY id")
       cl_choices <- c("All ids" = "ALL",
                       setNames(as.character(id_vals$id), as.character(id_vals$id)))
       updateSelectInput(session, "id_valRS", choices = cl_choices, selected = "ALL")
@@ -4103,13 +4110,42 @@ server <- function(input, output, session) {
       df$tier[is.na(df$tier)] <- 20L
       df$active_metric <- input$metric_valRS
       app_dataRS_allIds(df)
-      status_msgRS(sprintf("Loaded all ids: %d rows across %d distinct ids.",
-                           as.integer(nrow(df)),
-                           as.integer(length(unique(df$id)))))
+      present_ids <- sort(unique(suppressWarnings(as.integer(df$id))))
+      miss_ids <- setdiff(1:19, present_ids)
+      msg <- sprintf("Loaded all ids: %d rows across %d distinct ids.",
+                     as.integer(nrow(df)), length(present_ids))
+      if (length(miss_ids))
+        msg <- sprintf("%s Absent under the ≤33mo cap: id %s (evidence only at legacy 54/88mo).",
+                       msg, paste(miss_ids, collapse = ", "))
+      status_msgRS(msg)
     }, error = function(e) {
       app_dataRS_allIds(NULL)
       status_msgRS(paste("Error:", e$message))
     })
+  })
+
+  # Dynamic caption: the legend is fixed, but the lead line reports the LIVE id
+  # count (of 19) and names any id absent under the ≤33mo cap (e.g. id 1, whose
+  # only evidence is at the banned 54/88mo horizons), so it never lies "all 19".
+  output$rsAllIdsCap <- renderUI({
+    legend <- paste0("green = model was right (sign-adjusted: longs up = green, ",
+      "shorts down = profitable short). Combo - longs (id 1-12): gray=neither, ",
+      "blue=hit only, gold=Bessembinder, green=both high. Shorts (id 13-19): ",
+      "gray=neither, light purple=hit only, medium purple=Bessembinder, ",
+      "deep purple=both high (shorting worked).")
+    df <- app_dataRS_allIds()
+    lead <- if (is.null(df) || !nrow(df)) {
+      "The 19 growth-vol ids (id 1-12 long / 13-19 short)"
+    } else {
+      present <- sort(unique(suppressWarnings(as.integer(df$id))))
+      miss <- setdiff(1:19, present)
+      base <- sprintf("Showing %d of 19 growth-vol ids (id 1-12 long / 13-19 short)", length(present))
+      if (length(miss))
+        sprintf("%s - absent under the ≤33mo cap: id %s (evidence only at legacy 54/88mo)",
+                base, paste(miss, collapse = ", "))
+      else base
+    }
+    h5(paste0(lead, " - ", legend), style = "color: #f8fafc; font-weight: 600;")
   })
 
   output$allIdsGridRS <- renderPlotly({
