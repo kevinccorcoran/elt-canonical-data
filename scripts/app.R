@@ -185,6 +185,73 @@ db_save_dismissed <- function(con, tickers) {
   invisible(tickers)
 }
 
+# Additive tables that arrived after the original schema (archive + settings).
+# Idempotent, dashboard-owned schema only; mirrors tools/create_portfolio_schema.sql
+# so an existing DB self-upgrades on connect and a fresh one still bootstraps
+# from the SQL file. (Kevin authorized this DDL 2026-08-21.)
+pf_ensure_extras <- function(con) {
+  tryCatch({
+    DBI::dbExecute(con, "
+      CREATE TABLE IF NOT EXISTS portfolio.closed_positions (
+        id text NOT NULL, ticker text NOT NULL, cluster_id integer,
+        cadence text, amount_usd numeric, invested_usd numeric, value_usd numeric,
+        pnl_usd numeric, ret_pct numeric, spy_ret_pct numeric, vs_spy_pp numeric,
+        vs_lump_pp numeric, entry_date date, sold_date date NOT NULL,
+        outcome text NOT NULL CHECK (outcome IN ('profit','loss')),
+        archived_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (id, sold_date))")
+    DBI::dbExecute(con, "
+      CREATE TABLE IF NOT EXISTS portfolio.app_settings (
+        key text PRIMARY KEY, value text NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now())")
+    TRUE
+  }, error = function(e) FALSE)
+}
+
+db_get_setting <- function(con, key, default = "") {
+  v <- tryCatch(DBI::dbGetQuery(con,
+    "SELECT value FROM portfolio.app_settings WHERE key = $1",
+    params = list(key))$value, error = function(e) NULL)
+  if (is.null(v) || !length(v) || is.na(v[1]) || !nzchar(v[1])) default else v[1]
+}
+
+db_set_setting <- function(con, key, value) {
+  tryCatch(DBI::dbExecute(con, "
+    INSERT INTO portfolio.app_settings (key, value, updated_at)
+    VALUES ($1, $2, now())
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+    params = list(key, as.character(value))), error = function(e) NULL)
+  invisible(value)
+}
+
+db_archive_positions <- function(con, rows) {
+  if (is.null(rows) || !nrow(rows)) return(invisible(0L))
+  DBI::dbExecute(con, "
+    INSERT INTO portfolio.closed_positions
+      (id, ticker, cluster_id, cadence, amount_usd, invested_usd, value_usd,
+       pnl_usd, ret_pct, spy_ret_pct, vs_spy_pp, vs_lump_pp, entry_date,
+       sold_date, outcome)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::date,$14::date,$15)
+    ON CONFLICT (id, sold_date) DO NOTHING",
+    params = list(as.character(rows$id), toupper(rows$ticker),
+      as.integer(rows$cluster_id), as.character(rows$cadence),
+      as.numeric(rows$amount_usd), as.numeric(rows$invested_usd),
+      as.numeric(rows$value_usd), as.numeric(rows$pnl_usd),
+      as.numeric(rows$ret_pct), as.numeric(rows$spy_ret_pct),
+      as.numeric(rows$vs_spy_pp), as.numeric(rows$vs_lump_pp),
+      .pf_nz(rows$entry_date), .pf_nz(rows$sold_date), as.character(rows$outcome)))
+  invisible(nrow(rows))
+}
+
+db_load_closed <- function(con) {
+  tryCatch(DBI::dbGetQuery(con, "
+    SELECT ticker, cluster_id, to_char(entry_date,'YYYY-MM-DD') AS entry_date,
+           to_char(sold_date,'YYYY-MM-DD') AS sold_date, invested_usd, value_usd,
+           pnl_usd, ret_pct, spy_ret_pct, vs_spy_pp, vs_lump_pp, outcome
+    FROM portfolio.closed_positions ORDER BY sold_date DESC, ticker"),
+    error = function(e) NULL)
+}
+
 # One snapshot per (ticker, as_of, hz): re-Generating the same day refreshes the
 # row, new days accumulate -> the Buy->Hold->Sell trail per position.
 db_upsert_state_history <- function(con, rows) {
@@ -1583,21 +1650,32 @@ spy AS (
     SELECT v.d AS vdate, SUM(l.amt) AS invested, SUM(l.spy_shares) AS spy_sh
     FROM vdates v JOIN lots l ON l.buy_d <= v.d
     GROUP BY v.d
+),
+-- lump benchmark: the whole stake placed at the row's FIRST fill price - what
+-- the entry-policy audit calls HODL/lump-at-entry. One px per ticker.
+firstpx AS (
+    SELECT DISTINCT ON (ticker) ticker, px AS first_px
+    FROM fills WHERE px > 0 ORDER BY ticker, buy_d
 )
 -- per-ticker rows carry ret_pct (chart) AND invested/value/spy_value (the table
 -- reads the latest row per ticker); the '__SPY__' row is the chart benchmark.
-SELECT vdate::text AS d, ticker,
+SELECT tk_val.vdate::text AS d, tk_val.ticker,
        ROUND((100 * (value / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct,
        ROUND(invested::numeric, 2)  AS invested,
        ROUND(value::numeric, 2)     AS value,
-       ROUND(spy_value::numeric, 2) AS spy_value
-FROM tk_val
+       ROUND(spy_value::numeric, 2) AS spy_value,
+       ROUND((100 * ((SELECT i.adj_close FROM cdm.ingest_combined i
+                      WHERE i.ticker = tk_val.ticker AND i.date <= tk_val.vdate
+                      ORDER BY i.date DESC LIMIT 1)
+                     / NULLIF(f.first_px, 0) - 1))::numeric, 2) AS lump_ret_pct
+FROM tk_val JOIN firstpx f ON f.ticker = tk_val.ticker
 UNION ALL
 SELECT vdate::text AS d, '__SPY__' AS ticker,
        ROUND((100 * ((spy_sh * (SELECT adj_close FROM cdm.ingest_combined
                 WHERE ticker = 'SPY' AND date <= spy.vdate ORDER BY date DESC LIMIT 1))
               / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct,
-       NULL::numeric AS invested, NULL::numeric AS value, NULL::numeric AS spy_value
+       NULL::numeric AS invested, NULL::numeric AS value, NULL::numeric AS spy_value,
+       NULL::numeric AS lump_ret_pct
 FROM spy
 ORDER BY ticker, d;"
 
@@ -2557,9 +2635,12 @@ ui <- navbarPage(
             uiOutput("lcPortSummary", inline = TRUE)),
           div(
             div(style = "color:#64748b; font-size:0.72rem; margin-bottom:0.6rem;",
-                paste("Auto-seeds every current qualstream BUY as a $100 plan on Generate; buys pause",
-                      "when a name leaves the buy list, sell winds down on a ladder. Remove / Clear to",
-                      "edit; add manual plans below. Simulated fills at daily closes vs a same-cash SPY.")),
+                paste("Auto-seeds every current qualstream BUY as a one-off plan (at the $ below) on",
+                      "Generate; buys pause when a name leaves the buy list, sell winds down on a ladder.",
+                      "Remove / Clear to edit; add manual plans below. Simulated fills at daily closes",
+                      "vs a same-cash SPY.")),
+            div(style = "max-width:220px;",
+                numericInput("lcSeedAmt", "Auto-adopt $ per new BUY", value = 100, min = 1)),
             uiOutput("lcAdoptRow"),
             div(style = "color:#94a3b8; font-size:0.72rem; margin:0.5rem 0 0.15rem; font-weight:600;",
                 "Or add a manual plan"),
@@ -2578,14 +2659,19 @@ ui <- navbarPage(
               actionButton("lcPosHold", "Hold selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosSell", "Sell selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosResume", "Resume selected", style = "margin-right:0.4rem;"),
+              actionButton("lcPosArchive", "Archive sold", style = "margin-right:0.4rem;"),
               actionButton("lcPosClear", "Clear all")),
             div(style = "color:#64748b; font-size:0.7rem; margin:0.1rem 0 0.35rem;",
                 paste("id = cluster. Check rows (or the header box for all), then Remove / Hold /",
                       "Sell / Resume. Hold pauses buying (the position keeps valuing); Sell",
                       "records a full exit; Resume returns the row to the model's flow.",
+                      "Archive sold moves rows you have ACTUALLY sold (Sell them first) to the",
+                      "read-only realized table below, frozen at their exit numbers.",
                       "Double-click a $/buy cell to change that row's amount.",
                       "Invested / Value / P&L / Return are that row's own accumulated buys;",
-                      "vs SPY is the same dollars run into SPY (pp = percentage-point edge).",
+                      "vs SPY is the same dollars run into SPY (pp = percentage-point edge);",
+                      "vs HODL is against lumping the whole stake in at the first fill;",
+                      "Model % is the model trade's own move since ITS entry (survives buy→hold).",
                       "The chart below draws each holding's cumulative return against the same-cash SPY line.")),
             DT::DTOutput("lcPosTable"),
             uiOutput("lcChartFilter"),
@@ -2593,7 +2679,10 @@ ui <- navbarPage(
             uiOutput("lcPortfolioNote"),
             div(style = "color:#94a3b8; font-size:0.72rem; margin:0.8rem 0 0.15rem; font-weight:600;",
                 "Transition history - each position's Buy → Hold → Sell path over time"),
-            DT::DTOutput("lcTransitionsTable")
+            DT::DTOutput("lcTransitionsTable"),
+            div(style = "color:#94a3b8; font-size:0.72rem; margin:0.9rem 0 0.15rem; font-weight:600;",
+                "Realized - archived positions (read-only) · green = closed in profit, red = closed at a loss"),
+            DT::DTOutput("lcClosedTable")
           )
         )
         # Decision board moved to the top of this panel; the benchmark chart sits
@@ -7036,7 +7125,12 @@ server <- function(input, output, session) {
       tk <- toAdd[i]
       data.frame(
         id = paste0(tk, "-seed", i, "-", format(Sys.time(), "%Y%m%d%H%M%S")),
-        ticker = tk, amount_usd = 100, cadence = "once",
+        ticker = tk,
+        # user-set auto-adopt size (persisted in portfolio.app_settings); 100
+        # only as the never-configured fallback
+        amount_usd = { a <- suppressWarnings(as.numeric(input$lcSeedAmt))
+                       if (length(a) == 1 && is.finite(a) && a >= 1) a else 100 },
+        cadence = "once",
         # Stored start = the day it was actually added (the personal truth used
         # by the "since I added" basis); the epoch basis ignores it and tracks
         # from the regime epoch inside gated_expand_schedule.
@@ -7235,6 +7329,122 @@ server <- function(input, output, session) {
     persist_positions(portfolio_empty()); lc_pos(portfolio_empty())
     persist_dismissed(character(0)); lc_dismissed(character(0))
   })
+
+  # ── Realized archive ────────────────────────────────────────────────────────
+  lc_closed <- reactiveVal(NULL)
+
+  # Persist the auto-adopt $ whenever the user changes it (DB backend only; the
+  # parquet fallback keeps it session-local). Loaded back on connect below.
+  observeEvent(input$lcSeedAmt, {
+    if (!identical(lc_backend(), "db")) return()
+    a <- suppressWarnings(as.numeric(input$lcSeedAmt))
+    if (length(a) != 1 || !is.finite(a) || a < 1) return()
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return()
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    db_set_setting(con, "auto_adopt_amount", a)
+  }, ignoreInit = TRUE)
+
+  # Archive sold = move ACTUALLY-sold rows (Sell stamped) into
+  # portfolio.closed_positions, frozen at their current simulated-fill numbers,
+  # and drop them from the active book. Dismissed too, so the next Generate does
+  # not instantly re-seed a name the gate still lists as a buy. Losses archive
+  # exactly like profits (decision 2026-08-21: follow the model, no
+  # hold-until-breakeven).
+  observeEvent(input$lcPosArchive, {
+    if (!identical(lc_backend(), "db")) {
+      showNotification("Archive needs the DB portfolio store (connect to a DB with the portfolio schema).",
+                       type = "warning"); return()
+    }
+    sel <- suppressWarnings(as.integer(input$lcPosChecked)); cur <- lc_pos()
+    if (is.null(cur) || !nrow(cur)) return()
+    sel <- sel[!is.na(sel) & sel >= 1 & sel <= nrow(cur)]
+    if (!length(sel)) { showNotification("Check one or more SOLD rows to archive.", type = "message"); return() }
+    sd <- as.character(cur$sold_date[sel])
+    unsold <- sel[is.na(sd) | !nzchar(sd)]
+    if (length(unsold)) {
+      showNotification(sprintf("Not marked sold yet (use Sell selected first): %s",
+        paste(toupper(cur$ticker[unsold]), collapse = ", ")), type = "warning")
+      sel <- setdiff(sel, unsold)
+      if (!length(sel)) return()
+    }
+    perf <- tryCatch(lc_row_perf(), error = function(e) NULL)
+    d    <- app_dataLC()
+    id_of <- if (!is.null(d) && !is.null(d$gate$id))
+      setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker)) else integer(0)
+    pc <- function(col, ids) if (is.null(perf) || !nrow(perf)) rep(NA_real_, length(ids)) else
+      as.numeric(perf[[col]])[match(ids, perf$id)]
+    ids <- as.character(cur$id[sel])
+    inv <- pc("invested", ids); val <- pc("value", ids); spyv <- pc("spy_value", ids)
+    lmp <- pc("lump_ret", ids)
+    # a row with no priced fills has no realized numbers - archiving it would
+    # fabricate a $0 "loss"; keep it active and say so instead
+    unpriced <- which(is.na(val) | is.na(inv) | inv <= 0)
+    if (length(unpriced)) {
+      showNotification(sprintf("No priced fills yet - not archived: %s",
+        paste(toupper(cur$ticker[sel][unpriced]), collapse = ", ")), type = "warning")
+      keep <- setdiff(seq_along(sel), unpriced)
+      if (!length(keep)) return()
+      sel <- sel[keep]; ids <- ids[keep]
+      inv <- inv[keep]; val <- val[keep]; spyv <- spyv[keep]; lmp <- lmp[keep]
+    }
+    since <- if (!is.null(perf) && "since" %in% names(perf))
+      as.character(perf$since)[match(ids, perf$id)] else rep(NA_character_, length(ids))
+    ret  <- 100 * (val / inv - 1); spyr <- 100 * (spyv / inv - 1)
+    pnl  <- val - inv
+    rows <- data.frame(
+      id = ids, ticker = toupper(cur$ticker[sel]),
+      cluster_id = unname(id_of[toupper(cur$ticker[sel])]),
+      cadence = as.character(cur$cadence[sel]),
+      amount_usd = as.numeric(cur$amount_usd[sel]),
+      invested_usd = inv, value_usd = val, pnl_usd = pnl,
+      ret_pct = ret, spy_ret_pct = spyr, vs_spy_pp = ret - spyr,
+      vs_lump_pp = ret - lmp,
+      entry_date = ifelse(is.na(since), as.character(cur$start_date[sel]), since),
+      sold_date = as.character(cur$sold_date[sel]),
+      outcome = ifelse(!is.na(pnl) & pnl > 0, "profit", "loss"),
+      stringsAsFactors = FALSE)
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) { showNotification("No DB connection - connect first.", type = "error"); return() }
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    ok <- tryCatch({ db_archive_positions(con, rows); TRUE },
+                   error = function(e) { showNotification(paste("Archive failed:",
+                     conditionMessage(e)), type = "error"); FALSE })
+    if (!ok) return()
+    merged <- cur[setdiff(seq_len(nrow(cur)), sel), , drop = FALSE]
+    persist_positions(merged); lc_pos(merged)
+    nd <- union(lc_dismissed(), toupper(cur$ticker[sel]))
+    persist_dismissed(nd); lc_dismissed(nd)
+    lc_closed(db_load_closed(con))
+    npro <- sum(rows$outcome == "profit"); nlos <- sum(rows$outcome == "loss")
+    showNotification(sprintf("Archived %d position(s): %d in profit, %d at a loss.",
+                             nrow(rows), npro, nlos), type = "message")
+  })
+
+  output$lcClosedTable <- DT::renderDT({
+    cl <- lc_closed()
+    if (is.null(cl) || !nrow(cl))
+      return(DT::datatable(
+        data.frame(Note = "Nothing archived yet - Sell a row, then Archive sold once you have actually exited."),
+        rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
+    usd  <- function(x) ifelse(is.na(x), "-", paste0("$", formatC(round(as.numeric(x)), format = "d", big.mark = ",")))
+    susd <- function(x) ifelse(is.na(x), "-", sprintf("%s$%s", ifelse(as.numeric(x) < 0, "-", "+"),
+                        formatC(abs(round(as.numeric(x))), format = "d", big.mark = ",")))
+    spct <- function(x) ifelse(is.na(x), "-", sprintf("%+.1f%%", as.numeric(x)))
+    spp  <- function(x) ifelse(is.na(x), "-", sprintf("%+.1fpp", as.numeric(x)))
+    show <- data.frame(
+      id = ifelse(is.na(cl$cluster_id), "-", as.character(cl$cluster_id)),
+      Ticker = cl$ticker, Entry = cl$entry_date, Sold = cl$sold_date,
+      Invested = usd(cl$invested_usd), Exit = usd(cl$value_usd),
+      `P&L $` = susd(cl$pnl_usd), Return = spct(cl$ret_pct),
+      `vs SPY` = spp(cl$vs_spy_pp), `vs HODL` = spp(cl$vs_lump_pp),
+      Outcome = cl$outcome,
+      check.names = FALSE, stringsAsFactors = FALSE)
+    DT::datatable(show, rownames = FALSE, selection = "none", class = "compact",
+      options = list(dom = "t", ordering = TRUE, pageLength = 100, scrollX = TRUE,
+                     order = list(list(3, "desc")))) %>%
+      DT::formatStyle("Outcome", fontWeight = "600",
+        color = DT::styleEqual(c("profit", "loss"), c("#34d399", "#f87171")))
+  }, server = FALSE)
 
   # Click a board chip -> select it for the lifecycle timeline panel below the
   # board (the price line + pins). Both board layouts route their chips through
@@ -7497,7 +7707,10 @@ server <- function(input, output, session) {
     data.frame(id = unname(tick2id[last$ticker]),
                since = format(first$d[match(last$ticker, first$ticker)]),
                invested = as.numeric(last$invested), value = as.numeric(last$value),
-               spy_value = as.numeric(last$spy_value), stringsAsFactors = FALSE)
+               spy_value = as.numeric(last$spy_value),
+               lump_ret = if ("lump_ret_pct" %in% names(last))
+                 as.numeric(last$lump_ret_pct) else rep(NA_real_, nrow(last)),
+               stringsAsFactors = FALSE)
   })
 
   # Per-ticker cumulative-return series for the holdings chart. Same gated buy
@@ -7568,6 +7781,27 @@ server <- function(input, output, session) {
     spyr <- 100 * (spyv  / invested - 1)
     pnl  <- value - invested
     vspp <- ret - spyr
+    # vs HODL: this row's (possibly staged) buys against the whole stake lumped
+    # in at the first fill - the entry-policy audit's lump benchmark. One-off
+    # rows read ~0.0pp by construction (they ARE the lump).
+    lmp   <- pcol("lump_ret")
+    vslmp <- ret - lmp
+    # Model %: the open model-trade's own price move since ITS entry (the same
+    # number the board chip shows). Persists through a buy->hold flip, so a
+    # held row still answers "how has it done since the model bought it".
+    mret <- {
+      out <- rep(NA_real_, nrow(p))
+      tt <- tryCatch(lc_track_record()$table, error = function(e) NULL)
+      if (!is.null(tt) && nrow(tt)) {
+        op <- tt[tt$open %in% TRUE & !is.na(tt$ret), , drop = FALSE]
+        if (nrow(op)) {
+          keep <- !duplicated(toupper(op$ticker), fromLast = TRUE)
+          m <- setNames(op$ret[keep], toupper(op$ticker)[keep])
+          out <- unname(m[toupper(p$ticker)])
+        }
+      }
+      out
+    }
     usd  <- function(x) ifelse(is.na(x), "-", paste0("$", formatC(round(x), format = "d", big.mark = ",")))
     susd <- function(x) ifelse(is.na(x), "-", sprintf("%s$%s", ifelse(x < 0, "-", "+"),
                         formatC(abs(round(x)), format = "d", big.mark = ",")))
@@ -7602,8 +7836,12 @@ server <- function(input, output, session) {
       `P&L $`  = susd(pnl),
       Return   = spct(ret),
       `vs SPY` = spp(vspp),
+      `vs HODL` = spp(vslmp),
+      `Model %` = spct(mret),
+      pnl_num  = ifelse(is.na(pnl), 0, pnl),   # hidden: drives P&L color
       check.names = FALSE, stringsAsFactors = FALSE)
     editcol <- which(names(show) == "$/buy") - 1L   # 0-based; only this col editable
+    pnlcol  <- which(names(show) == "pnl_num") - 1L
     pf_js <- DT::JS(
       "var el = $(table.table().node());",
       "var th = el.find('thead th').first();",
@@ -7635,11 +7873,15 @@ server <- function(input, output, session) {
         autoWidth = FALSE, order = list(list(1, "asc")),
         columnDefs = list(
           list(targets = 0, orderable = FALSE, className = "dt-center pf-sel"),
+          list(targets = pnlcol, visible = FALSE),
           list(targets = 1, className = "dt-center", render = DT::JS(
             "function(data,type,row){if(type==='sort'||type==='type'){var n=parseInt(data,10);return isNaN(n)?9999:n;}return data;}"))))) %>%
       DT::formatStyle("State", fontWeight = "600",
         color = DT::styleEqual(c("buy", "hold", "sell", "closed"),
-                               c("#10b981", "#eab308", "#dc2626", "#64748b")))
+                               c("#10b981", "#eab308", "#dc2626", "#64748b"))) %>%
+      # profit flag: P&L cell green in profit, red in loss (0/NA stays neutral)
+      DT::formatStyle("P&L $", valueColumns = "pnl_num", fontWeight = "600",
+        color = DT::styleInterval(c(-1e-9, 1e-9), c("#f87171", "#94a3b8", "#34d399")))
   }, server = FALSE)
 
   # Inline edit of $/buy (the only editable column): validate, persist, and the
@@ -8156,6 +8398,13 @@ server <- function(input, output, session) {
       # lost. Otherwise the app keeps using the parquet fallback.
       if (pf_db_ready(con)) {
         lc_backend("db")
+        # additive archive/settings tables self-provision (idempotent), then the
+        # saved auto-adopt $ and the realized archive load back into the session
+        pf_ensure_extras(con)
+        samt <- suppressWarnings(as.numeric(db_get_setting(con, "auto_adopt_amount", "100")))
+        if (length(samt) == 1 && is.finite(samt) && samt >= 1)
+          updateNumericInput(session, "lcSeedAmt", value = samt)
+        lc_closed(db_load_closed(con))
         dbpos <- db_load_positions(con); dbdis <- db_load_dismissed(con)
         loc   <- lc_pos()
         extra <- if (!is.null(loc) && nrow(loc))
