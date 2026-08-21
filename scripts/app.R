@@ -1654,8 +1654,24 @@ spy AS (
 -- lump benchmark: the whole stake placed at the row's FIRST fill price - what
 -- the entry-policy audit calls HODL/lump-at-entry. One px per ticker.
 firstpx AS (
-    SELECT DISTINCT ON (ticker) ticker, px AS first_px
-    FROM fills WHERE px > 0 ORDER BY ticker, buy_d
+    SELECT DISTINCT ON (ticker) ticker, buy_d AS first_d,
+           px AS first_px, spy_px AS first_spy
+    FROM fills WHERE px > 0 AND spy_px > 0 ORDER BY ticker, buy_d
+),
+-- daily peak/trough of the vs-SPY excess since first fill (lump basis): the
+-- highest and lowest the position's edge has BEEN, not just where it is now
+spydaily AS (
+    SELECT DISTINCT ON (date) date, adj_close FROM cdm.ingest_combined
+    WHERE ticker = 'SPY' ORDER BY date, adj_close
+),
+extremes AS (
+    SELECT fp.ticker,
+           ROUND(MAX(100 * (c.adj_close / fp.first_px - s.adj_close / fp.first_spy))::numeric, 1) AS peak_vs,
+           ROUND(MIN(100 * (c.adj_close / fp.first_px - s.adj_close / fp.first_spy))::numeric, 1) AS trough_vs
+    FROM firstpx fp
+    JOIN cdm.ingest_combined c ON c.ticker = fp.ticker AND c.date >= fp.first_d
+    JOIN spydaily s ON s.date = c.date
+    GROUP BY fp.ticker
 )
 -- per-ticker rows carry ret_pct (chart) AND invested/value/spy_value (the table
 -- reads the latest row per ticker); the '__SPY__' row is the chart benchmark.
@@ -1667,15 +1683,18 @@ SELECT tk_val.vdate::text AS d, tk_val.ticker,
        ROUND((100 * ((SELECT i.adj_close FROM cdm.ingest_combined i
                       WHERE i.ticker = tk_val.ticker AND i.date <= tk_val.vdate
                       ORDER BY i.date DESC LIMIT 1)
-                     / NULLIF(f.first_px, 0) - 1))::numeric, 2) AS lump_ret_pct
-FROM tk_val JOIN firstpx f ON f.ticker = tk_val.ticker
+                     / NULLIF(f.first_px, 0) - 1))::numeric, 2) AS lump_ret_pct,
+       e.peak_vs, e.trough_vs
+FROM tk_val
+JOIN firstpx f ON f.ticker = tk_val.ticker
+LEFT JOIN extremes e ON e.ticker = tk_val.ticker
 UNION ALL
 SELECT vdate::text AS d, '__SPY__' AS ticker,
        ROUND((100 * ((spy_sh * (SELECT adj_close FROM cdm.ingest_combined
                 WHERE ticker = 'SPY' AND date <= spy.vdate ORDER BY date DESC LIMIT 1))
               / NULLIF(invested, 0) - 1))::numeric, 2) AS ret_pct,
        NULL::numeric AS invested, NULL::numeric AS value, NULL::numeric AS spy_value,
-       NULL::numeric AS lump_ret_pct
+       NULL::numeric AS lump_ret_pct, NULL::numeric AS peak_vs, NULL::numeric AS trough_vs
 FROM spy
 ORDER BY ticker, d;"
 
@@ -2639,8 +2658,14 @@ ui <- navbarPage(
                       "Generate; buys pause when a name leaves the buy list, sell winds down on a ladder.",
                       "Remove / Clear to edit; add manual plans below. Simulated fills at daily closes",
                       "vs a same-cash SPY.")),
-            div(style = "max-width:220px;",
-                numericInput("lcSeedAmt", "Auto-adopt $ per new BUY", value = 100, min = 1)),
+            div(style = "display:flex; gap:1rem; flex-wrap:wrap;",
+              div(style = "max-width:220px;",
+                  numericInput("lcSeedAmt", "Auto-adopt $ per new BUY", value = 100, min = 1)),
+              # audit 2026-08-21: trimming at +25/+50% costs -3.3/-1.5pp vs holding;
+              # at +100% the recoup sale is performance-free (+0.3pp, coin flip),
+              # so the never-lose-money rule defaults there.
+              div(style = "max-width:220px;",
+                  numericInput("lcRecoupThr", "Recoup alert at +%", value = 100, min = 10))),
             uiOutput("lcAdoptRow"),
             div(style = "color:#94a3b8; font-size:0.72rem; margin:0.5rem 0 0.15rem; font-weight:600;",
                 "Or add a manual plan"),
@@ -7344,6 +7369,15 @@ server <- function(input, output, session) {
     db_set_setting(con, "auto_adopt_amount", a)
   }, ignoreInit = TRUE)
 
+  observeEvent(input$lcRecoupThr, {
+    if (!identical(lc_backend(), "db")) return()
+    a <- suppressWarnings(as.numeric(input$lcRecoupThr))
+    if (length(a) != 1 || !is.finite(a) || a < 10) return()
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return()
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    db_set_setting(con, "recoup_threshold_pct", a)
+  }, ignoreInit = TRUE)
+
   # Archive sold = move ACTUALLY-sold rows (Sell stamped) into
   # portfolio.closed_positions, frozen at their current simulated-fill numbers,
   # and drop them from the active book. Dismissed too, so the next Generate does
@@ -7710,6 +7744,10 @@ server <- function(input, output, session) {
                spy_value = as.numeric(last$spy_value),
                lump_ret = if ("lump_ret_pct" %in% names(last))
                  as.numeric(last$lump_ret_pct) else rep(NA_real_, nrow(last)),
+               peak_vs = if ("peak_vs" %in% names(last))
+                 as.numeric(last$peak_vs) else rep(NA_real_, nrow(last)),
+               trough_vs = if ("trough_vs" %in% names(last))
+                 as.numeric(last$trough_vs) else rep(NA_real_, nrow(last)),
                stringsAsFactors = FALSE)
   })
 
@@ -7838,10 +7876,36 @@ server <- function(input, output, session) {
       `vs SPY` = spp(vspp),
       `vs HODL` = spp(vslmp),
       `Model %` = spct(mret),
+      # daily-exact extremes of the vs-SPY edge since first fill (lump basis).
+      # Calibration (226 picks, 12mo windows): peak excess median +25pp,
+      # p75 +47pp, p90 +84pp; trough median -13pp, p25 -32pp. Context column -
+      # the Recoup rule is the act signal.
+      `Peak/Low vsSPY` = {
+        pk <- pcol("peak_vs"); tr <- pcol("trough_vs")
+        ifelse(is.na(pk) | is.na(tr), "-",
+               sprintf("%+.0f / %+.0f pp", pk, tr))
+      },
+      # never-lose-money rule: progress toward the recoup threshold; once hit,
+      # the cell says the sale that returns the full stake (sell 1/(1+r) of the
+      # position). Audit-backed default +100% (below that, trimming costs edge).
+      Recoup   = {
+        thr <- suppressWarnings(as.numeric(input$lcRecoupThr))
+        if (length(thr) != 1 || !is.finite(thr) || thr < 10) thr <- 100
+        ifelse(is.na(ret), "-",
+          ifelse(ret >= thr,
+            sprintf("SELL %d%% → stake back", round(100 / (1 + ret / 100))),
+            sprintf("%d%% of +%d%%", pmax(0, round(ret)), round(thr))))
+      },
       pnl_num  = ifelse(is.na(pnl), 0, pnl),   # hidden: drives P&L color
+      rec_hit  = {
+        thr <- suppressWarnings(as.numeric(input$lcRecoupThr))
+        if (length(thr) != 1 || !is.finite(thr) || thr < 10) thr <- 100
+        as.integer(!is.na(ret) & ret >= thr)   # hidden: drives Recoup color
+      },
       check.names = FALSE, stringsAsFactors = FALSE)
     editcol <- which(names(show) == "$/buy") - 1L   # 0-based; only this col editable
     pnlcol  <- which(names(show) == "pnl_num") - 1L
+    reccol  <- which(names(show) == "rec_hit") - 1L
     pf_js <- DT::JS(
       "var el = $(table.table().node());",
       "var th = el.find('thead th').first();",
@@ -7874,6 +7938,7 @@ server <- function(input, output, session) {
         columnDefs = list(
           list(targets = 0, orderable = FALSE, className = "dt-center pf-sel"),
           list(targets = pnlcol, visible = FALSE),
+          list(targets = reccol, visible = FALSE),
           list(targets = 1, className = "dt-center", render = DT::JS(
             "function(data,type,row){if(type==='sort'||type==='type'){var n=parseInt(data,10);return isNaN(n)?9999:n;}return data;}"))))) %>%
       DT::formatStyle("State", fontWeight = "600",
@@ -7881,7 +7946,10 @@ server <- function(input, output, session) {
                                c("#10b981", "#eab308", "#dc2626", "#64748b"))) %>%
       # profit flag: P&L cell green in profit, red in loss (0/NA stays neutral)
       DT::formatStyle("P&L $", valueColumns = "pnl_num", fontWeight = "600",
-        color = DT::styleInterval(c(-1e-9, 1e-9), c("#f87171", "#94a3b8", "#34d399")))
+        color = DT::styleInterval(c(-1e-9, 1e-9), c("#f87171", "#94a3b8", "#34d399"))) %>%
+      # recoup trigger: gold + bold once the threshold is crossed
+      DT::formatStyle("Recoup", valueColumns = "rec_hit", fontWeight = "600",
+        color = DT::styleEqual(c(0L, 1L), c("#64748b", "#fbbf24")))
   }, server = FALSE)
 
   # Inline edit of $/buy (the only editable column): validate, persist, and the
