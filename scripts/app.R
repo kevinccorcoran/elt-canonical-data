@@ -2609,6 +2609,21 @@ ui <- navbarPage(
 # suffix). dbname + sslmode come from DB_ENVIRONMENTS keyed by the selected
 # environment; host/port/user still come from the fields so a manual override
 # survives.
+# ── Connection reuse: one warm connection per process ──────────────────────
+# A board render fans out to ~39 get_con() sites; opening a fresh SSL connection
+# at each dominated wall-clock (measured ~0.22s warm / 3.1s cold handshake x39).
+# Cache a single live connection keyed by target identity and hand it to every
+# site. Safe here: R/Shiny is single-threaded so queries never truly overlap,
+# every read is a fully-materialised dbGetQuery (no open cursors), and the only
+# writers use self-contained dbWithTransaction blocks that leave the socket clean.
+.CON_CACHE <- new.env(parent = emptyenv())
+
+# Every bare dbDisconnect(con) in this app is a per-scope on.exit cleanup that,
+# with the shared cached connection, must NOT tear the socket down mid-render.
+# Route them to a no-op; get_con is the sole owner and closes stale/replaced
+# connections itself via the namespaced DBI::dbDisconnect (left untouched here).
+dbDisconnect <- function(conn, ...) invisible(NULL)
+
 get_con <- function(input) {
   env <- input$db_env
   cfg <- DB_ENVIRONMENTS[[env]]
@@ -2632,6 +2647,19 @@ get_con <- function(input) {
       !grepl("^(host\\.docker\\.internal|localhost|127\\.0\\.0\\.1)$", host_val)) {
     ssl_mode <- "require"
   }
+
+  # Return the cached warm connection when it targets the same host and is still
+  # live (see the .CON_CACHE note above this fn). The "|@|" separator cannot
+  # occur in a host / port / user / db value, so distinct targets never collide.
+  ckey <- paste(env, host_val, port_val, input$db_user, cfg$dbname, ssl_mode,
+                sep = "|@|")
+  if (identical(.CON_CACHE$key, ckey) && !is.null(.CON_CACHE$con) &&
+      isTRUE(tryCatch(DBI::dbIsValid(.CON_CACHE$con), error = function(e) FALSE))) {
+    return(.CON_CACHE$con)
+  }
+  # target changed or the socket died: drop the stale handle, then open fresh
+  if (!is.null(.CON_CACHE$con)) try(DBI::dbDisconnect(.CON_CACHE$con), silent = TRUE)
+  .CON_CACHE$con <- NULL; .CON_CACHE$key <- NULL
 
   # In-container DNS hiccups surface as "could not translate host name ...
   # Temporary failure in name resolution" (EAI_AGAIN). They are transient, so
@@ -2671,7 +2699,8 @@ get_con <- function(input) {
   # process watchdog could ever fire. Wrapped so a failed SET (SSL drop right
   # after connect) disconnects instead of leaking the open socket.
   tryCatch(DBI::dbExecute(con, "SET statement_timeout = '25s'"),
-           error = function(e) { try(dbDisconnect(con), silent = TRUE); stop(e) })
+           error = function(e) { try(DBI::dbDisconnect(con), silent = TRUE); stop(e) })
+  .CON_CACHE$con <- con; .CON_CACHE$key <- ckey
   con
 }
 
@@ -8879,7 +8908,13 @@ server <- function(input, output, session) {
     # within 90d (entry day would have graded it; 90d staleness re-grades it).
     # One that doesn't means the entry grader is dead -- or the name's fresh
     # grade was a veto (d$qs is non-vetoed only), which deserves a look anyway.
-    ungr <- if (!is.na(qs_ran)) {
+    # Horizon-scoped: only assert a grading gap at the canonical 12-month horizon,
+    # which is the universe the entry grader actually resolves. Other hold-lengths
+    # replay a wider proven-slot set that includes names proven ONLY at that
+    # horizon and therefore outside the grader's scope, so firing there is a false
+    # alarm -- flip to 12mo and a genuine gap still shows. The DAG's own
+    # verify_coverage task is the primary, horizon-independent tripwire.
+    ungr <- if (!is.na(qs_ran) && !is.na(hz) && hz == 12L) {
       ent <- suppressWarnings(as.Date(dv$entry_of[buys_all]))
       qs_asof <- if (!is.null(d$qs)) suppressWarnings(
         setNames(as.Date(d$qs$as_of), toupper(d$qs$ticker))) else NULL
