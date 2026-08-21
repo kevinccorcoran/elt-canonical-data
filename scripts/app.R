@@ -2687,10 +2687,10 @@ ui <- navbarPage(
             uiOutput("lcPortSummary", inline = TRUE)),
           div(
             div(style = "color:#64748b; font-size:0.72rem; margin-bottom:0.6rem;",
-                paste("Auto-seeds every current qualstream BUY as a one-off plan (at the $ below) on",
-                      "Generate; buys pause when a name leaves the buy list, sell winds down on a ladder.",
-                      "Remove / Clear to edit; add manual plans below. Simulated fills at daily closes",
-                      "vs a same-cash SPY.")),
+                paste("Maintained by the daily portfolio_sync run (hands-off): every queue BUY is",
+                      "adopted automatically at the $ below, exits are archived to Realized, and",
+                      "Telegram pings tell you when to act - this table just shows the shared book.",
+                      "Add manual plans below; simulated fills at daily closes vs a same-cash SPY.")),
             div(style = "display:flex; gap:1rem; flex-wrap:wrap;",
               div(style = "max-width:220px;",
                   numericInput("lcSeedAmt", "Auto-adopt $ per new BUY", value = 100, min = 1)),
@@ -8569,12 +8569,16 @@ server <- function(input, output, session) {
     tryCatch({
       con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-      b <- dbGetQuery(con, "
+      b <- dbGetQuery(con, sprintf("
         SELECT COUNT(*) AS n, COUNT(DISTINCT prediction_date) AS d,
-               MIN(prediction_date) AS lo, MAX(prediction_date) AS hi
-        FROM monitoring.prediction_ledger")
-      status_msgLC(sprintf("Connected - %s recorded calls across %d snapshots (%s to %s).",
-                           as.numeric(b$n[1]), as.integer(b$d[1]), b$lo[1], b$hi[1]))
+               MIN(prediction_date) AS lo, MAX(prediction_date) AS hi,
+               COUNT(DISTINCT prediction_date)
+                 FILTER (WHERE prediction_date >= DATE '%s') AS d_epoch
+        FROM monitoring.prediction_ledger", LEDGER_EPOCH))
+      status_msgLC(sprintf(
+        "Connected - %s recorded calls across %d snapshots (%s to %s); the board uses the %d since the %s epoch (earlier ones = retired gate).",
+        as.numeric(b$n[1]), as.integer(b$d[1]), b$lo[1], b$hi[1],
+        as.integer(b$d_epoch[1]), LEDGER_EPOCH))
     }, error = function(e) { status_msgLC(paste("Error:", e$message)) })
   })
 
@@ -8616,20 +8620,18 @@ server <- function(input, output, session) {
         if (length(rthr) == 1 && is.finite(rthr) && rthr >= 10)
           updateNumericInput(session, "lcRecoupThr", value = rthr)
         lc_closed(db_load_closed(con))
-        dbpos <- db_load_positions(con); dbdis <- db_load_dismissed(con)
-        loc   <- lc_pos()
-        extra <- if (!is.null(loc) && nrow(loc))
-                   loc[!(loc$id %in% dbpos$id), , drop = FALSE] else loc[0, ]
-        merged <- if (!is.null(extra) && nrow(extra)) rbind(dbpos, extra) else dbpos
-        if (!is.null(extra) && nrow(extra))
-          tryCatch(db_save_positions(con, merged), error = function(e) NULL)
-        lc_pos(merged)
-        .lc_known$ids <- if (!is.null(merged) && nrow(merged)) as.character(merged$id) else character(0)
-        alldis <- union(dbdis, lc_dismissed())
-        if (length(setdiff(alldis, dbdis)))
-          tryCatch(db_save_dismissed(con, alldis), error = function(e) NULL)
-        lc_dismissed(alldis)
-        .lc_known$dis <- alldis
+        # The DB is authoritative on every Generate: no session/local merge-back.
+        # The old parquet-migration merge re-upserted anything an open session
+        # still remembered, which resurrected server-side deletions (the deduped
+        # duplicate rows came back this way, seen live 2026-08-21). The one-time
+        # parquet migration it existed for is long done; stale parquet books on
+        # any machine now simply get ignored once a portfolio DB is present.
+        dbpos <- db_load_positions(con)
+        lc_pos(dbpos)
+        .lc_known$ids <- if (!is.null(dbpos) && nrow(dbpos)) as.character(dbpos$id) else character(0)
+        dbdis <- db_load_dismissed(con)
+        lc_dismissed(dbdis)
+        .lc_known$dis <- dbdis
       }
       # Floored at LEDGER_EPOCH: pre-epoch BUYs came from the retired gate, and
       # letting them into the walk would start maturity clocks (and therefore
