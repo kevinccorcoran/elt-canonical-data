@@ -374,31 +374,45 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
 
 
 def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None):
-    """The exact Telegram texts. Single source shared by run() and the scenario
-    harness, so the wording the tests validate is the wording that ships."""
+    """The exact Telegram texts. Single source shared by run() and the test
+    harnesses, so the wording the tests validate is the wording that ships.
+    Format (Kevin, 2026-08-21): the ACTION comes first in plain words, one
+    short line per fact, rounded numbers, no cluster codes or jargon."""
     msgs = []
+
+    def money(x):
+        return f"{'+' if x >= 0 else '-'}${abs(x):.2f}"
+
     if adopts:
-        msgs.append("\U0001F7E2 NEW BUY adopted (" + f"${amount:g} each" + "): "
-                    + ", ".join(f"{tk} (gr {grade.get(tk, '?')}"
-                                f", cl {cluster.get(tk, '?')})"
-                                for _, tk in adopts)
-                    + " - buy in Robinhood")
+        def gtxt(tk):
+            try:
+                return f"grade {float(grade.get(tk)):.0f}"
+            except (TypeError, ValueError):
+                return "no grade yet"
+        lines = "\n".join(f"• {tk} ({gtxt(tk)})" for _, tk in adopts)
+        msgs.append(f"\U0001F7E2 BUY in Robinhood - ${amount:g} each\n"
+                    f"{lines}\n"
+                    "The table tracks these from today.")
     if skipped:
-        msgs.append("\U000026A0\U0000FE0F auto_adopt_amount is not set - NOT adopting "
-                    + ", ".join(skipped)
-                    + ". Set 'Auto-adopt $ per new BUY' in the dashboard "
-                      "(Production > Connect), then tomorrow's run adopts them.")
+        msgs.append("\U000026A0\U0000FE0F NOTHING BOUGHT - the buy amount is not set\n"
+                    "Would have bought: " + ", ".join(skipped) + "\n"
+                    "Fix: dashboard > Production > Connect > set "
+                    "'Auto-adopt $ per new BUY'. Tomorrow's run picks them up.")
     for tk, rz, outcome in archived:
-        flag = "PROFIT \U00002705" if outcome == "profit" else "LOSS \U0000274C"
-        msgs.append(f"\U0001F534 SOLD & archived: {tk} "
-                    f"{rz['pnl']:+.2f}$ ({rz['ret']:+.1f}%, "
-                    f"vs SPY {rz['vs_spy']:+.1f}pp) - {flag}"
-                    " - sell in Robinhood if you hold it")
+        verdict = "PROFIT \U00002705" if outcome == "profit" else "LOSS \U0000274C"
+        rel = "beat SPY by" if rz["vs_spy"] >= 0 else "behind SPY by"
+        msgs.append(f"\U0001F534 SELL {tk} in Robinhood - sell all of it\n"
+                    f"Result: {money(rz['pnl'])} {verdict} "
+                    f"({rz['ret']:+.0f}%, {rel} {abs(rz['vs_spy']):.0f}pp)\n"
+                    "Moved to your Realized history. "
+                    "(Skip if you never bought it.)")
     for tk, r_now, r_high, frac, amt in recoups:
-        peak = f" (peak {r_high:+.0f}%)" if r_high - r_now >= 1 else ""
-        msgs.append(f"\U0001F3AF {tk} hit {r_now:+.0f}%{peak} - sell ~{frac:.0f}% "
-                    f"(≈${amt:.2f}) to take your stake back; "
-                    "the rest is house money")
+        peak = f" (peaked at {r_high:+.0f}%)" if r_high - r_now >= 1 else ""
+        msgs.append(f"\U0001F3AF {tk} is up {r_now:+.0f}%{peak} - time to play it safe\n"
+                    f"SELL {frac:.0f}% of it in Robinhood (≈${amt:.2f}) - "
+                    "that takes your original stake back out.\n"
+                    "What's left keeps running as pure profit. One-time alert - "
+                    "record it in the dashboard with 'Sell part %'.")
     return msgs
 
 

@@ -17,7 +17,7 @@ sys.path.insert(0, "/opt/airflow/dags")
 from portfolio_sync import build_msgs
 from utils.alerting import notify
 
-TAG = "[TEST v3]"
+TAG = "[TEST v4]"
 
 adopts = [("rid1", "ZZTA")]
 archived = [
