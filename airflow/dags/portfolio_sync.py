@@ -225,6 +225,125 @@ def realized(cur, tk, amount, cadence, start_d, day1, sold_d):
                 vs_spy=round(ret - spy, 2), vs_lump=round(ret - lump, 2))
 
 
+def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
+    """Steps 1-3b against an open cursor: adopt, snapshot, archive, recoup.
+    Board and settings are injected so the scenario harness can drive this
+    against dev with synthetic states; run() drives it with the real board.
+    Returns (adopts, snaps, archived, recoups); caller commits/rolls back."""
+    pos = _rows(cur, """
+        SELECT id, upper(ticker), amount_usd, cadence, day1,
+               start_date, end_date, sold_date, mode
+        FROM portfolio.positions""")
+    dismissed = {r[0].upper() for r in _rows(cur, "SELECT ticker FROM portfolio.dismissed")}
+    tracked = {r[1] for r in pos}
+
+    # 1. ADOPT
+    to_add = [tk for tk in qs_buys if tk not in tracked and tk not in dismissed]
+    adopts = []
+    for i, tk in enumerate(to_add, 1):
+        rid = f"{tk}-sync{i}-{today.strftime('%Y%m%d')}"
+        adopts.append((rid, tk))
+        if not dry:
+            cur.execute("""
+                INSERT INTO portfolio.positions
+                  (id, ticker, amount_usd, cadence, day1, start_date,
+                   mode, adopted_at, created_at)
+                VALUES (%s,%s,%s,'once',%s,%s,'model',now(),now())
+                ON CONFLICT (id) DO NOTHING""",
+                (rid, tk, amount, today.day, today))
+
+    # 2. SNAPSHOT tracked states
+    snaps = 0
+    for _, tk, *_ in pos:
+        st = bucket.get(tk, "closed")
+        if not dry:
+            cur.execute("""
+                INSERT INTO portfolio.state_history (ticker, as_of, hz, state, why, grade)
+                VALUES (%s,%s,%s,%s,'daily sync',%s)
+                ON CONFLICT (ticker, as_of, hz) DO UPDATE
+                  SET state = EXCLUDED.state, why = EXCLUDED.why,
+                      grade = EXCLUDED.grade, captured_at = now()""",
+                (tk, today, HZ, st, grade.get(tk)))
+        snaps += 1
+
+    # 3. ARCHIVE: model flipped to sell, or the user hand-stamped sold
+    archived = []
+    for rid, tk, amt, cadence, day1, start_d, end_d, sold_d, mode in pos:
+        model_sell = bucket.get(tk) == "sell" and mode == "model"
+        hand_sold = sold_d is not None
+        if not (model_sell or hand_sold):
+            continue
+        exit_day = sold_d or today
+        rz = realized(cur, tk, float(amt), cadence, start_d or today,
+                      day1, exit_day)
+        if rz is None:
+            log.warning("no priced fills for %s - left active", tk)
+            continue
+        outcome = "profit" if rz["pnl"] > 0 else "loss"
+        archived.append((tk, rz, outcome))
+        if not dry:
+            cur.execute("""
+                INSERT INTO portfolio.closed_positions
+                  (id, ticker, cluster_id, cadence, amount_usd, invested_usd,
+                   value_usd, pnl_usd, ret_pct, spy_ret_pct, vs_spy_pp,
+                   vs_lump_pp, entry_date, sold_date, outcome)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (id, sold_date) DO NOTHING""",
+                (rid, tk, cluster.get(tk), cadence, float(amt),
+                 rz["invested"], rz["value"], rz["pnl"], rz["ret"],
+                 rz["spy"], rz["vs_spy"], rz["vs_lump"], rz["entry"],
+                 exit_day, outcome))
+            cur.execute("DELETE FROM portfolio.positions WHERE id = %s", (rid,))
+
+    # 3b. RECOUP crossings (ping-only, no writes): a one-off position whose
+    # own return crossed the never-lose-money threshold since the previous
+    # close. Audit 2026-08-21: +100% is the performance-free level (24/226
+    # picks in 10y); crossings are ~top-decile events, so pings stay rare.
+    arch_tks = {a[0] for a in archived}
+    recoups = []
+    for rid, tk, amt, cadence, day1, start_d, end_d, sold_d, mode in pos:
+        if sold_d is not None or tk in arch_tks or cadence not in (None, "once"):
+            continue
+        fd, fpx = _px_asof(cur, tk, start_d or today, forward=True)
+        if fpx is None or fd is None or fd >= today:
+            continue
+        last2 = _rows(cur, """
+            SELECT date, adj_close FROM cdm.ingest_combined
+            WHERE upper(ticker) = %s AND date >= %s
+            ORDER BY date DESC LIMIT 2""", (tk, fd))
+        if len(last2) < 2:
+            continue
+        r_now = 100 * (float(last2[0][1]) / fpx - 1)
+        r_prev = 100 * (float(last2[1][1]) / fpx - 1)
+        if r_prev < thr <= r_now:
+            frac = 100.0 / (1 + r_now / 100.0)
+            recoups.append((tk, r_now, frac, float(amt)))
+    return adopts, snaps, archived, recoups
+
+
+def build_msgs(adopts, archived, recoups, amount, grade, cluster):
+    """The exact Telegram texts. Single source shared by run() and the scenario
+    harness, so the wording the tests validate is the wording that ships."""
+    msgs = []
+    if adopts:
+        msgs.append("\U0001F7E2 NEW BUY adopted (" + f"${amount:g} each" + "): "
+                    + ", ".join(f"{tk} (gr {grade.get(tk, '?')}"
+                                f", cl {cluster.get(tk, '?')})"
+                                for _, tk in adopts)
+                    + " - buy in Robinhood")
+    for tk, rz, outcome in archived:
+        flag = "PROFIT \U00002705" if outcome == "profit" else "LOSS \U0000274C"
+        msgs.append(f"\U0001F534 SOLD & archived: {tk} "
+                    f"{rz['pnl']:+.2f}$ ({rz['ret']:+.1f}%, "
+                    f"vs SPY {rz['vs_spy']:+.1f}pp) - {flag}"
+                    " - sell in Robinhood if you hold it")
+    for tk, r_now, frac, amt in recoups:
+        msgs.append(f"\U0001F3AF {tk} hit {r_now:+.0f}% - sell ~{frac:.0f}% "
+                    f"(≈${amt:.2f}) to take your stake back; "
+                    "the rest is house money")
+    return msgs
+
+
 def run(dry=False):
     # env guard: this maintains the PROD book only (local schedulers skip)
     env = os.environ.get("ENV")
@@ -251,75 +370,6 @@ def run(dry=False):
             amount = 100.0
         if not (amount >= 1):
             amount = 100.0
-        pos = _rows(cur, """
-            SELECT id, upper(ticker), amount_usd, cadence, day1,
-                   start_date, end_date, sold_date, mode
-            FROM portfolio.positions""")
-        dismissed = {r[0].upper() for r in _rows(cur, "SELECT ticker FROM portfolio.dismissed")}
-        tracked = {r[1] for r in pos}
-
-        # 1. ADOPT
-        to_add = [tk for tk in qs_buys if tk not in tracked and tk not in dismissed]
-        adopts = []
-        for i, tk in enumerate(to_add, 1):
-            rid = f"{tk}-sync{i}-{today.strftime('%Y%m%d')}"
-            adopts.append((rid, tk))
-            if not dry:
-                cur.execute("""
-                    INSERT INTO portfolio.positions
-                      (id, ticker, amount_usd, cadence, day1, start_date,
-                       mode, adopted_at, created_at)
-                    VALUES (%s,%s,%s,'once',%s,%s,'model',now(),now())
-                    ON CONFLICT (id) DO NOTHING""",
-                    (rid, tk, amount, today.day, today))
-
-        # 2. SNAPSHOT tracked states
-        snaps = 0
-        for _, tk, *_ in pos:
-            st = bucket.get(tk, "closed")
-            if not dry:
-                cur.execute("""
-                    INSERT INTO portfolio.state_history (ticker, as_of, hz, state, why, grade)
-                    VALUES (%s,%s,%s,%s,'daily sync',%s)
-                    ON CONFLICT (ticker, as_of, hz) DO UPDATE
-                      SET state = EXCLUDED.state, why = EXCLUDED.why,
-                          grade = EXCLUDED.grade, captured_at = now()""",
-                    (tk, today, HZ, st, grade.get(tk)))
-            snaps += 1
-
-        # 3. ARCHIVE: model flipped to sell, or the user hand-stamped sold
-        archived = []
-        for rid, tk, amt, cadence, day1, start_d, end_d, sold_d, mode in pos:
-            model_sell = bucket.get(tk) == "sell" and mode == "model"
-            hand_sold = sold_d is not None
-            if not (model_sell or hand_sold):
-                continue
-            exit_day = sold_d or today
-            rz = realized(cur, tk, float(amt), cadence, start_d or today,
-                          day1, exit_day)
-            if rz is None:
-                log.warning("no priced fills for %s - left active", tk)
-                continue
-            outcome = "profit" if rz["pnl"] > 0 else "loss"
-            archived.append((tk, rz, outcome))
-            if not dry:
-                cur.execute("""
-                    INSERT INTO portfolio.closed_positions
-                      (id, ticker, cluster_id, cadence, amount_usd, invested_usd,
-                       value_usd, pnl_usd, ret_pct, spy_ret_pct, vs_spy_pp,
-                       vs_lump_pp, entry_date, sold_date, outcome)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (id, sold_date) DO NOTHING""",
-                    (rid, tk, cluster.get(tk), cadence, float(amt),
-                     rz["invested"], rz["value"], rz["pnl"], rz["ret"],
-                     rz["spy"], rz["vs_spy"], rz["vs_lump"], rz["entry"],
-                     exit_day, outcome))
-                cur.execute("DELETE FROM portfolio.positions WHERE id = %s", (rid,))
-
-        # 3b. RECOUP crossings (ping-only, no writes): a one-off position whose
-        # own return crossed the never-lose-money threshold since the previous
-        # close. Audit 2026-08-21: +100% is the performance-free level (24/226
-        # picks in 10y); crossings are ~top-decile events, so pings stay rare.
         thr_rows = _rows(cur, "SELECT value FROM portfolio.app_settings WHERE key='recoup_threshold_pct'")
         try:
             thr = float(thr_rows[0][0]) if thr_rows else 100.0
@@ -327,25 +377,9 @@ def run(dry=False):
             thr = 100.0
         if not (thr >= 10):
             thr = 100.0
-        arch_tks = {a[0] for a in archived}
-        recoups = []
-        for rid, tk, amt, cadence, day1, start_d, end_d, sold_d, mode in pos:
-            if sold_d is not None or tk in arch_tks or cadence not in (None, "once"):
-                continue
-            fd, fpx = _px_asof(cur, tk, start_d or today, forward=True)
-            if fpx is None or fd is None or fd >= today:
-                continue
-            last2 = _rows(cur, """
-                SELECT date, adj_close FROM cdm.ingest_combined
-                WHERE upper(ticker) = %s AND date >= %s
-                ORDER BY date DESC LIMIT 2""", (tk, fd))
-            if len(last2) < 2:
-                continue
-            r_now = 100 * (float(last2[0][1]) / fpx - 1)
-            r_prev = 100 * (float(last2[1][1]) / fpx - 1)
-            if r_prev < thr <= r_now:
-                frac = 100.0 / (1 + r_now / 100.0)
-                recoups.append((tk, r_now, frac, float(amt)))
+
+        adopts, snaps, archived, recoups = sync_core(
+            cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry)
 
         if dry:
             con.rollback()
@@ -353,23 +387,7 @@ def run(dry=False):
             con.commit()
 
         # 4. PING (after commit so a failed write can't produce a false ping)
-        msgs = []
-        if adopts:
-            msgs.append("\U0001F7E2 NEW BUY adopted (" + f"${amount:g} each" + "): "
-                        + ", ".join(f"{tk} (gr {grade.get(tk, '?')}"
-                                    f", cl {cluster.get(tk, '?')})"
-                                    for _, tk in adopts)
-                        + " - buy in Robinhood")
-        for tk, rz, outcome in archived:
-            flag = "PROFIT \U00002705" if outcome == "profit" else "LOSS \U0000274C"
-            msgs.append(f"\U0001F534 SOLD & archived: {tk} "
-                        f"{rz['pnl']:+.2f}$ ({rz['ret']:+.1f}%, "
-                        f"vs SPY {rz['vs_spy']:+.1f}pp) - {flag}"
-                        " - sell in Robinhood if you hold it")
-        for tk, r_now, frac, amt in recoups:
-            msgs.append(f"\U0001F3AF {tk} hit {r_now:+.0f}% - sell ~{frac:.0f}% "
-                        f"(≈${amt:.2f}) to take your stake back; "
-                        "the rest is house money")
+        msgs = build_msgs(adopts, archived, recoups, amount, grade, cluster)
         if dry:
             print(f"DRY RUN {today} (env={env})")
             print(f"board: {sum(1 for b in bucket.values() if b == 'buy')} buy / "
