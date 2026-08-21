@@ -316,6 +316,37 @@ def run(dry=False):
                      exit_day, outcome))
                 cur.execute("DELETE FROM portfolio.positions WHERE id = %s", (rid,))
 
+        # 3b. RECOUP crossings (ping-only, no writes): a one-off position whose
+        # own return crossed the never-lose-money threshold since the previous
+        # close. Audit 2026-08-21: +100% is the performance-free level (24/226
+        # picks in 10y); crossings are ~top-decile events, so pings stay rare.
+        thr_rows = _rows(cur, "SELECT value FROM portfolio.app_settings WHERE key='recoup_threshold_pct'")
+        try:
+            thr = float(thr_rows[0][0]) if thr_rows else 100.0
+        except Exception:
+            thr = 100.0
+        if not (thr >= 10):
+            thr = 100.0
+        arch_tks = {a[0] for a in archived}
+        recoups = []
+        for rid, tk, amt, cadence, day1, start_d, end_d, sold_d, mode in pos:
+            if sold_d is not None or tk in arch_tks or cadence not in (None, "once"):
+                continue
+            fd, fpx = _px_asof(cur, tk, start_d or today, forward=True)
+            if fpx is None or fd is None or fd >= today:
+                continue
+            last2 = _rows(cur, """
+                SELECT date, adj_close FROM cdm.ingest_combined
+                WHERE upper(ticker) = %s AND date >= %s
+                ORDER BY date DESC LIMIT 2""", (tk, fd))
+            if len(last2) < 2:
+                continue
+            r_now = 100 * (float(last2[0][1]) / fpx - 1)
+            r_prev = 100 * (float(last2[1][1]) / fpx - 1)
+            if r_prev < thr <= r_now:
+                frac = 100.0 / (1 + r_now / 100.0)
+                recoups.append((tk, r_now, frac, float(amt)))
+
         if dry:
             con.rollback()
         else:
@@ -335,6 +366,10 @@ def run(dry=False):
                         f"{rz['pnl']:+.2f}$ ({rz['ret']:+.1f}%, "
                         f"vs SPY {rz['vs_spy']:+.1f}pp) - {flag}"
                         " - sell in Robinhood if you hold it")
+        for tk, r_now, frac, amt in recoups:
+            msgs.append(f"\U0001F3AF {tk} hit {r_now:+.0f}% - sell ~{frac:.0f}% "
+                        f"(≈${amt:.2f}) to take your stake back; "
+                        "the rest is house money")
         if dry:
             print(f"DRY RUN {today} (env={env})")
             print(f"board: {sum(1 for b in bucket.values() if b == 'buy')} buy / "
