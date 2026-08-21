@@ -145,18 +145,30 @@ db_load_positions <- function(con) {
   migrate_portfolio(df)
 }
 
-# Whole-state replace in one transaction: mirrors the parquet "df IS the state"
-# semantics, so the existing observers (which compute a full merged df) need no
-# rework. The table is tiny and single-writer, so truncate+insert is fine.
-db_save_positions <- function(con, df) {
+# Delta-safe save: upsert the session's rows by id, delete ONLY drop_ids (ids
+# this session loaded and then removed). Never a whole-table replace - the
+# daily portfolio_sync DAG is a second writer since 2026-08-21, and rows it
+# adds/archives mid-session must survive a dashboard save untouched.
+# recoup_pinged_at is DAG-owned and deliberately absent so a save can't reset it.
+db_save_positions <- function(con, df, drop_ids = NULL) {
+  drop_ids <- as.character(drop_ids[!is.na(drop_ids) & nzchar(drop_ids)])
   DBI::dbWithTransaction(con, {
-    DBI::dbExecute(con, "DELETE FROM portfolio.positions")
+    if (length(drop_ids))
+      DBI::dbExecute(con, "DELETE FROM portfolio.positions WHERE id = $1",
+                     params = list(drop_ids))
     if (!is.null(df) && nrow(df) > 0)
       DBI::dbExecute(con, "
         INSERT INTO portfolio.positions
           (id,ticker,amount_usd,cadence,day1,day2,start_date,end_date,
            sold_date,sold_fraction,mode,adopted_at,created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT (id) DO UPDATE SET
+          ticker = EXCLUDED.ticker, amount_usd = EXCLUDED.amount_usd,
+          cadence = EXCLUDED.cadence, day1 = EXCLUDED.day1, day2 = EXCLUDED.day2,
+          start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date,
+          sold_date = EXCLUDED.sold_date, sold_fraction = EXCLUDED.sold_fraction,
+          mode = EXCLUDED.mode, adopted_at = EXCLUDED.adopted_at,
+          created_at = EXCLUDED.created_at",
         params = list(
           as.character(df$id), toupper(as.character(df$ticker)),
           as.numeric(df$amount_usd), as.character(df$cadence),
@@ -174,12 +186,20 @@ db_load_dismissed <- function(con) {
     error = function(e) character(0))
 }
 
-db_save_dismissed <- function(con, tickers) {
+# Same delta discipline as db_save_positions: additive insert, delete only the
+# explicit drop set (tickers this session un-dismissed). portfolio_sync also
+# writes dismissals (hand-sold-on-BUY names), which a full replace would wipe.
+db_save_dismissed <- function(con, tickers, drop = NULL) {
   tickers <- unique(toupper(tickers[nzchar(tickers)]))
+  drop <- setdiff(unique(toupper(as.character(drop[!is.na(drop) & nzchar(drop)]))), tickers)
   DBI::dbWithTransaction(con, {
-    DBI::dbExecute(con, "DELETE FROM portfolio.dismissed")
+    if (length(drop))
+      DBI::dbExecute(con, "DELETE FROM portfolio.dismissed WHERE upper(ticker) = $1",
+                     params = list(drop))
     if (length(tickers))
-      DBI::dbExecute(con, "INSERT INTO portfolio.dismissed (ticker) VALUES ($1)",
+      DBI::dbExecute(con, "
+        INSERT INTO portfolio.dismissed (ticker) VALUES ($1)
+        ON CONFLICT (ticker) DO NOTHING",
                      params = list(tickers))
   })
   invisible(tickers)
@@ -204,6 +224,19 @@ pf_ensure_extras <- function(con) {
       CREATE TABLE IF NOT EXISTS portfolio.app_settings (
         key text PRIMARY KEY, value text NOT NULL,
         updated_at timestamptz NOT NULL DEFAULT now())")
+    # portfolio_sync extras: the once-per-position recoup stamp and the run
+    # log / ping outbox. The app itself never writes recoup_pinged_at or
+    # sync_runs, but provisioning here keeps every connected DB (dev included,
+    # where the env-guarded DAG never runs) on the same schema.
+    DBI::dbExecute(con, "
+      ALTER TABLE portfolio.positions
+        ADD COLUMN IF NOT EXISTS recoup_pinged_at date")
+    DBI::dbExecute(con, "
+      CREATE TABLE IF NOT EXISTS portfolio.sync_runs (
+        as_of date PRIMARY KEY, qs_buys text[],
+        n_adopt integer, n_snap integer, n_arch integer, n_recoup integer,
+        msgs jsonb, sent boolean NOT NULL DEFAULT false,
+        created_at timestamptz NOT NULL DEFAULT now())")
     TRUE
   }, error = function(e) FALSE)
 }
@@ -245,7 +278,7 @@ db_archive_positions <- function(con, rows) {
 
 db_load_closed <- function(con) {
   tryCatch(DBI::dbGetQuery(con, "
-    SELECT ticker, cluster_id, to_char(entry_date,'YYYY-MM-DD') AS entry_date,
+    SELECT id, ticker, cluster_id, to_char(entry_date,'YYYY-MM-DD') AS entry_date,
            to_char(sold_date,'YYYY-MM-DD') AS sold_date, invested_usd, value_usd,
            pnl_usd, ret_pct, spy_ret_pct, vs_spy_pp, vs_lump_pp, outcome
     FROM portfolio.closed_positions ORDER BY sold_date DESC, ticker"),
@@ -2683,6 +2716,10 @@ ui <- navbarPage(
               actionButton("lcPosRemove", "Remove selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosHold", "Hold selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosSell", "Sell selected", style = "margin-right:0.4rem;"),
+              div(style = "display:inline-block;width:70px;margin-right:0.15rem;vertical-align:middle;",
+                  numericInput("lcPartPct", NULL, value = 50, min = 1, max = 95, step = 1)),
+              actionButton("lcPosSellPart", "Sell part %", style = "margin-right:0.4rem;",
+                           title = "Record a partial sale (e.g. after a recoup ping): archives the sold slice, the row keeps running on the remaining stake"),
               actionButton("lcPosResume", "Resume selected", style = "margin-right:0.4rem;"),
               actionButton("lcPosArchive", "Archive sold", style = "margin-right:0.4rem;"),
               actionButton("lcPosClear", "Clear all")),
@@ -2690,6 +2727,8 @@ ui <- navbarPage(
                 paste("id = cluster. Check rows (or the header box for all), then Remove / Hold /",
                       "Sell / Resume. Hold pauses buying (the position keeps valuing); Sell",
                       "records a full exit; Resume returns the row to the model's flow.",
+                      "Sell part % records a partial sale (the recoup-ping action): the slice is",
+                      "archived as realized money (Banked $) and the row keeps running on the rest.",
                       "Archive sold moves rows you have ACTUALLY sold (Sell them first) to the",
                       "read-only realized table below, frozen at their exit numbers.",
                       "Double-click a $/buy cell to change that row's amount.",
@@ -7091,83 +7130,56 @@ server <- function(input, output, session) {
   output$statusMessageLC <- renderText({ status_msgLC() })
 
   # ── Personal portfolio: strategy follower (model DCA + ladder sells) ──────
-  lc_pos <- reactiveVal(load_portfolio())
-  lc_dismissed <- reactiveVal(load_dismissed())
+  .init_pf  <- load_portfolio()
+  .init_dis <- load_dismissed()
+  lc_pos <- reactiveVal(.init_pf)
+  lc_dismissed <- reactiveVal(.init_dis)
   lc_backend <- reactiveVal("parquet")   # flips to "db" once a portfolio-schema DB is seen
+  # Ids/tickers this session has actually SEEN. Saves delete only from this set,
+  # so rows the portfolio_sync DAG adds mid-session are never clobbered by a
+  # whole-frame save. Plain env on purpose - no reactivity wanted.
+  .lc_known <- new.env(parent = emptyenv())
+  .lc_known$ids <- if (!is.null(.init_pf) && nrow(.init_pf)) as.character(.init_pf$id) else character(0)
+  .lc_known$dis <- .init_dis
 
   # Route a positions/dismissed save to the DB (authoritative, shared) when the
   # connected DB has the portfolio schema, else to the local parquet files. The
   # observers below compute a full merged df and call these, unchanged otherwise.
   persist_positions <- function(df) {
-    if (!identical(lc_backend(), "db")) { save_portfolio(df); return(invisible(TRUE)) }
+    ids <- if (!is.null(df) && nrow(df)) as.character(df$id) else character(0)
+    if (!identical(lc_backend(), "db")) {
+      save_portfolio(df); .lc_known$ids <- ids; return(invisible(TRUE)) }
     con <- tryCatch(get_con(input), error = function(e) NULL)
     if (is.null(con)) {
       showNotification("DB unreachable - change not saved.", type = "error"); return(invisible(FALSE)) }
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    tryCatch({ db_save_positions(con, df); invisible(TRUE) },
+    tryCatch({
+      db_save_positions(con, df, drop_ids = setdiff(.lc_known$ids, ids))
+      .lc_known$ids <- ids
+      invisible(TRUE) },
       error = function(e) {
         showNotification(paste("Save failed:", e$message), type = "error"); invisible(FALSE) })
   }
   persist_dismissed <- function(v) {
-    if (!identical(lc_backend(), "db")) { save_dismissed(v); return(invisible(TRUE)) }
+    v <- unique(toupper(v[nzchar(v)]))
+    if (!identical(lc_backend(), "db")) {
+      save_dismissed(v); .lc_known$dis <- v; return(invisible(TRUE)) }
     con <- tryCatch(get_con(input), error = function(e) NULL)
     if (is.null(con)) return(invisible(FALSE))
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    tryCatch({ db_save_dismissed(con, v); invisible(TRUE) }, error = function(e) invisible(FALSE))
+    tryCatch({
+      db_save_dismissed(con, v, drop = setdiff(.lc_known$dis, v))
+      .lc_known$dis <- v
+      invisible(TRUE) }, error = function(e) invisible(FALSE))
   }
 
-  # Default the table to the seed queue (dv$qs_buys): on every Generate, each
-  # validated-board BUY - grade-ranked, veto-excluded, cluster-capped - is
-  # auto-added as a model-linked $100 ONE-SHOT plan (lump at entry:
-  # installments measured -3.9pp vs the same cash lumped, and the one-shot
-  # defers to the first live BUY run) unless it is already tracked or was
-  # explicitly removed (dismissed).
-  # Idempotent: once seeded, qs_buys is a subset of tracked+dismissed, so
-  # `toAdd` is empty and no further write fires (the self-trigger on lc_pos()
-  # settles after one no-op pass).
-  observe({
-    dv <- tryCatch(derivedLC(), error = function(e) NULL)
-    if (is.null(dv) || is.null(dv$qs_buys) || !length(dv$qs_buys)) return()
-    cur <- lc_pos(); dis <- lc_dismissed()
-    # one-time policy migration: monthly seeds the app itself created become
-    # one-shot. Only untouched auto-seeds move - adopted/manual rows keep the
-    # cadence the user chose, and stamped (held/sold) rows keep their history.
-    if (nrow(cur)) {
-      e <- as.character(cur$end_date); s <- as.character(cur$sold_date)
-      clean <- (is.na(e) | !nzchar(e)) & (is.na(s) | !nzchar(s))
-      mig <- grepl("-seed", cur$id, fixed = TRUE) & cur$mode == "model" &
-             cur$cadence == "monthly" & clean
-      if (any(mig, na.rm = TRUE)) {
-        cur$cadence[which(mig)] <- "once"
-        persist_positions(cur); lc_pos(cur)
-        return()   # let the write settle; the next pass handles seeding
-      }
-    }
-    toAdd <- setdiff(dv$qs_buys, union(toupper(cur$ticker), dis))
-    if (!length(toAdd)) return()
-    now <- format(Sys.time())
-    rows <- do.call(rbind, lapply(seq_along(toAdd), function(i) {
-      tk <- toAdd[i]
-      data.frame(
-        id = paste0(tk, "-seed", i, "-", format(Sys.time(), "%Y%m%d%H%M%S")),
-        ticker = tk,
-        # user-set auto-adopt size (persisted in portfolio.app_settings); 100
-        # only as the never-configured fallback
-        amount_usd = { a <- suppressWarnings(as.numeric(input$lcSeedAmt))
-                       if (length(a) == 1 && is.finite(a) && a >= 1) a else 100 },
-        cadence = "once",
-        # Stored start = the day it was actually added (the personal truth used
-        # by the "since I added" basis); the epoch basis ignores it and tracks
-        # from the regime epoch inside gated_expand_schedule.
-        day1 = as.integer(format(Sys.Date(), "%d")),
-        day2 = NA_integer_, start_date = format(Sys.Date()),
-        end_date = "", sold_date = "", sold_fraction = NA_real_,
-        mode = "model", adopted_at = now, created_at = now,
-        stringsAsFactors = FALSE)
-    }))
-    merged <- rbind(cur, rows)
-    persist_positions(merged); lc_pos(merged)
-  })
+  # Adoption is portfolio_sync's job now: the daily DAG adopts every queue name
+  # at the auto_adopt_amount setting and pings Telegram. The dashboard-side
+  # auto-seed observer that used to live here double-inserted across sessions
+  # (its dedup ran against the session snapshot, not the DB - 9 doubled tickers
+  # on prod by 2026-08-21) and fired on every backend, which is also what wrote
+  # the "mystery" dev adopt batches of Aug 14-20. Removed 2026-08-21; manual
+  # Add/Adopt/Sell/Archive remain the dashboard's write surface.
 
   # Transition log: on each Generate, snapshot every tracked ticker's current
   # state (buy/hold/sell/closed) to portfolio.state_history, upserted per
@@ -7321,11 +7333,107 @@ server <- function(input, output, session) {
     sel <- sel[!is.na(sel) & sel >= 1 & sel <= nrow(cur)]
     if (!length(sel)) { showNotification("Check one or more rows to sell.", type = "message"); return() }
     cur$sold_date[sel] <- format(Sys.Date())
-    cur$sold_fraction[sel] <- 1
+    # sold_fraction in (0,1) records earlier PARTIAL sales (their slices are
+    # already archived) - the final exit realizes only the remaining stake, so
+    # keep that history; a plain 1 means the whole stake sold at once.
+    sfS <- suppressWarnings(as.numeric(cur$sold_fraction[sel]))
+    cur$sold_fraction[sel] <- ifelse(!is.na(sfS) & sfS > 0 & sfS < 1, sfS, 1)
     cur$end_date[sel] <- format(Sys.Date())
     persist_positions(cur); lc_pos(cur)
     showNotification(sprintf("%s marked sold - buying stopped, exit recorded.",
                              paste(toupper(cur$ticker[sel]), collapse = ", ")), type = "message")
+  })
+  # Sell part = record a hand TRIM (the recoup-ping action): archive the sold
+  # slice into closed_positions at today's numbers and stamp the cumulative
+  # sold_fraction; the row stays active on the remaining stake, so the table
+  # keeps telling the truth after a stake-back sale. DB backend only (slices
+  # live in the realized archive). One slice per position per day - the
+  # (id, sold_date) key - so a second same-day trim is refused, not merged.
+  observeEvent(input$lcPosSellPart, {
+    if (!identical(lc_backend(), "db")) {
+      showNotification("Sell part needs the DB portfolio store (connect to a DB with the portfolio schema).",
+                       type = "warning"); return()
+    }
+    pctv <- suppressWarnings(as.numeric(input$lcPartPct))
+    if (length(pctv) != 1 || !is.finite(pctv) || pctv < 1 || pctv > 95) {
+      showNotification("Sell part needs a percent between 1 and 95 (selling 100% = use Sell selected).",
+                       type = "warning"); return()
+    }
+    sel <- suppressWarnings(as.integer(input$lcPosChecked)); cur <- lc_pos()
+    if (is.null(cur) || !nrow(cur)) return()
+    sel <- sel[!is.na(sel) & sel >= 1 & sel <= nrow(cur)]
+    if (!length(sel)) { showNotification("Check one or more rows to trim.", type = "message"); return() }
+    sd0 <- as.character(cur$sold_date[sel])
+    fully <- !(is.na(sd0) | !nzchar(sd0))
+    if (any(fully)) {
+      showNotification(sprintf("Already fully sold - not trimmed: %s",
+        paste(toupper(cur$ticker[sel][fully]), collapse = ", ")), type = "warning")
+      sel <- sel[!fully]
+      if (!length(sel)) return()
+    }
+    perf <- tryCatch(lc_row_perf(), error = function(e) NULL)
+    d    <- app_dataLC()
+    id_of <- if (!is.null(d) && !is.null(d$gate$id))
+      setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker)) else integer(0)
+    pc <- function(col, ids) if (is.null(perf) || !nrow(perf)) rep(NA_real_, length(ids)) else
+      as.numeric(perf[[col]])[match(ids, perf$id)]
+    ids <- as.character(cur$id[sel])
+    inv <- pc("invested", ids); val <- pc("value", ids); spyv <- pc("spy_value", ids)
+    lmp <- pc("lump_ret", ids)
+    unpriced <- which(is.na(val) | is.na(inv) | inv <= 0)
+    if (length(unpriced)) {
+      showNotification(sprintf("No priced fills yet - not trimmed: %s",
+        paste(toupper(cur$ticker[sel][unpriced]), collapse = ", ")), type = "warning")
+      keep <- setdiff(seq_along(sel), unpriced)
+      if (!length(keep)) return()
+      sel <- sel[keep]; ids <- ids[keep]
+      inv <- inv[keep]; val <- val[keep]; spyv <- spyv[keep]; lmp <- lmp[keep]
+    }
+    con <- tryCatch(get_con(input), error = function(e) NULL)
+    if (is.null(con)) { showNotification("No DB connection - connect first.", type = "error"); return() }
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    inlist <- paste(sprintf("'%s'", gsub("'", "''", ids, fixed = TRUE)), collapse = ",")
+    already <- tryCatch(as.character(DBI::dbGetQuery(con, sprintf(
+      "SELECT id FROM portfolio.closed_positions WHERE sold_date = CURRENT_DATE AND id IN (%s)",
+      inlist))$id), error = function(e) character(0))
+    if (length(already)) {
+      hit <- ids %in% already
+      showNotification(sprintf("Already trimmed today - not trimmed again: %s",
+        paste(toupper(cur$ticker[sel][hit]), collapse = ", ")), type = "warning")
+      keep <- which(!hit)
+      if (!length(keep)) return()
+      sel <- sel[keep]; ids <- ids[keep]
+      inv <- inv[keep]; val <- val[keep]; spyv <- spyv[keep]; lmp <- lmp[keep]
+    }
+    sf0 <- suppressWarnings(as.numeric(cur$sold_fraction[sel]))
+    sf0[is.na(sf0) | sf0 < 0 | sf0 >= 1] <- 0
+    slice <- (1 - sf0) * (pctv / 100)   # fraction of the ORIGINAL stake sold now
+    ret  <- 100 * (val / inv - 1); spyr <- 100 * (spyv / inv - 1)
+    since <- if (!is.null(perf) && "since" %in% names(perf))
+      as.character(perf$since)[match(ids, perf$id)] else rep(NA_character_, length(ids))
+    rows <- data.frame(
+      id = ids, ticker = toupper(cur$ticker[sel]),
+      cluster_id = unname(id_of[toupper(cur$ticker[sel])]),
+      cadence = as.character(cur$cadence[sel]),
+      amount_usd = as.numeric(cur$amount_usd[sel]),
+      invested_usd = inv * slice, value_usd = val * slice,
+      pnl_usd = (val - inv) * slice,
+      ret_pct = ret, spy_ret_pct = spyr, vs_spy_pp = ret - spyr,
+      vs_lump_pp = ret - lmp,
+      entry_date = ifelse(is.na(since), as.character(cur$start_date[sel]), since),
+      sold_date = format(Sys.Date()),
+      outcome = ifelse((val - inv) * slice > 0, "profit", "loss"),
+      stringsAsFactors = FALSE)
+    ok <- tryCatch({ db_archive_positions(con, rows); TRUE },
+                   error = function(e) { showNotification(paste("Trim failed:",
+                     conditionMessage(e)), type = "error"); FALSE })
+    if (!ok) return()
+    cur$sold_fraction[sel] <- sf0 + slice
+    persist_positions(cur); lc_pos(cur)
+    lc_closed(db_load_closed(con))
+    showNotification(sprintf("Partial sale recorded: %s - %.0f%% of the current stake (≈%s banked).",
+      paste(toupper(cur$ticker[sel]), collapse = ", "), pctv,
+      paste(sprintf("$%.2f", val * slice), collapse = ", ")), type = "message")
   })
   observeEvent(input$lcPosResume, {
     sel <- input$lcPosChecked; cur <- lc_pos()
@@ -7334,7 +7442,11 @@ server <- function(input, output, session) {
     sel <- sel[!is.na(sel) & sel >= 1 & sel <= nrow(cur)]
     if (!length(sel)) { showNotification("Check one or more rows to resume.", type = "message"); return() }
     cur$end_date[sel] <- ""
-    cur$sold_date[sel] <- ""; cur$sold_fraction[sel] <- NA_real_
+    cur$sold_date[sel] <- ""
+    # clear the full-exit stamp but KEEP partial-sale history: those slices are
+    # archived money - wiping the fraction would double-count the stake.
+    sfR <- suppressWarnings(as.numeric(cur$sold_fraction[sel]))
+    cur$sold_fraction[sel] <- ifelse(!is.na(sfR) & sfR > 0 & sfR < 1, sfR, NA_real_)
     # one-shot resume DEFERS FORWARD: re-stamp start_date to today so the single
     # buy prices at the re-commit date, not a backfilled sat-out price. Resume
     # means "I'm in now" - backdating a fill the user never made would fabricate
@@ -7424,13 +7536,17 @@ server <- function(input, output, session) {
     since <- if (!is.null(perf) && "since" %in% names(perf))
       as.character(perf$since)[match(ids, perf$id)] else rep(NA_character_, length(ids))
     ret  <- 100 * (val / inv - 1); spyr <- 100 * (spyv / inv - 1)
-    pnl  <- val - inv
+    # partial-sale history: slices already archived realize their own money, so
+    # the final exit archives only the REMAINING stake (mirrors portfolio_sync)
+    sfA <- suppressWarnings(as.numeric(cur$sold_fraction[sel]))
+    rem <- ifelse(!is.na(sfA) & sfA > 0 & sfA < 1, 1 - sfA, 1)
+    pnl  <- (val - inv) * rem
     rows <- data.frame(
       id = ids, ticker = toupper(cur$ticker[sel]),
       cluster_id = unname(id_of[toupper(cur$ticker[sel])]),
       cadence = as.character(cur$cadence[sel]),
       amount_usd = as.numeric(cur$amount_usd[sel]),
-      invested_usd = inv, value_usd = val, pnl_usd = pnl,
+      invested_usd = inv * rem, value_usd = val * rem, pnl_usd = pnl,
       ret_pct = ret, spy_ret_pct = spyr, vs_spy_pp = ret - spyr,
       vs_lump_pp = ret - lmp,
       entry_date = ifelse(is.na(since), as.character(cur$start_date[sel]), since),
@@ -7815,6 +7931,13 @@ server <- function(input, output, session) {
     pcol <- function(col) if (is.null(perf) || !nrow(perf)) rep(NA_real_, nrow(p)) else
       as.numeric(perf[[col]])[match(p$id, perf$id)]
     invested <- pcol("invested"); value <- pcol("value"); spyv <- pcol("spy_value")
+    # partial sales: an active row with sold_fraction in (0,1) runs on the
+    # REMAINING stake (the sold slices sit in the realized archive; "Banked $"
+    # shows their proceeds). Percent columns are scale-invariant and unchanged.
+    sfr  <- suppressWarnings(as.numeric(p$sold_fraction))
+    part <- !is.na(sfr) & sfr > 0 & sfr < 1 & !sold
+    remf <- ifelse(part, 1 - sfr, 1)
+    invested <- invested * remf; value <- value * remf; spyv <- spyv * remf
     ret  <- 100 * (value / invested - 1)
     spyr <- 100 * (spyv  / invested - 1)
     pnl  <- value - invested
@@ -7896,16 +8019,28 @@ server <- function(input, output, session) {
       Recoup   = {
         thr <- suppressWarnings(as.numeric(input$lcRecoupThr))
         if (length(thr) != 1 || !is.finite(thr) || thr < 10) thr <- 100
-        ifelse(is.na(ret), "-",
+        out <- ifelse(is.na(ret), "-",
           ifelse(ret >= thr,
             sprintf("SELL %d%% → stake back", round(100 / (1 + ret / 100))),
             sprintf("%d%% of +%d%%", pmax(0, round(ret)), round(thr))))
+        out[part] <- sprintf("banked %d%% ✓", round(100 * sfr[part]))
+        out
+      },
+      # proceeds of this row's archived partial-sale slices (realized money)
+      Banked   = {
+        cl <- lc_closed()
+        b <- rep(NA_real_, nrow(p))
+        if (!is.null(cl) && nrow(cl) && "id" %in% names(cl)) {
+          agg <- tapply(as.numeric(cl$value_usd), as.character(cl$id), sum, na.rm = TRUE)
+          b <- as.numeric(agg[as.character(p$id)])
+        }
+        ifelse(is.finite(b) & b > 0, sprintf("$%.2f", b), "-")
       },
       pnl_num  = ifelse(is.na(pnl), 0, pnl),   # hidden: drives P&L color
       rec_hit  = {
         thr <- suppressWarnings(as.numeric(input$lcRecoupThr))
         if (length(thr) != 1 || !is.finite(thr) || thr < 10) thr <- 100
-        as.integer(!is.na(ret) & ret >= thr)   # hidden: drives Recoup color
+        as.integer(!is.na(ret) & ret >= thr & !part)   # hidden: drives Recoup color
       },
       check.names = FALSE, stringsAsFactors = FALSE)
     editcol <- which(names(show) == "$/buy") - 1L   # 0-based; only this col editable
@@ -8477,6 +8612,9 @@ server <- function(input, output, session) {
         samt <- suppressWarnings(as.numeric(db_get_setting(con, "auto_adopt_amount", "100")))
         if (length(samt) == 1 && is.finite(samt) && samt >= 1)
           updateNumericInput(session, "lcSeedAmt", value = samt)
+        rthr <- suppressWarnings(as.numeric(db_get_setting(con, "recoup_threshold_pct", "100")))
+        if (length(rthr) == 1 && is.finite(rthr) && rthr >= 10)
+          updateNumericInput(session, "lcRecoupThr", value = rthr)
         lc_closed(db_load_closed(con))
         dbpos <- db_load_positions(con); dbdis <- db_load_dismissed(con)
         loc   <- lc_pos()
@@ -8486,10 +8624,12 @@ server <- function(input, output, session) {
         if (!is.null(extra) && nrow(extra))
           tryCatch(db_save_positions(con, merged), error = function(e) NULL)
         lc_pos(merged)
+        .lc_known$ids <- if (!is.null(merged) && nrow(merged)) as.character(merged$id) else character(0)
         alldis <- union(dbdis, lc_dismissed())
         if (length(setdiff(alldis, dbdis)))
           tryCatch(db_save_dismissed(con, alldis), error = function(e) NULL)
         lc_dismissed(alldis)
+        .lc_known$dis <- alldis
       }
       # Floored at LEDGER_EPOCH: pre-epoch BUYs came from the retired gate, and
       # letting them into the walk would start maturity clocks (and therefore

@@ -98,10 +98,33 @@ CREATE TABLE IF NOT EXISTS portfolio.closed_positions (
 CREATE INDEX IF NOT EXISTS closed_positions_ticker_idx
     ON portfolio.closed_positions (ticker, sold_date);
 
--- Tiny app settings store (e.g. auto_adopt_amount: the $ used when a new
--- qualstream BUY auto-seeds into the positions table on Generate).
+-- Tiny app settings store (auto_adopt_amount: the $ the portfolio_sync DAG
+-- adopts each new BUY at; recoup_threshold_pct: the gain at which the one-time
+-- stake-back ping fires). UNSET auto_adopt_amount = the DAG adopts nothing and
+-- pings a warning; it never falls back to a default amount.
 CREATE TABLE IF NOT EXISTS portfolio.app_settings (
     key        text        PRIMARY KEY,
     value      text        NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- portfolio_sync's once-per-position recoup stamp: set the day the high-water
+-- "sell ~N% to take your stake back" ping fires, so it can never nag twice.
+ALTER TABLE portfolio.positions ADD COLUMN IF NOT EXISTS recoup_pinged_at date;
+
+-- portfolio_sync run log + durable ping outbox. One row per day: qs_buys is
+-- the day's capped adopt queue (the R/Python parity record), msgs the Telegram
+-- texts committed WITH the day's writes, sent flips true only after delivery -
+-- a Telegram outage delays pings instead of losing them. The deadman cron
+-- (tools/portfolio_deadman.sh) alerts when today's row is missing.
+CREATE TABLE IF NOT EXISTS portfolio.sync_runs (
+    as_of      date        PRIMARY KEY,
+    qs_buys    text[],
+    n_adopt    integer,
+    n_snap     integer,
+    n_arch     integer,
+    n_recoup   integer,
+    msgs       jsonb,
+    sent       boolean     NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now()
 );
