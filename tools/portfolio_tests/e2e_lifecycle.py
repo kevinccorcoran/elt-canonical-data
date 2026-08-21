@@ -169,7 +169,7 @@ for day in D:
     if day == D[0]:
         check("day 1 adopted at the $5 setting",
               q("SELECT amount_usd FROM portfolio.positions WHERE upper(ticker)='ZZX'")[0][0] == 5)
-        check("day 1 adopt pinged", bool(msgs) and "NEW BUY" in msgs[0] and sent is True)
+        check("day 1 adopt pinged", bool(msgs) and "BUY in Robinhood" in msgs[0] and sent is True)
     if day == D[1]:
         check("day 2 silent (gain +30% below recoup 50)", not msgs)
     if day == D[2]:
@@ -185,7 +185,7 @@ for day in D:
         check("day 5 back-to-HOLD is silent", not msgs)
     if day == D[5]:
         check("day 6 SELL pinged with the P&L verdict",
-              any("SOLD & archived" in m and "PROFIT" in m for m in msgs) and sent is True,
+              any("sell all of it" in m and "PROFIT" in m for m in msgs) and sent is True,
               str(msgs))
 
 # ── outcome asserts ──────────────────────────────────────────────────────────

@@ -238,7 +238,7 @@ a3, _, _, _, sk3 = PS.sync_core(
 m3 = PS.build_msgs(a3, [], [], None, {}, {}, sk3)
 check("S16a amount unset -> no adoption", not a3 and sk3 == ["ZZTM"], str((a3, sk3)))
 check("S16b warn ping names the skipped buys",
-      any("auto_adopt_amount is not set" in m and "ZZTM" in m for m in m3), str(m3))
+      any("NOTHING BOUGHT" in m and "ZZTM" in m for m in m3), str(m3))
 check("S16c nothing inserted for the skipped name",
       q("SELECT count(*) FROM portfolio.positions WHERE upper(ticker)='ZZTM'")[0][0] == 0)
 
