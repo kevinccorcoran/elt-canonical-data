@@ -69,3 +69,39 @@ CREATE INDEX IF NOT EXISTS state_history_ticker_idx ON portfolio.state_history (
 -- -- read-only on the schemas the dashboard queries for model data:
 -- GRANT USAGE ON SCHEMA serving, validation, monitoring, qual, cdm, raw TO portfolio_app;
 -- GRANT SELECT ON ALL TABLES IN SCHEMA serving, validation, monitoring, qual, cdm, raw TO portfolio_app;
+
+-- Realized trades archive: a row moves here (and out of positions) when the
+-- user clicks "Archive sold" after actually selling. Read-only in the app -
+-- the "my info" record. outcome splits profit/loss; all money figures are the
+-- simulated-fill numbers frozen at archive time. The app also auto-creates
+-- these two tables (CREATE IF NOT EXISTS) on connect, so running this file is
+-- only needed for a fresh database.
+CREATE TABLE IF NOT EXISTS portfolio.closed_positions (
+    id           text        NOT NULL,
+    ticker       text        NOT NULL,
+    cluster_id   integer,
+    cadence      text,
+    amount_usd   numeric,
+    invested_usd numeric,
+    value_usd    numeric,
+    pnl_usd      numeric,
+    ret_pct      numeric,
+    spy_ret_pct  numeric,
+    vs_spy_pp    numeric,
+    vs_lump_pp   numeric,
+    entry_date   date,
+    sold_date    date        NOT NULL,
+    outcome      text        NOT NULL CHECK (outcome IN ('profit','loss')),
+    archived_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (id, sold_date)
+);
+CREATE INDEX IF NOT EXISTS closed_positions_ticker_idx
+    ON portfolio.closed_positions (ticker, sold_date);
+
+-- Tiny app settings store (e.g. auto_adopt_amount: the $ used when a new
+-- qualstream BUY auto-seeds into the positions table on Generate).
+CREATE TABLE IF NOT EXISTS portfolio.app_settings (
+    key        text        PRIMARY KEY,
+    value      text        NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
