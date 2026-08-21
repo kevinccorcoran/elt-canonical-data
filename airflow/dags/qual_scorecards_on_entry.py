@@ -195,3 +195,14 @@ with DAG(
     # tells you the gap is real, and coverage alone tells you grading silently
     # under-covered while reporting success.
     grade_new_buys >> verify_coverage
+
+    # Hands-off book maintenance runs after grading so today's grades rank the
+    # adopt queue. all_done: a red grade day must still snapshot states and
+    # archive sells (it just adopts on yesterday's grades).
+    from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+    trigger_portfolio_sync = TriggerDagRunOperator(
+        task_id="trigger_portfolio_sync",
+        trigger_dag_id="portfolio_sync",
+        trigger_rule="all_done",
+    )
+    verify_coverage >> trigger_portfolio_sync
