@@ -7861,6 +7861,11 @@ server <- function(input, output, session) {
       id       = ifelse(is.na(cid), "-", as.character(cid)),
       Ticker   = tick,
       State    = states,
+      # today's capped adopt queue (dv$qs_buys): which holdings a fresh dollar
+      # would still pick. Entry gate only - dropping off the queue is NOT an
+      # exit signal (exits = model sell/washout), so unmarked buys stay held.
+      Queue    = ifelse(tick %in% toupper(if (!is.null(dv)) dv$qs_buys else character(0)),
+                        "✓", ""),
       `$/buy`  = round(as.numeric(p$amount_usd), 2),
       Cadence  = p$cadence,
       # Start = the row's FIRST ACTUAL FILL under the active basis (from the
