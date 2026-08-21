@@ -39,14 +39,11 @@ if [ -z "$MSG" ]; then
 fi
 
 echo "$STAMP ALERT: $MSG"
+# utils.alerting.notify resolves the Telegram credentials itself (dotenv) -
+# a bare docker-exec env does NOT carry TELEGRAM_*, so never use raw urllib here.
 docker exec airflow-scheduler python3 -c '
-import json, os, sys, urllib.request
-tok = os.environ.get("TELEGRAM_BOT_TOKEN"); chat = os.environ.get("TELEGRAM_CHAT_ID")
-if not tok or not chat:
-    sys.exit("TELEGRAM env not set in container")
-req = urllib.request.Request(
-    "https://api.telegram.org/bot%s/sendMessage" % tok,
-    data=json.dumps({"chat_id": chat, "text": sys.argv[1]}).encode(),
-    headers={"Content-Type": "application/json"}, method="POST")
-print("telegram HTTP", urllib.request.urlopen(req, timeout=15).status)
+import sys
+sys.path.insert(0, "/opt/airflow/dags")
+from utils.alerting import notify
+print("telegram:", "sent" if notify(sys.argv[1]) else "SEND FAILED")
 ' "$MSG"
