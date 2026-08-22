@@ -17,16 +17,16 @@ sys.path.insert(0, "/opt/airflow/dags")
 from portfolio_sync import build_msgs
 from utils.alerting import notify
 
-TAG = "[TEST v4]"
+TAG = "[TEST v5]"
 
 adopts = [("rid1", "ZZTA")]
 archived = [
-    ("ZZTC", dict(pnl=1.50, ret=30.0, vs_spy=28.1), "profit"),
-    ("ZZTD", dict(pnl=-0.75, ret=-15.0, vs_spy=-16.9), "loss"),
+    ("ZZTC", dict(pnl=1.50, ret=30.0, vs_spy=28.1), "profit", "ZZTC-sync1-20260822"),
+    ("ZZTD", dict(pnl=-0.75, ret=-15.0, vs_spy=-16.9), "loss", "ZZTD-sync2-20260822"),
 ]
 recoups = [
-    ("ZZTE", 55.0, 55.0, 64.5, 5.0),   # peak == now: no "(peak)" suffix
-    ("ZZTI", 52.0, 61.0, 65.8, 5.0),   # gap-past: "(peak +61%)" shows
+    ("ZZTE", 55.0, 55.0, 64.5, 10.0, "ZZTE-sync3-20260822"),  # peak == now: no suffix
+    ("ZZTI", 52.0, 61.0, 65.8, 10.0, "ZZTI-sync4-20260822"),  # gap-past: peak shows
 ]
 skipped = ["ZZTM", "ZZTN"]
 

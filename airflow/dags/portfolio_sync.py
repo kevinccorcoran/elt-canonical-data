@@ -309,7 +309,7 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
             for k in ("invested", "value", "pnl"):
                 rz[k] = round(rz[k] * rem, 2)
         outcome = "profit" if rz["pnl"] > 0 else "loss"
-        archived.append((tk, rz, outcome))
+        archived.append((tk, rz, outcome, rid))
         if not dry:
             cur.execute("""
                 INSERT INTO portfolio.closed_positions
@@ -365,7 +365,7 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
         r_now = 100 * (float(last[0][0]) / fpx - 1)
         if r_high >= thr and r_now >= thr - 10:
             frac = 100.0 / (1 + r_now / 100.0)
-            recoups.append((tk, r_now, r_high, frac, float(amt)))
+            recoups.append((tk, r_now, r_high, frac, float(amt), rid))
             if not dry:
                 cur.execute(
                     "UPDATE portfolio.positions SET recoup_pinged_at = %s WHERE id = %s",
@@ -389,7 +389,9 @@ def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None):
                 return f"grade {float(grade.get(tk)):.0f}"
             except (TypeError, ValueError):
                 return "no grade yet"
-        lines = "\n".join(f"• {tk} ({gtxt(tk)})" for _, tk in adopts)
+        # each line ends with the row's PK (positions.id / closed_positions key)
+        # so any ping can be referenced later (Kevin, 2026-08-22)
+        lines = "\n".join(f"• {tk} ({gtxt(tk)}) [{rid}]" for rid, tk in adopts)
         msgs.append(f"\U0001F7E2 BUY in Robinhood - ${amount:g} each\n"
                     f"{lines}\n"
                     "The table tracks these from today.")
@@ -398,17 +400,17 @@ def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None):
                     "Would have bought: " + ", ".join(skipped) + "\n"
                     "Fix: dashboard > Production > Connect > set "
                     "'Auto-adopt $ per new BUY'. Tomorrow's run picks them up.")
-    for tk, rz, outcome in archived:
+    for tk, rz, outcome, rid in archived:
         verdict = "PROFIT \U00002705" if outcome == "profit" else "LOSS \U0000274C"
         rel = "beat SPY by" if rz["vs_spy"] >= 0 else "behind SPY by"
-        msgs.append(f"\U0001F534 SELL {tk} in Robinhood - sell all of it\n"
+        msgs.append(f"\U0001F534 SELL {tk} in Robinhood - sell all of it [{rid}]\n"
                     f"Result: {money(rz['pnl'])} {verdict} "
                     f"({rz['ret']:+.0f}%, {rel} {abs(rz['vs_spy']):.0f}pp)\n"
                     "Moved to your Realized history. "
                     "(Skip if you never bought it.)")
-    for tk, r_now, r_high, frac, amt in recoups:
+    for tk, r_now, r_high, frac, amt, rid in recoups:
         peak = f" (peaked at {r_high:+.0f}%)" if r_high - r_now >= 1 else ""
-        msgs.append(f"\U0001F3AF {tk} is up {r_now:+.0f}%{peak} - time to play it safe\n"
+        msgs.append(f"\U0001F3AF {tk} is up {r_now:+.0f}%{peak} - time to play it safe [{rid}]\n"
                     f"SELL {frac:.0f}% of it in Robinhood (≈${amt:.2f}) - "
                     "that takes your original stake back out.\n"
                     "What's left keeps running as pure profit. One-time alert - "
@@ -508,7 +510,7 @@ def run(dry=False):
                 print(f"would SKIP (amount unset): {', '.join(skipped)}")
             print(f"would snapshot: {snaps} tracked rows")
             print(f"would archive ({len(archived)}): "
-                  + (", ".join(f"{tk} {rz['pnl']:+.2f}$ {o}" for tk, rz, o in archived) or "-"))
+                  + (", ".join(f"{tk} {rz['pnl']:+.2f}$ {o}" for tk, rz, o, _ in archived) or "-"))
             for m in msgs:
                 print("would ping:", m)
         else:
