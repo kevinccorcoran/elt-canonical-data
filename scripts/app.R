@@ -7824,12 +7824,15 @@ server <- function(input, output, session) {
     if (is.null(dv) || !length(dv$qs_grade)) return(p)
     tk   <- toupper(p$ticker)
     g_v  <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
-    keep <- !is.na(g_v[tk]) & g_v[tk] >= QS_MIN
-    # match the board's orange-+ set: qs pass AND still ON the board (board_ok =
-    # cohort entry or proven at horizon today). A paused / dropped name keeps its
-    # old grade but is no longer a current board pick, so it leaves the qs-only
-    # view - which is why the board shows one qs hold (COKE) but the raw book
-    # carried nine more. Untick the box to see every position again.
+    # UNGRADED names stay visible: the queue ranks (not gates) on grade, so a
+    # persistence-ranked adopt like CVNA/HWM (2026-08-22) is real owned money
+    # that just has no scorecard yet - hiding it made the book look short. The
+    # filter only drops names that FAILED grading (< QS_MIN) or left the board.
+    keep <- is.na(g_v[tk]) | g_v[tk] >= QS_MIN
+    # match the board's orange-+ set: still ON the board (board_ok = cohort
+    # entry or proven at horizon today). A paused / dropped name keeps its old
+    # grade but is no longer a current board pick, so it leaves the qs-only
+    # view. Untick the box to see every position regardless.
     if (!is.null(dv$board_ok)) {
       bo   <- setNames(as.logical(dv$board_ok), toupper(names(dv$board_ok)))[tk]
       keep <- keep & !is.na(bo) & bo
