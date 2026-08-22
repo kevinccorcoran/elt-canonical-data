@@ -183,7 +183,7 @@ check("S2 hold snapshot written", st.get("ZZTB", ("",))[0] == "hold", str(st.get
 check("S3 no ping for hold/buy flips", not any("ZZTB" in m for m in msgs))
 check("S21 user-override snapshot survives the sync",
       st.get("ZZTE") == ("sell", "sold by user"), str(st.get("ZZTE")))
-arch = {tk: (rz, o) for tk, rz, o in archived}
+arch = {tk: (rz, o) for tk, rz, o, _rid in archived}
 check("S4 profit sell archived", arch.get("ZZTC", (None, ""))[1] == "profit",
       str(arch.get("ZZTC")))
 check("S4b pnl ≈ +1.50$", "ZZTC" in arch and abs(arch["ZZTC"][0]["pnl"] - 1.50) < 0.01)
