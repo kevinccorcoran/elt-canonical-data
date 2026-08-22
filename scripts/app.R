@@ -7773,7 +7773,10 @@ server <- function(input, output, session) {
   # user's own cash flows since each row was added. Threaded into every
   # gated_expand_schedule call so table, chart, note and sells stay consistent.
   lc_track_basis <- reactive({
-    if (identical(input$lcTrackBasis, "stored")) "stored" else "epoch"
+    # default = "stored" (my money since I added): since 2026-08-22 the book is
+    # Kevin's real positions, so the personal basis is what the table opens on;
+    # the epoch basis stays one click away for judging the strategy itself.
+    if (identical(input$lcTrackBasis, "epoch")) "epoch" else "stored"
   })
 
   # sell triggers for tracked model rows: pure R, cheap; NULL unless a model
@@ -8216,7 +8219,7 @@ server <- function(input, output, session) {
     if (!length(cids)) return(NULL)
     sel_now <- isolate(lc_chart_ids_sel())
     sel_use <- if (is.null(sel_now)) as.character(cids) else intersect(sel_now, as.character(cids))
-    basis_now <- isolate(if (identical(input$lcTrackBasis, "stored")) "stored" else "epoch")
+    basis_now <- isolate(if (identical(input$lcTrackBasis, "epoch")) "epoch" else "stored")
     div(style = "margin:0.5rem 0 0.1rem;",
       tags$label("Track model holdings",
                  style = "color:#94a3b8; font-size:0.72rem; font-weight:600; display:block; margin-bottom:0.15rem;"),
