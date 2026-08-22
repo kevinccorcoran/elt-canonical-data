@@ -7116,6 +7116,22 @@ server <- function(input, output, session) {
   # board (NULL = nothing selected, panel hidden). Set by the lcBoardClick observer.
   lc_hist_tk   <- reactiveVal(NULL)
   lcAutoTick   <- reactiveVal(0)
+  # Auto-start (2026-08-22): opening the app should need zero clicks - land on
+  # Lifecycle, connect to the default environment (Production) with the
+  # container-held credential, and Generate. The db_env init observer prefills
+  # db_pass from the env credential; the first time that lands non-empty (and
+  # the env is still the default) we switch tabs and bump lcAutoTick, which is
+  # exactly the auto-refresh timer's path into the Generate observer. Fires
+  # once per browser session; without a resolvable credential it stays quiet.
+  .lc_auto_started <- reactiveVal(FALSE)
+  observeEvent(input$db_pass, {
+    if (isTRUE(.lc_auto_started())) return()
+    if (is.null(input$db_pass) || !nzchar(input$db_pass)) return()
+    if (!identical(input$db_env, DB_ENV_DEFAULT)) return()
+    .lc_auto_started(TRUE)
+    updateNavbarPage(session, "mainNav", selected = "Lifecycle")
+    lcAutoTick(isolate(lcAutoTick()) + 1)
+  })
   observeEvent(input$idsLC, {
     lc_board_ids_sel(if (is.null(input$idsLC)) character(0)
                      else as.character(input$idsLC))
