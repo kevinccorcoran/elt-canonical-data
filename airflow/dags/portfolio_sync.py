@@ -399,7 +399,7 @@ def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None):
         msgs.append("\U000026A0\U0000FE0F NOTHING BOUGHT - the buy amount is not set\n"
                     "Would have bought: " + ", ".join(skipped) + "\n"
                     "Fix: dashboard > Production > Connect > set "
-                    "'Auto-adopt $ per new BUY'. Tomorrow's run picks them up.")
+                    "'$ per new BUY'. Tomorrow's run picks them up.")
     for tk, rz, outcome, rid in archived:
         verdict = "PROFIT \U00002705" if outcome == "profit" else "LOSS \U0000274C"
         rel = "beat SPY by" if rz["vs_spy"] >= 0 else "behind SPY by"
