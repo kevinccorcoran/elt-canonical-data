@@ -22,6 +22,15 @@ NY_TZ = pendulum.timezone("America/New_York")
 # Helpers
 # ──────────────────────────────────────────────
 
+# Trailing fetch window (2026-08-23): the run used to fetch ONE day, which
+# kept heal_basis_breaks permanently asleep (it skips fetches under 5 rows),
+# so a stock split's re-based history was discarded by ON CONFLICT DO NOTHING
+# forever - the audit found LXP 1:5 and TPL 3:1 sitting as fake one-day
+# cliffs for ~a year. A 60-day window gives the multi-point sentinel real
+# depth every morning; ON CONFLICT keeps the overlapping days free.
+FETCH_WINDOW_DAYS = 60
+
+
 def compute_prev_day(**context):
     dag_run = context.get("dag_run")
 
@@ -32,7 +41,8 @@ def compute_prev_day(**context):
 
     d = (ny_now - timedelta(days=1)).date()
 
-    return {"date": d.isoformat()}
+    return {"date": d.isoformat(),
+            "start": (d - timedelta(days=FETCH_WINDOW_DAYS)).isoformat()}
 
 # ──────────────────────────────────────────────
 # DAG defaults
@@ -83,7 +93,7 @@ with DAG(
 
         cd "{PROJECT_ROOT}"
         python -m datapipeline.ingestion.massive_to_raw_etl \
-          --start_date "{{{{ ti.xcom_pull(task_ids='calc_target_date')['date'] }}}}" \
+          --start_date "{{{{ ti.xcom_pull(task_ids='calc_target_date')['start'] }}}}" \
           --end_date   "{{{{ ti.xcom_pull(task_ids='calc_target_date')['date'] }}}}"
         """,
         env={
