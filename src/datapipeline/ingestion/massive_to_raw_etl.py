@@ -228,25 +228,64 @@ def fetch_massive_df(ticker: str, start, end) -> pl.DataFrame:
     return df
 
 
-BASIS_SENTINEL_OFFSET = 40   # trading rows back from the newest fetched bar
+BASIS_SENTINEL_SAMPLES = 10  # comparison points spread across the fetched span
 BASIS_TOLERANCE = 0.01       # >1% divergence = adjustment-basis break
 
+EXPECTED_ORDER = [
+    "ticker_date_id",
+    "ticker",
+    "date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "adj_close",
+    "processed_at",
+]
 
-def heal_basis_breaks(combined: pl.DataFrame, dsn: str) -> None:
+
+def _delete_stored_history(conn, tickers) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM raw.api_data_ingestion_massive WHERE ticker = ANY(%s)",
+            (tickers,),
+        )
+        cur.execute(
+            "DELETE FROM cdm.api_data_ingestion_massive WHERE ticker = ANY(%s)",
+            (tickers,),
+        )
+    conn.commit()
+
+
+def heal_basis_breaks(combined: pl.DataFrame, dsn: str,
+                      full_history: bool = False) -> None:
     """Detect and heal split-adjustment basis breaks before writing.
 
-    Full-history runs fetch every ticker's complete adjusted series, but the
-    writers insert with ON CONFLICT DO NOTHING, so a re-adjusted history (stock
-    split / provider restatement) is silently discarded and stored rows stay on
-    the old basis - permanent fake one-day cliffs in cdm.ingest_combined (2026-07
-    incident: 27 tickers incl. a 4:1 CRWD split; see
-    data_quality.split_basis_break_repair_20260717).
+    The writers insert with ON CONFLICT DO NOTHING, so a re-adjusted history
+    (stock split / provider restatement) is silently discarded and stored rows
+    stay on the old basis - permanent fake one-day cliffs in
+    cdm.ingest_combined (2026-07 incident: 27 tickers incl. a 4:1 CRWD split;
+    see data_quality.split_basis_break_repair_20260717).
 
-    Compare the freshly fetched adj_close at a sentinel date ~40 trading days
-    back against the stored row. On divergence, delete the ticker's rows from
-    raw + cdm copies so this batch's insert rewrites the whole history on the
-    new basis. Single-day runs (raw_ingest_massive_daily) fetch too few rows
-    per ticker and are skipped.
+    Detection (2026-08-23 rework): compare fetched vs stored adj_close at
+    ~BASIS_SENTINEL_SAMPLES dates spread across the WHOLE fetched span, not a
+    single point ~40 rows back. The single trailing sentinel only saw breaks
+    younger than ~2 months - rows AFTER a break already sit on the new basis,
+    so an older break (audit exhibit: LXP 1:5 Aug-2025, TPL 3:1 Dec-2025)
+    passed every later full-history run untouched. Sampling the full span
+    catches a break at any depth. The newest 2 bars are excluded (an intraday
+    fetch can legitimately differ from a stored close).
+
+    Healing: on divergence the ticker's stored rows (raw + cdm copies) are
+    deleted so the history is rewritten on the new basis.
+      - full_history runs: this batch already carries the complete series;
+        the batch insert right after this call is the rewrite.
+      - partial-window runs (e.g. the daily 60d fetch): deleting on the
+        strength of a 60-day payload would destroy decades of history, so
+        the broken ticker's FULL series is refetched here first and written
+        immediately; the delete only happens once that refetch succeeded.
+    Tiny fetches (n < 5 rows/ticker) are skipped as before.
     """
     import psycopg2
 
@@ -256,9 +295,13 @@ def heal_basis_breaks(combined: pl.DataFrame, dsn: str) -> None:
         n = tdf.height
         if n < 5:
             continue   # single-day / tiny fetch: nothing to compare against
-        row = tdf.row(max(0, n - BASIS_SENTINEL_OFFSET), named=True)
-        if row["adj_close"] and row["adj_close"] > 0:
-            checks.append((row["ticker"], row["ticker_date_id"], row["adj_close"]))
+        hi = n - 3     # newest 2 bars excluded
+        idxs = sorted({round(i * hi / (BASIS_SENTINEL_SAMPLES - 1))
+                       for i in range(BASIS_SENTINEL_SAMPLES)}) if hi > 0 else [0]
+        for ix in idxs:
+            row = tdf.row(ix, named=True)
+            if row["adj_close"] and row["adj_close"] > 0:
+                checks.append((row["ticker"], row["ticker_date_id"], row["adj_close"]))
     if not checks:
         return
 
@@ -279,21 +322,36 @@ def heal_basis_breaks(combined: pl.DataFrame, dsn: str) -> None:
         })
         if not broken:
             return
-        logging.warning(
-            "BASIS BREAK detected for %s - deleting stored history so this "
-            "run rewrites it on the new adjustment basis", broken,
-        )
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM raw.api_data_ingestion_massive WHERE ticker = ANY(%s)",
-                (broken,),
+
+        if full_history:
+            logging.warning(
+                "BASIS BREAK detected for %s - deleting stored history so this "
+                "run rewrites it on the new adjustment basis", broken,
             )
-            cur.execute(
-                "DELETE FROM cdm.api_data_ingestion_massive WHERE ticker = ANY(%s)",
-                (broken,),
+            _delete_stored_history(conn, broken)
+            logging.warning("BASIS BREAK healed: %s rewritten from this fetch", broken)
+            return
+
+        # partial-window run: refetch the full series per broken ticker and
+        # replace; never delete unless the refetch actually returned data
+        for t in broken:
+            df_full = fetch_massive_df(t, None, None)
+            if df_full.height < 5:
+                logging.error(
+                    "BASIS BREAK on %s but full-history refetch returned %d "
+                    "rows - stored history left untouched", t, df_full.height)
+                continue
+            logging.warning(
+                "BASIS BREAK detected for %s - refetched full history "
+                "(%d rows), rewriting stored series", t, df_full.height)
+            _delete_stored_history(conn, [t])
+            save_to_database(
+                df_full.select(EXPECTED_ORDER),
+                table_name=TABLE_NAME,
+                schema_name=TABLE_SCHEMA,
+                connection_string=dsn,
             )
-        conn.commit()
-        logging.warning("BASIS BREAK healed: %s rewritten from this fetch", broken)
+            logging.warning("BASIS BREAK healed: %s rewritten on the new basis", t)
     except Exception:
         conn.rollback()
         raise
@@ -308,9 +366,21 @@ def main():
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--num_batches", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--tickers", help="comma-separated override of the "
+                        "configured universe - for targeted basis-break heals")
     args = parser.parse_args()
 
-    selected = [t for t in TICKERS if isinstance(t, str)]
+    # A fetch whose start predates every listed ticker carries each ticker's
+    # complete series, so a heal can rewrite from the batch itself (the 08:00
+    # cdm_ingest_massive chain passes --start_date 1950-01-01 and IS such a
+    # run); windowed runs (the 04:00 daily 60d fetch) must refetch instead.
+    full_history = args.start_date is None or \
+        datetime.strptime(args.start_date, "%Y-%m-%d").date() <= date(2000, 1, 1)
+
+    if args.tickers:
+        selected = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+    else:
+        selected = [t for t in TICKERS if isinstance(t, str)]
     total_tickers = len(selected)
     
     batch = args.batch
@@ -325,19 +395,6 @@ def main():
         selected = selected[start_idx:end_idx]
 
     logging.info("Batch %d/%d handles %d tickers", batch, num_batches, len(selected))
-
-    EXPECTED_ORDER = [
-        "ticker_date_id",
-        "ticker",
-        "date",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "adj_close",
-        "processed_at",
-    ]
 
     total_rows = 0
     written_rows = 0
@@ -366,7 +423,7 @@ def main():
             total_rows += combined.height
 
             t_write = time.perf_counter()
-            heal_basis_breaks(combined, PSYCOPG_DSN)
+            heal_basis_breaks(combined, PSYCOPG_DSN, full_history=full_history)
             save_to_database(
                 combined,
                 table_name=TABLE_NAME,
