@@ -9003,15 +9003,16 @@ server <- function(input, output, session) {
                   setNames(suppressWarnings(as.numeric(d$qs$grade)), d$qs$ticker)
                 else setNames(numeric(0), character(0))
     buy_univ <- tickers[board_ok[tickers] & state_now[tickers] == "buy"]
-    # seed candidates: EVERY validated-board BUY. The grade RANKS the queue,
-    # it no longer gates it - one retroactive grade vintage cannot validate a
-    # 68 cut, and the hard gate collapsed the buy list to the 15 graded
-    # passers while 3x as many validated names sat invisible. Vetoed names
-    # stay out (a veto is an active thumbs-down; no grade is not). Ranking:
-    # graded names first by grade, ungraded after by signal persistence.
-    # The qualstream-only VIEW is a display filter on the table (lcBuyQSonly),
-    # not a seed gate, so unticking the box still shows every seeded name.
+    # seed candidates (policy 2026-08-23, Kevin's call): validated-board BUYs
+    # that ALSO pass qualstream - grade >= QS_MIN, no veto. Ungraded and
+    # below-bar names stay visible on the board but never enter the adopt
+    # queue. History: the gate was removed 2026-08-1x because the 68 cut is
+    # one retroactive vintage (unvalidated); Kevin chose the stricter book
+    # anyway - fewer, higher-graded names. Mirrors compute_board in
+    # airflow/dags/portfolio_sync.py (QS_MIN_GRADE).
     qs_ok    <- setdiff(buy_univ, if (!is.null(d$qs_veto)) d$qs_veto else character(0))
+    gq       <- suppressWarnings(as.numeric(qs_grade[qs_ok]))
+    qs_ok    <- qs_ok[!is.na(gq) & gq >= QS_MIN]
     gr_rank  <- as.numeric(qs_grade[qs_ok]); gr_rank[is.na(gr_rank)] <- -Inf
     pr_rank  <- as.numeric(runs_of[qs_ok]);  pr_rank[is.na(pr_rank)] <- 0
     # concentration guard: within the ranked queue, keep at most
