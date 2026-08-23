@@ -2422,13 +2422,12 @@ ui <- navbarPage(
                    border-left: 2px solid #38bdf8; border-radius: 4px;
                    color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
                    margin-bottom: 0.75rem;",
-          "Rows: past-return z-bucket (how the cluster's members did going IN, most negative at bottom). ",
-          "Columns: horizon fut_lag (1 to 33 months). ",
-          "Color: net_score of that cell (green = the model reads this bucket/horizon as bullish, red = bearish, near-white = neutral). ",
-          "Matched horizon only (past window = future window) - the clean one-cell-per-(bucket, horizon) slice. ",
-          "This is the raw evidence the ticker ranking is built from; blank = no scored cell."
+          "Same picture as the Transition Range tab, but every horizon at once: one panel per fut_lag (1 to 33 months). ",
+          "In each panel: x = past-return z-bucket (most negative left), purple box = how members in that bucket got there (past), blue box = what happened next (future). ",
+          "Blue box above zero = the model reads that bucket as bullish at that horizon. ",
+          "Matched horizon only (past window = future window). Hover a bucket for the medians, n_obs, and the cell's recommendation."
         ),
-        plotlyOutput("idfFedPlot", height = "460px"),
+        plotlyOutput("idfFedPlot", height = "1500px"),
 
         # ---- COMES OUT ----
         h5("Comes out - the ranked tickers and their board action",
@@ -3998,7 +3997,8 @@ server <- function(input, output, session) {
       con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
 
-      # FED: matched-horizon scored cells (one value per bucket x fut_lag).
+      # FED: matched-horizon scored cells with their full past/future
+      # distributions - drawn Transition-Range style, one panel per horizon.
       # fut_lag <= 33 = the app-wide horizon cap: the scoring table still
       # carries legacy 54-376mo rows that were never validated (can't finish
       # inside the holdout) - every tab filters them out.
@@ -4006,6 +4006,11 @@ server <- function(input, output, session) {
         SELECT fut_lag,
                past_excess_return_z_bucket_num AS bucket,
                past_excess_return_z_bucket     AS bucket_label,
+               past_lo, past_q1, past_median AS past_med, past_q3, past_hi,
+               future_lo, future_q1, future_median AS future_med,
+               future_q3, future_hi,
+               past_record_count AS past_count,
+               future_record_count AS future_count,
                net_score, recommendation, n_observations
         FROM scoring.return_cluster_cell_score_extended
         WHERE id = %s AND past_lag = fut_lag AND fut_lag <= 33
@@ -4080,48 +4085,63 @@ server <- function(input, output, session) {
   output$idfFedPlot <- renderPlotly({
     fed <- idf_fed()
     if (is.null(fed) || nrow(fed) == 0)
-      return(empty_plot("Generate to load the scored-signal grid."))
-    fed$fut_lag <- as.integer(fed$fut_lag)
-    fed$bucket  <- as.integer(fed$bucket)
-    fed$net_score <- as.numeric(fed$net_score)
+      return(empty_plot("Generate to load the transition panels."))
+    for (cn in c("fut_lag","bucket","past_lo","past_q1","past_med","past_q3",
+                 "past_hi","future_lo","future_q1","future_med","future_q3",
+                 "future_hi","past_count","future_count","net_score"))
+      fed[[cn]] <- as.numeric(fed[[cn]])
     lags <- sort(unique(fed$fut_lag))
-    lag_pos <- sqrt(lags)                       # sqrt spacing, same as Shortlist
-    # bucket_num 1 = the most POSITIVE z-bucket; plotly draws the first
-    # category at the BOTTOM - reverse so most negative sits at the bottom,
-    # matching the caption
-    bkeys <- rev(sort(unique(fed$bucket)))
-    blab_of <- tapply(fed$bucket_label, fed$bucket, function(x) x[1])
-    blabels <- as.character(blab_of[as.character(bkeys)])
-    z <- matrix(NA_real_, nrow = length(bkeys), ncol = length(lags),
-                dimnames = list(blabels, as.character(lags)))
-    rec <- matrix("", nrow = length(bkeys), ncol = length(lags))
-    nob <- matrix(NA_integer_, nrow = length(bkeys), ncol = length(lags))
-    for (i in seq_len(nrow(fed))) {
-      ri <- which(bkeys == fed$bucket[i]); ci <- which(lags == fed$fut_lag[i])
-      if (length(ri) && length(ci)) {
-        z[ri, ci] <- fed$net_score[i]; rec[ri, ci] <- fed$recommendation[i]
-        nob[ri, ci] <- as.integer(fed$n_observations[i])
-      }
-    }
-    zabs <- max(abs(fed$net_score), na.rm = TRUE); if (!is.finite(zabs) || zabs == 0) zabs <- 1
-    custom <- array(NA, dim = c(dim(z), 2)); custom[,,1] <- rec; custom[,,2] <- nob
-    plot_ly(x = lag_pos, y = blabels, z = z, type = "heatmap",
-      colorscale = list(c(0,'#dc2626'), c(0.5,'#f5f5f4'), c(1,'#16a34a')),
-      zmin = -zabs, zmax = zabs, customdata = custom,
-      text = matrix(rep(as.character(lags), each = nrow(z)), nrow = nrow(z)),
-      hovertemplate = paste0("bucket %{y}<br>fut_lag %{text}<br>",
-        "net_score %{z:.3f}<br>recommendation %{customdata[0]}<br>",
-        "n_obs %{customdata[1]}<extra></extra>"),
-      colorbar = list(title = list(text = "net_score", font = list(color = "#f8fafc")),
-                      tickfont = list(color = "#94a3b8"))
-    ) %>% layout(
-      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
-      xaxis = list(title = "Future lag (months, sqrt-spaced)", type = "linear",
-                   tickvals = lag_pos, ticktext = as.character(lags),
-                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-      yaxis = list(title = "Past-return z-bucket", type = "category",
-                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
-      margin = list(l = 120, r = 60, b = 60, t = 20))
+    # one Transition-Range-style panel per horizon (Kevin 2026-08-23: same
+    # picture as the Transition tab, all legs at once). Same colors: purple
+    # past box, sky-blue future box; buckets ordered most negative -> most
+    # positive left to right (bucket_num 1 = most positive, so reverse).
+    panels <- lapply(lags, function(lg) {
+      d <- fed[fed$fut_lag == lg, , drop = FALSE]
+      d <- d[order(-d$bucket), , drop = FALSE]
+      xcat <- factor(d$bucket_label, levels = d$bucket_label)
+      d$hover <- sprintf(paste0(
+        "<b>%s · fut_lag %d</b><br>",
+        "past   med %.1f%% [%.1f .. %.1f]<br>",
+        "future med %.1f%% [%.1f .. %.1f]<br>",
+        "n_obs %d · %s (net %.1f)"),
+        d$bucket_label, lg,
+        d$past_med, d$past_q1, d$past_q3,
+        d$future_med, d$future_q1, d$future_q3,
+        as.integer(as.numeric(d$n_observations)), d$recommendation, d$net_score)
+      first <- lg == lags[1]
+      plot_ly(d) %>%
+        add_trace(type = 'box', name = 'Past', x = xcat,
+          q1 = ~past_q1, median = ~past_med, q3 = ~past_q3,
+          lowerfence = ~past_lo, upperfence = ~past_hi,
+          marker = list(color = '#a855f7'), line = list(color = '#a855f7', width = 2),
+          fillcolor = 'rgba(167,139,250,0.4)', hoverinfo = "skip",
+          offsetgroup = '1', legendgroup = 'past', showlegend = first) %>%
+        add_trace(type = 'box', name = 'Future', x = xcat,
+          q1 = ~future_q1, median = ~future_med, q3 = ~future_q3,
+          lowerfence = ~future_lo, upperfence = ~future_hi,
+          marker = list(color = '#0ea5e9'), line = list(color = '#0ea5e9', width = 2),
+          fillcolor = 'rgba(14,165,233,0.4)', hoverinfo = "skip",
+          offsetgroup = '2', legendgroup = 'future', showlegend = first) %>%
+        add_trace(type = 'scatter', mode = 'markers', x = xcat, y = ~future_med,
+          marker = list(color = 'rgba(14,165,233,0)', size = 40),
+          text = ~hover, hovertemplate = "%{text}<extra></extra>",
+          showlegend = FALSE,
+          hoverlabel = list(font = list(family = 'Courier New, monospace', size = 12))) %>%
+        layout(
+          boxmode = "group",
+          xaxis = list(color = "#94a3b8", gridcolor = "rgba(255,255,255,0.08)",
+                       tickfont = list(size = 10)),
+          yaxis = list(title = sprintf("fut_lag %d", lg), color = "#94a3b8",
+                       gridcolor = "rgba(255,255,255,0.08)", zeroline = TRUE,
+                       zerolinewidth = 2, zerolinecolor = "rgba(255,255,255,0.25)"))
+    })
+    subplot(panels, nrows = length(panels), shareX = FALSE, shareY = FALSE,
+            titleY = TRUE, margin = 0.012) %>%
+      layout(
+        paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+        showlegend = TRUE,
+        legend = list(font = list(color = "#f8fafc"), orientation = "h", y = 1.02),
+        margin = list(l = 70, r = 30, b = 40, t = 30))
   })
 
   output$idfOutTable <- DT::renderDT({
