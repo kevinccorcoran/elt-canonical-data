@@ -72,7 +72,10 @@ def _rows(cur, sql, params=None):
 def compute_board(cur):
     """Replicate the dashboard's 12-month board buckets from the same tables.
     Returns (bucket: {ticker: 'buy'|'hold'|'sell'}, grade: {ticker: float},
-    cluster: {ticker: int}, run_dates: [date])."""
+    cluster: {ticker: int}, qs_buys: [ticker], exit_of: {ticker: date}).
+    exit_of carries every ledger exit regardless of age - the 30d
+    SELL_RECENT_DAYS window shapes only `bucket`, so sync_core can still
+    archive a tracked name whose exit scrolled out of the window."""
     led = _rows(cur, """
         SELECT prediction_date, upper(ticker), global_action
         FROM monitoring.prediction_ledger
@@ -80,7 +83,7 @@ def compute_board(cur):
         ORDER BY upper(ticker), prediction_date""", (LEDGER_EPOCH,))
     run_dates = sorted({r[0] for r in led})
     if not run_dates:
-        return {}, {}, {}, []
+        return {}, {}, {}, [], {}
     D = run_dates[-1]
 
     # sticky per-ticker walk: BUY opens/reopens, SELL (while open) closes.
@@ -97,14 +100,15 @@ def compute_board(cur):
         if tk is None:
             break
         if a == "BUY":
-            open_, sold = True, None
+            open_, sold, exit_d = True, None, None   # a re-entry voids the old exit
             buys_of.setdefault(tk, []).append(d)
         elif a == "SELL" and open_:
             open_, sold, exit_d = False, True, d
 
     # proven slot at hz (verbatim shortlist rule: latest cutoff, bin 1 of a
-    # long id, >=55% hit on >=100 obs)
-    proven = {r[0].upper() for r in _rows(cur, """
+    # long id, >=55% hit on >=100 obs). The eid rides along as the cluster-id
+    # fallback below (mirrors app.R's cohort augment of id_seed).
+    proven_rows = _rows(cur, """
         WITH mx AS (
             SELECT MAX(train_cutoff_date) AS cut
             FROM validation.walk_forward_ticker_rank WHERE fut_lag = %s
@@ -121,12 +125,15 @@ def compute_board(cur):
             WHERE r.fut_lag = %s
               AND r.ticker_score IS NOT NULL AND r.ticker_score <> 0
         )
-        SELECT DISTINCT w.ticker
+        SELECT DISTINCT ON (w.ticker) w.ticker, w.eid
         FROM wfbin w
         JOIN validation.walk_forward_pctile_summary ps
           ON ps.id = w.eid AND ps.fut_lag = %s AND ps.pctile_bin = w.wf_bin
         WHERE w.wf_bin = 1 AND w.eid <= 12
-          AND ps.hit_rate >= 0.55 AND ps.n_obs >= 100""", (HZ, HZ, HZ))}
+          AND ps.hit_rate >= 0.55 AND ps.n_obs >= 100
+        ORDER BY w.ticker, w.eid""", (HZ, HZ, HZ))
+    proven = {r[0].upper() for r in proven_rows}
+    proven_id = {r[0].upper(): int(r[1]) for r in proven_rows}
 
     # monthly-majority test (mirrors lc_board_trail's share_of: denominator
     # starts at the first BUY inside the trailing 30d window)
@@ -147,10 +154,29 @@ def compute_board(cur):
                 (D - exit_of[tk]).days <= SELL_RECENT_DAYS:
             bucket[tk] = "sell"
 
+    # Dashboard parity (audit 2026-08-23): the ledger walk alone never sees a
+    # delisting - a dead name records no SELL row, so its position would sit
+    # "open" forever, never archived, never pinged - and a same-day gate flip
+    # only reaches the ledger tomorrow. Mirror app.R's state_now overrides:
+    # presence in raw.ticker_metadata = delisted; today's serving gate SELL
+    # wins over the walk. Flipping to "sell" both archives a tracked name and
+    # blocks adopting one the dashboard would already mark as an exit.
+    delisted = {r[0].upper() for r in _rows(
+        cur, "SELECT ticker FROM raw.ticker_metadata")}
+    gate_now = {r[0].upper(): r[1] for r in _rows(cur, """
+        SELECT ticker, global_action
+        FROM serving.return_cluster_ticker_global_action_current""")}
+    for tk, b in list(bucket.items()):
+        if b in ("buy", "hold") and (tk in delisted or gate_now.get(tk) == "SELL"):
+            bucket[tk] = "sell"
+
+    # overall is NOT NULL by schema; the guard is free insurance so one odd
+    # grade row could never take down the whole daily sync (float(None)).
     grade = {r[0].upper(): float(r[1]) for r in _rows(cur, """
         SELECT DISTINCT ON (ticker) ticker, overall
         FROM qual.ticker_scorecards
         WHERE NOT veto AND rubric_version = 'buy_decision_v1'
+          AND overall IS NOT NULL
           AND as_of >= CURRENT_DATE - %s
         ORDER BY ticker, as_of DESC, graded_at DESC""", (QS_MAX_AGE_DAYS,))}
     vetoed = {r[0].upper() for r in _rows(cur, """
@@ -162,6 +188,8 @@ def compute_board(cur):
         SELECT upper(ticker), id
         FROM serving.return_cluster_ticker_global_action_current
         WHERE id IS NOT NULL""")}
+    for tk, eid in proven_id.items():
+        cluster.setdefault(tk, eid)   # cohort fallback, same as app.R id_seed
 
     # persistence rank input: BUY count over the trailing 4 months (epoch floor)
     per_lo = max(D - timedelta(days=122), LEDGER_EPOCH)
@@ -185,7 +213,7 @@ def compute_board(cur):
             qs_buys.append(tk)
         if len(qs_buys) >= QS_CAP:
             break
-    return bucket, grade, cluster, qs_buys
+    return bucket, grade, cluster, qs_buys, exit_of
 
 
 def _px_asof(cur, tk, d, forward=False):
@@ -242,13 +270,18 @@ def realized(cur, tk, amount, cadence, start_d, day1, sold_d):
                 vs_spy=round(ret - spy, 2), vs_lump=round(ret - lump, 2))
 
 
-def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
+def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry,
+              exit_of=None):
     """Steps 1-3b against an open cursor: adopt, snapshot, archive, recoup.
     Board and settings are injected so the scenario harness can drive this
     against dev with synthetic states; run() drives it with the real board.
     amount=None means auto_adopt_amount is UNSET: adoption is skipped (never a
     silent $100 default) and the would-be names come back in `skipped` so the
     ping can say exactly what was not done.
+    exit_of (optional): ledger exit dates from compute_board, ANY age - it
+    lets a tracked model position whose SELL scrolled out of the 30d bucket
+    window (e.g. the chain was down for a month) still be archived instead of
+    sticking in the book forever.
     Returns (adopts, snaps, archived, recoups, skipped); caller commits."""
     pos = _rows(cur, """
         SELECT id, upper(ticker), amount_usd, cadence, day1,
@@ -276,11 +309,13 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
                     ON CONFLICT (id) DO NOTHING""",
                     (rid, tk, amount, today.day, today))
 
-    # 2. SNAPSHOT tracked states. The conditional DO UPDATE never clobbers a
-    # row the dashboard stamped with a user-override why ("sold by user" etc.) -
-    # only our own daily rows are refreshed.
+    # 2. SNAPSHOT tracked states - including today's adopts, so a position's
+    # trail starts with its day-0 BUY instead of tomorrow. The conditional
+    # DO UPDATE never clobbers a row the dashboard stamped with a
+    # user-override why ("sold by user" etc.) - only our own daily rows are
+    # refreshed.
     snaps = 0
-    for _, tk, *_ in pos:
+    for tk in [r[1] for r in pos] + [tk for _, tk in adopts]:
         st = bucket.get(tk, "closed")
         if not dry:
             cur.execute("""
@@ -299,7 +334,12 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
     # already archived - the final exit realizes only the remaining stake.
     archived = []
     for rid, tk, amt, cadence, day1, start_d, end_d, sold_d, mode, sfrac, rping in pos:
-        model_sell = bucket.get(tk) == "sell" and mode == "model"
+        # a ledger exit older than 30d has left `bucket` (audit 2026-08-23:
+        # without this branch a missed archive became permanently stuck) -
+        # tk absent from bucket + a recorded exit = still a model sell
+        stale_exit = (tk not in bucket
+                      and (exit_of or {}).get(tk) is not None)
+        model_sell = (bucket.get(tk) == "sell" or stale_exit) and mode == "model"
         hand_sold = sold_d is not None
         if not (model_sell or hand_sold):
             continue
@@ -330,12 +370,14 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
                  rz["spy"], rz["vs_spy"], rz["vs_lump"], rz["entry"],
                  exit_day, outcome))
             cur.execute("DELETE FROM portfolio.positions WHERE id = %s", (rid,))
-            if hand_sold and not model_sell and bucket.get(tk) == "buy":
-                # A hand-sale AGAINST a live BUY is a deliberate exit; without
-                # this the still-listed name would be re-adopted tomorrow
-                # morning with a fresh "NEW BUY" ping. Model sells stay
-                # un-dismissed so a genuinely new BUY episode re-enters;
-                # un-dismiss = Adopt the name manually in the dashboard.
+            if hand_sold and not model_sell and bucket.get(tk) in ("buy", "hold"):
+                # A hand-sale AGAINST a live BUY or HOLD is a deliberate exit;
+                # without this the still-open name would be re-adopted with a
+                # fresh "NEW BUY" ping the moment it (re-)fires BUY (audit
+                # 2026-08-23: the old buy-only check let a hand-sold HOLD slip
+                # back in). Model sells stay un-dismissed so a genuinely new
+                # BUY episode re-enters; un-dismiss = Adopt manually in the
+                # dashboard.
                 cur.execute("""
                     INSERT INTO portfolio.dismissed (ticker) VALUES (%s)
                     ON CONFLICT (ticker) DO NOTHING""", (tk,))
@@ -354,8 +396,12 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
     for rid, tk, amt, cadence, day1, start_d, end_d, sold_d, mode, sfrac, rping in pos:
         if sold_d is not None or tk in arch_tks or rping is not None:
             continue
+        # A prior partial sale does NOT suppress the ping (audit 2026-08-23:
+        # a 10% trim used to silence it forever). The numbers below scale to
+        # the REMAINING stake; the message says what is already banked.
+        rem = 1.0
         if sfrac is not None and 0 < float(sfrac) < 1:
-            continue      # stake already partly banked by hand
+            rem = 1.0 - float(sfrac)
         fd, fpx = _px_asof(cur, tk, start_d or today, forward=True)
         if fpx is None or fd is None or fd >= today:
             continue
@@ -371,8 +417,13 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
         r_high = 100 * (float(hw[0][0]) / fpx - 1)
         r_now = 100 * (float(last[0][0]) / fpx - 1)
         if r_high >= thr and r_now >= thr - 10:
+            # fraction of the CURRENT (remaining) position that recovers the
+            # remaining original stake - algebraically identical whether or
+            # not a slice was already sold, so only the $ figure scales by rem
             frac = 100.0 / (1 + r_now / 100.0)
-            recoups.append((tk, r_now, r_high, frac, float(amt), rid))
+            banked_pct = round(100.0 * (1.0 - rem))
+            recoups.append((tk, r_now, r_high, frac, float(amt) * rem, rid,
+                            banked_pct))
             if not dry:
                 cur.execute(
                     "UPDATE portfolio.positions SET recoup_pinged_at = %s WHERE id = %s",
@@ -380,7 +431,8 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry):
     return adopts, snaps, archived, recoups, skipped
 
 
-def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None):
+def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None,
+               bad_amount=None):
     """The exact Telegram texts. Single source shared by run() and the test
     harnesses, so the wording the tests validate is the wording that ships.
     Format (Kevin, 2026-08-21): the ACTION comes first in plain words, one
@@ -395,6 +447,9 @@ def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None):
             try:
                 return f"grade {float(grade.get(tk)):.0f}"
             except (TypeError, ValueError):
+                # unreachable in prod since the >=68 gate (2026-08-23) means
+                # every adopt carries a grade; kept for the test harnesses,
+                # which adopt ungraded fixture names via injected queues
                 return "no grade yet"
         # each line ends with the row's PK (positions.id / closed_positions key)
         # so any ping can be referenced later (Kevin, 2026-08-22)
@@ -402,6 +457,10 @@ def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None):
         msgs.append(f"\U0001F7E2 BUY in Robinhood - ${amount:g} each\n"
                     f"{lines}\n"
                     "The table tracks these from today.")
+    if bad_amount is not None:
+        msgs.append("\U000026A0\U0000FE0F The '$ per new BUY' setting looks wrong "
+                    f"(${bad_amount:g}) - ignored, nothing adopts until it is "
+                    "fixed in the dashboard (1 to 1000).")
     if skipped:
         msgs.append("\U000026A0\U0000FE0F NOTHING BOUGHT - the buy amount is not set\n"
                     "Would have bought: " + ", ".join(skipped) + "\n"
@@ -415,21 +474,34 @@ def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None):
                     f"({rz['ret']:+.0f}%, {rel} {abs(rz['vs_spy']):.0f}pp)\n"
                     "Moved to your Realized history. "
                     "(Skip if you never bought it.)")
-    for tk, r_now, r_high, frac, amt, rid in recoups:
+    for tk, r_now, r_high, frac, amt, rid, *extra in recoups:
+        banked_pct = extra[0] if extra else 0
         peak = f" (peaked at {r_high:+.0f}%)" if r_high - r_now >= 1 else ""
+        banked = (f" You already banked {banked_pct:.0f}% earlier."
+                  if banked_pct else "")
         msgs.append(f"\U0001F3AF {tk} is up {r_now:+.0f}%{peak} - time to play it safe [{rid}]\n"
                     f"SELL {frac:.0f}% of it in Robinhood (≈${amt:.2f}) - "
-                    "that takes your original stake back out.\n"
+                    f"that takes your original stake back out.{banked}\n"
                     "What's left keeps running as pure profit. One-time alert - "
                     "record it in the dashboard with 'Sell part %'.")
     return msgs
 
 
+OUTBOX_GIVE_UP_RUNS = 10   # failed delivery runs before a day is abandoned
+OUTBOX_MSG_MAX_CHARS = 4000  # Telegram hard limit is 4096; stay under it
+
+
 def deliver_outbox(con):
-    """Send every undelivered sync_runs message, oldest day first, marking a day
-    sent only after ALL its messages went out. A Telegram outage therefore
-    delays pings instead of silently losing them: the next run re-reads the
-    outbox and retries. 3 tries per message with a short pause."""
+    """Send every undelivered sync_runs message, oldest day first. sent_n is a
+    per-MESSAGE cursor committed after each successful send, so a mid-batch
+    Telegram failure never re-delivers what already went out (audit
+    2026-08-23: the old per-day flag duplicated the delivered prefix on
+    retry). A day is marked sent once the cursor covers all its messages. A
+    failing day still blocks later days (chronological order), but after
+    OUTBOX_GIVE_UP_RUNS failed runs it is abandoned with a warning ping so
+    one poison message can't dam the queue forever. Messages are truncated to
+    the Telegram size limit - an oversized body was the one poison shape we
+    could construct. 3 tries per message with a short pause."""
     import time
     try:
         from utils.alerting import notify
@@ -438,12 +510,14 @@ def deliver_outbox(con):
         return
     cur = con.cursor()
     rows = _rows(cur, """
-        SELECT as_of, msgs FROM portfolio.sync_runs
+        SELECT as_of, msgs, COALESCE(sent_n, 0), COALESCE(attempts, 0)
+        FROM portfolio.sync_runs
         WHERE NOT sent AND jsonb_array_length(msgs) > 0
         ORDER BY as_of""")
-    for as_of, msgs in rows:
+    for as_of, msgs, sent_n, attempts in rows:
         all_ok = True
-        for m in msgs:
+        for i in range(sent_n, len(msgs)):
+            m = str(msgs[i])[:OUTBOX_MSG_MAX_CHARS]
             ok = False
             for _ in range(3):
                 try:
@@ -456,23 +530,53 @@ def deliver_outbox(con):
             if not ok:
                 all_ok = False
                 break
-        if not all_ok:
-            log.warning("outbox delivery incomplete for %s - retrying next run", as_of)
-            break  # keep chronological order; later days wait behind this one
-        cur.execute("UPDATE portfolio.sync_runs SET sent = true WHERE as_of = %s",
-                    (as_of,))
+            cur.execute("""
+                UPDATE portfolio.sync_runs SET sent_n = %s WHERE as_of = %s""",
+                (i + 1, as_of))
+            con.commit()
+        if all_ok:
+            cur.execute("UPDATE portfolio.sync_runs SET sent = true WHERE as_of = %s",
+                        (as_of,))
+            con.commit()
+            continue
+        if attempts + 1 >= OUTBOX_GIVE_UP_RUNS:
+            undel = len(msgs) - sent_n
+            cur.execute("""
+                UPDATE portfolio.sync_runs SET sent = true, attempts = %s
+                WHERE as_of = %s""", (attempts + 1, as_of))
+            con.commit()
+            log.error("outbox: gave up on %d message(s) for %s after %d runs",
+                      undel, as_of, attempts + 1)
+            try:
+                notify(f"\U000026A0\U0000FE0F gave up on {undel} undelivered "
+                       f"ping(s) for {as_of} - see sync_runs.msgs")
+            except Exception:
+                pass
+            continue
+        cur.execute("UPDATE portfolio.sync_runs SET attempts = %s WHERE as_of = %s",
+                    (attempts + 1, as_of))
         con.commit()
+        log.warning("outbox delivery incomplete for %s - retrying next run", as_of)
+        break  # keep chronological order; later days wait behind this one
 
 
 def run(dry=False):
-    # env guard: this maintains the PROD book only (local schedulers skip)
+    # env guard: this maintains the PROD book only (local schedulers skip).
+    # An UNRESOLVABLE env raises instead of quietly defaulting to dev (audit
+    # 2026-08-23: on prod a dropped ENV made the task a silent green no-op
+    # that only the 16:30 deadman would notice, 6.5h late and ambiguously).
     env = os.environ.get("ENV")
     if not env:
         try:
             from airflow.models import Variable
-            env = Variable.get("ENV", default_var="dev")
+            env = Variable.get("ENV", default_var=None)
         except Exception:
-            env = "dev"
+            env = None
+    if not env and not dry:
+        raise RuntimeError(
+            "ENV is set neither in the environment nor as an Airflow "
+            "Variable - refusing to guess (a prod container missing ENV "
+            "would silently skip the daily sync). Set ENV=prod|dev|staging.")
     if env != "prod" and not dry:
         log.info("ENV=%s - portfolio_sync only runs on prod; skipping.", env)
         return
@@ -482,16 +586,19 @@ def run(dry=False):
     con.autocommit = False
     try:
         cur = con.cursor()
-        bucket, grade, cluster, qs_buys = compute_board(cur)
+        bucket, grade, cluster, qs_buys, exit_of = compute_board(cur)
         # An absent or invalid auto_adopt_amount means UNSET: adopt nothing and
-        # say so, never fall back to a silent $100 book entry.
+        # say so, never fall back to a silent $100 book entry. Out-of-range
+        # values (a fat-fingered $100000) are ignored the same way, with a
+        # ping naming the bad value.
         amt_rows = _rows(cur, "SELECT value FROM portfolio.app_settings WHERE key='auto_adopt_amount'")
         try:
             amount = float(amt_rows[0][0]) if amt_rows else None
         except Exception:
             amount = None
-        if amount is not None and not (amount >= 1):
-            amount = None
+        bad_amount = None
+        if amount is not None and not (1 <= amount <= 1000):
+            bad_amount, amount = amount, None
         thr_rows = _rows(cur, "SELECT value FROM portfolio.app_settings WHERE key='recoup_threshold_pct'")
         try:
             thr = float(thr_rows[0][0]) if thr_rows else 100.0
@@ -501,8 +608,10 @@ def run(dry=False):
             thr = 100.0
 
         adopts, snaps, archived, recoups, skipped = sync_core(
-            cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry)
-        msgs = build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped)
+            cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry,
+            exit_of=exit_of)
+        msgs = build_msgs(adopts, archived, recoups, amount, grade, cluster,
+                          skipped, bad_amount=bad_amount)
 
         if dry:
             con.rollback()
@@ -525,22 +634,28 @@ def run(dry=False):
             # parity record (qs_buys), and the delivery ledger deliver_outbox
             # and the deadman cron read. Same-day re-runs append new msgs to
             # the day's undelivered set instead of erasing it.
-            prior = _rows(cur, "SELECT msgs, sent FROM portfolio.sync_runs WHERE as_of = %s",
-                          (today,))
-            day_msgs = list(msgs)
+            prior = _rows(cur, """
+                SELECT msgs, sent, COALESCE(sent_n, 0)
+                FROM portfolio.sync_runs WHERE as_of = %s""", (today,))
+            day_msgs, keep_sent_n = list(msgs), 0
             if prior and prior[0][0] and not prior[0][1]:
+                # append to the undelivered set; the delivered prefix stays a
+                # prefix of the new array, so the sent_n cursor stays valid
                 day_msgs = list(prior[0][0]) + day_msgs
+                keep_sent_n = int(prior[0][2])
             cur.execute("""
                 INSERT INTO portfolio.sync_runs
-                  (as_of, qs_buys, n_adopt, n_snap, n_arch, n_recoup, msgs, sent)
-                VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                  (as_of, qs_buys, n_adopt, n_snap, n_arch, n_recoup, msgs,
+                   sent, sent_n)
+                VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
                 ON CONFLICT (as_of) DO UPDATE SET
                   qs_buys = EXCLUDED.qs_buys, n_adopt = EXCLUDED.n_adopt,
                   n_snap = EXCLUDED.n_snap, n_arch = EXCLUDED.n_arch,
                   n_recoup = EXCLUDED.n_recoup, msgs = EXCLUDED.msgs,
-                  sent = EXCLUDED.sent""",
+                  sent = EXCLUDED.sent, sent_n = EXCLUDED.sent_n""",
                 (today, qs_buys, len(adopts), snaps, len(archived),
-                 len(recoups), json.dumps(day_msgs), not day_msgs))
+                 len(recoups), json.dumps(day_msgs), not day_msgs,
+                 keep_sent_n))
             con.commit()
             # 4. PING after commit (a failed write can't produce a false ping;
             # a failed ping is retried from the outbox, never lost)

@@ -126,5 +126,15 @@ CREATE TABLE IF NOT EXISTS portfolio.sync_runs (
     n_recoup   integer,
     msgs       jsonb,
     sent       boolean     NOT NULL DEFAULT false,
+    sent_n     integer     NOT NULL DEFAULT 0,
+    attempts   integer     NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- per-message delivery cursor + give-up counter (2026-08-23): sent_n counts
+-- the delivered prefix of msgs so a mid-batch Telegram failure never
+-- re-delivers what already went out; attempts counts failed delivery runs -
+-- after 10 the day is abandoned (sent=true) with a warning ping so one
+-- poison message can't dam the queue forever.
+ALTER TABLE portfolio.sync_runs ADD COLUMN IF NOT EXISTS sent_n   integer NOT NULL DEFAULT 0;
+ALTER TABLE portfolio.sync_runs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0;

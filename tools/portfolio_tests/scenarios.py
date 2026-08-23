@@ -27,10 +27,23 @@ Covers (2026-08-21 hardening):
       survives a dashboard-style save (same SQL shape as db_save_positions)
   S18 delta-safe dismissed save: DAG dismissal survives dashboard-style save
   S19 partial-sale slices: final exit realizes only the remaining stake;
-      recoup skips partially-banked rows
+      recoup still fires on a partially-banked row, scaled to the rest
+      (policy fix 2026-08-23: a 10% trim used to silence it forever)
   S20 ping outbox: failed sends retry and only then mark sent; total failure
       leaves the row unsent for the next run
   S21 state_history user-override rows survive the daily snapshot
+
+Added 2026-08-23 (audit round 2):
+  S23 outbox multi-message day: a mid-batch failure re-delivers NOTHING that
+      already went out (sent_n cursor), and the poison day drains after the
+      attempts cap with a give-up warning
+  S24 weekend/no-fill entries: a position whose first fill is today (or has
+      no fill at all yet) neither recoup-pings nor archives - silent skip,
+      no crash
+  S26 same-day trim + full exit: the suffixed slice id (~p1) and the bare-id
+      final both land in closed_positions and sum to the full stake (the old
+      bare-id slice collided on the (id, sold_date) PK and ON CONFLICT DO
+      NOTHING silently ate the final exit's money)
 """
 import os
 import sys
@@ -77,6 +90,8 @@ cur.execute("""CREATE TABLE IF NOT EXISTS portfolio.sync_runs (
     n_adopt integer, n_snap integer, n_arch integer, n_recoup integer,
     msgs jsonb, sent boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now())""")
+cur.execute("ALTER TABLE portfolio.sync_runs ADD COLUMN IF NOT EXISTS sent_n integer NOT NULL DEFAULT 0")
+cur.execute("ALTER TABLE portfolio.sync_runs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0")
 
 
 def cleanup():
@@ -114,12 +129,14 @@ def seed_prices(tk, path):
         [(tk, d, p) for d, p in zip(spy_dates, px)])
 
 
-def seed_pos(tk, rid=None, sold=None, cadence="once", mode="model", sfrac=None):
+def seed_pos(tk, rid=None, sold=None, cadence="once", mode="model", sfrac=None,
+             start=None):
     cur.execute("""INSERT INTO portfolio.positions
         (id, ticker, amount_usd, cadence, day1, start_date, sold_date,
          sold_fraction, mode, adopted_at, created_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),now())""",
-        (rid or f"{tk}-fix", tk, AMT, cadence, ENTRY.day, ENTRY, sold, sfrac, mode))
+        (rid or f"{tk}-fix", tk, AMT, cadence, ENTRY.day, start or ENTRY,
+         sold, sfrac, mode))
 
 
 # fixtures
@@ -146,14 +163,29 @@ cur.execute("""INSERT INTO portfolio.closed_positions
      spy_ret_pct, vs_spy_pp, vs_lump_pp, entry_date, sold_date, outcome)
     VALUES ('ZZTK-fix','ZZTK','once',5,2,2.6,0.6,30,5,25,0,%s,%s,'profit')""",
     (ENTRY, MID))                                        # the 40% trim slice
-seed_prices("ZZTL", (10.0, 16.0)); seed_pos("ZZTL", sfrac=0.3)  # S19b recoup skip
+seed_prices("ZZTL", (10.0, 16.0)); seed_pos("ZZTL", sfrac=0.3)  # S19c recoup w/ banked note
+# S26: 50% trimmed today (suffixed slice pre-archived) then hand-sold today -
+# the final exit must NOT collide with the slice's (id, sold_date) key.
+# bucket "hold" also exercises the hand-sell-on-HOLD dismiss (fix 2026-08-23).
+seed_prices("ZZTS", (10.0, 13.0)); seed_pos("ZZTS", sold=TODAY, sfrac=0.5)
+cur.execute("""INSERT INTO portfolio.closed_positions
+    (id, ticker, cadence, amount_usd, invested_usd, value_usd, pnl_usd, ret_pct,
+     spy_ret_pct, vs_spy_pp, vs_lump_pp, entry_date, sold_date, outcome)
+    VALUES ('ZZTS-fix~p1','ZZTS','once',5,2.5,3.25,0.75,30,5,25,0,%s,%s,'profit')""",
+    (ENTRY, TODAY))
+# S24: weekend/no-fill shapes - first fill IS today (no recoup basis yet) /
+# start after every price (hand-sold but nothing ever filled -> left active)
+seed_prices("ZZTW", (10.0, 16.0)); seed_pos("ZZTW", start=TODAY)
+seed_prices("ZZTV", (10.0, 12.0)); seed_pos("ZZTV", sold=TODAY,
+                                            start=TODAY + timedelta(days=1))
 # S21: user-override snapshot that the daily sync must NOT clobber
 cur.execute("""INSERT INTO portfolio.state_history (ticker, as_of, hz, state, why)
     VALUES ('ZZTE', %s, 12, 'sell', 'sold by user')""", (TODAY,))
 
 bucket = {"ZZTA": "buy", "ZZTB": "hold", "ZZTC": "sell", "ZZTD": "sell",
           "ZZTE": "buy", "ZZTF": "buy", "ZZTG": "buy", "ZZTH": "sell",
-          "ZZTI": "buy", "ZZTJ": "buy", "ZZTK": "sell", "ZZTL": "buy"}
+          "ZZTI": "buy", "ZZTJ": "buy", "ZZTK": "sell", "ZZTL": "buy",
+          "ZZTS": "hold", "ZZTW": "buy", "ZZTV": "hold"}
 grade   = {"ZZTA": 74.0, "ZZTG": 71.0}
 cluster = {"ZZTA": 9, "ZZTG": 7}
 qs_buys = ["ZZTA", "ZZTG", "ZZTF"]
@@ -193,8 +225,12 @@ check("S7 hand-sold archived at its stamped date",
                            "WHERE ticker='ZZTF'")[0][0] == MID)
 left = {r[0] for r in q("SELECT upper(ticker) FROM portfolio.positions WHERE upper(ticker) LIKE 'ZZT%'")}
 check("S4/5/7 archived rows removed from active book",
-      not ({"ZZTC", "ZZTD", "ZZTF", "ZZTK"} & left), str(left))
+      not ({"ZZTC", "ZZTD", "ZZTF", "ZZTK", "ZZTS"} & left), str(left))
 check("S9 unpriced row NOT archived (stays active)", "ZZTH" in left and "ZZTH" not in arch)
+check("S24a first-fill-today row does not recoup-ping (no basis yet, no crash)",
+      "ZZTW" in left and "ZZTW" not in {tk for tk, *_ in recoups})
+check("S24b sold row with no fills yet is left active (nothing to realize)",
+      "ZZTV" in left and "ZZTV" not in arch)
 rec_tks = {tk for tk, *_ in recoups}
 check("S6 recoup ping at high-water (ZZTE +55% over thr 50)", "ZZTE" in rec_tks, str(recoups))
 check("S6b recoup wording carries the $5 stake",
@@ -211,16 +247,30 @@ check("S19 final exit realizes only the remaining stake (ZZTK: 60% of 5 = 3.0 "
 check("S19b closed slices + final exit sum to the full stake (ZZTK Σinvested = 5)",
       float(q("SELECT sum(invested_usd) FROM portfolio.closed_positions "
               "WHERE ticker='ZZTK'")[0][0]) == 5.0)
-check("S19c recoup skips partially-banked rows (ZZTL +60% but 30% already sold)",
-      "ZZTL" not in rec_tks)
+check("S19c recoup STILL fires on a partially-banked row (ZZTL +60%, 30% sold)",
+      "ZZTL" in rec_tks, str(recoups))
+check("S19d partial-row recoup scales to the rest + says what's banked "
+      "(ZZTL ≈$3.50, 'banked 30%')",
+      any("ZZTL" in m and "$3.50" in m and "banked 30%" in m for m in msgs),
+      str([m for m in msgs if "ZZTL" in m]))
+check("S26 same-day trim + final exit: BOTH rows in closed_positions "
+      "(suffixed slice ~p1 + bare-id final, no PK collision)",
+      q("SELECT count(*) FROM portfolio.closed_positions WHERE ticker='ZZTS' "
+        "AND sold_date=%s", (TODAY,))[0][0] == 2)
+check("S26b trim + final sum to the full stake (ZZTS Σinvested = 5)",
+      float(q("SELECT sum(invested_usd) FROM portfolio.closed_positions "
+              "WHERE ticker='ZZTS'")[0][0]) == 5.0)
 check("S15a hand-sale on live BUY dismissed (ZZTF)",
       q("SELECT count(*) FROM portfolio.dismissed WHERE upper(ticker)='ZZTF'")[0][0] == 1)
+check("S15d hand-sale on a HOLD also dismissed (ZZTS - deliberate exit, "
+      "fix 2026-08-23)",
+      q("SELECT count(*) FROM portfolio.dismissed WHERE upper(ticker)='ZZTS'")[0][0] == 1)
 check("S15b model sells NOT dismissed (ZZTC/ZZTD/ZZTK re-enterable)",
       q("SELECT count(*) FROM portfolio.dismissed WHERE upper(ticker) IN "
         "('ZZTC','ZZTD','ZZTK')")[0][0] == 0)
 closed_n = q("SELECT count(*) FROM portfolio.closed_positions WHERE upper(ticker) LIKE 'ZZT%'")[0][0]
-check("closed table rows = 6 (ZZTG-old + ZZTK-slice + C/D/F + ZZTK-final)",
-      closed_n == 6, str(closed_n))
+check("closed table rows = 8 (ZZTG-old + ZZTK-slice + C/D/F + ZZTK-final + "
+      "ZZTS-slice + ZZTS-final)", closed_n == 8, str(closed_n))
 
 # ── pass 2: same day re-run (idempotence + no-dup recoup + no re-adopt) ──────
 adopts2, _, archived2, recoups2, _ = PS.sync_core(
@@ -304,6 +354,62 @@ finally:
     UA.notify = _real_notify
 check("S20b total failure leaves the row unsent for the next run",
       q("SELECT sent FROM portfolio.sync_runs WHERE as_of = DATE '2020-01-02'")[0][0] is False)
+
+# ── S23: multi-message day - the sent_n cursor never re-delivers ─────────────
+cur.execute("UPDATE portfolio.sync_runs SET sent = true WHERE as_of = DATE '2020-01-02'")
+cur.execute("""INSERT INTO portfolio.sync_runs (as_of, msgs, sent, sent_n, attempts)
+    VALUES (DATE '2020-01-03', %s::jsonb, false, 0, 0)
+    ON CONFLICT (as_of) DO UPDATE SET msgs = EXCLUDED.msgs, sent = false,
+      sent_n = 0, attempts = 0""",
+    ('["m-one", "m-two", "m-three"]',))
+con.commit()
+calls23 = {"n": 0}
+
+
+def first_only(m):
+    calls23["n"] += 1
+    return calls23["n"] == 1      # msg 1 delivers; msg 2 fails all 3 tries
+
+
+UA.notify = first_only
+try:
+    PS.deliver_outbox(con)
+finally:
+    UA.notify = _real_notify
+row23 = q("""SELECT sent, sent_n, attempts FROM portfolio.sync_runs
+             WHERE as_of = DATE '2020-01-03'""")[0]
+check("S23a mid-batch failure: delivered prefix recorded, day stays unsent",
+      row23[0] is False and row23[1] == 1 and row23[2] == 1, str(row23))
+delivered = []
+UA.notify = lambda m: (delivered.append(m), True)[1]
+try:
+    PS.deliver_outbox(con)
+finally:
+    UA.notify = _real_notify
+check("S23b retry resumes AT the cursor - no duplicate of the delivered msg",
+      delivered == ["m-two", "m-three"]
+      and q("SELECT sent FROM portfolio.sync_runs WHERE as_of = DATE '2020-01-03'")[0][0] is True,
+      str(delivered))
+# poison day: one message that always fails, already at the attempts cap - it
+# is abandoned (sent=true + warning) and the day behind it drains in the SAME run
+cur.execute("""INSERT INTO portfolio.sync_runs (as_of, msgs, sent, sent_n, attempts)
+    VALUES (DATE '2020-01-04', '["POISON msg"]'::jsonb, false, 0, 9)
+    ON CONFLICT (as_of) DO UPDATE SET msgs = EXCLUDED.msgs, sent = false,
+      sent_n = 0, attempts = 9""")
+cur.execute("""INSERT INTO portfolio.sync_runs (as_of, msgs, sent, sent_n, attempts)
+    VALUES (DATE '2020-01-05', '["healthy msg"]'::jsonb, false, 0, 0)
+    ON CONFLICT (as_of) DO UPDATE SET msgs = EXCLUDED.msgs, sent = false,
+      sent_n = 0, attempts = 0""")
+con.commit()
+UA.notify = lambda m: "POISON" not in m
+try:
+    PS.deliver_outbox(con)
+finally:
+    UA.notify = _real_notify
+check("S23c poison day gives up at the attempts cap (sent=true, queue undammed)",
+      q("SELECT sent FROM portfolio.sync_runs WHERE as_of = DATE '2020-01-04'")[0][0] is True)
+check("S23d the day queued behind the poison drains in the same run",
+      q("SELECT sent FROM portfolio.sync_runs WHERE as_of = DATE '2020-01-05'")[0][0] is True)
 
 # ── report ───────────────────────────────────────────────────────────────────
 print("=" * 72)

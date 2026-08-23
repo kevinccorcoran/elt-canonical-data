@@ -130,7 +130,7 @@ for day in D:
                 (day, tk, act))
     con.commit()
 
-    bucket, grade, cluster, qs_buys = PS.compute_board(cur)
+    bucket, grade, cluster, qs_buys, exit_of = PS.compute_board(cur)
     check(f"{day} board state = {EXPECT[day]}", bucket.get("ZZX") == EXPECT[day],
           f"got {bucket.get('ZZX')!r}")
     if day == D[0]:

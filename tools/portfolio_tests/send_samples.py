@@ -25,8 +25,10 @@ archived = [
     ("ZZTD", dict(pnl=-0.75, ret=-15.0, vs_spy=-16.9), "loss", "ZZTD-sync2-20260822"),
 ]
 recoups = [
-    ("ZZTE", 55.0, 55.0, 64.5, 10.0, "ZZTE-sync3-20260822"),  # peak == now: no suffix
-    ("ZZTI", 52.0, 61.0, 65.8, 10.0, "ZZTI-sync4-20260822"),  # gap-past: peak shows
+    # (tk, r_now, r_high, frac, amt, rid, banked_pct)
+    ("ZZTE", 55.0, 55.0, 64.5, 10.0, "ZZTE-sync3-20260822", 0),   # peak == now
+    ("ZZTI", 52.0, 61.0, 65.8, 10.0, "ZZTI-sync4-20260822", 0),   # gap-past: peak shows
+    ("ZZTJ", 58.0, 58.0, 63.3,  7.0, "ZZTJ-sync5-20260822", 30),  # 30% already banked
 ]
 skipped = ["ZZTM", "ZZTN"]
 
