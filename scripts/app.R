@@ -3998,14 +3998,17 @@ server <- function(input, output, session) {
       con <- get_con(input)
       on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
 
-      # FED: matched-horizon scored cells (one value per bucket x fut_lag)
+      # FED: matched-horizon scored cells (one value per bucket x fut_lag).
+      # fut_lag <= 33 = the app-wide horizon cap: the scoring table still
+      # carries legacy 54-376mo rows that were never validated (can't finish
+      # inside the holdout) - every tab filters them out.
       fed <- dbGetQuery(con, sprintf("
         SELECT fut_lag,
                past_excess_return_z_bucket_num AS bucket,
                past_excess_return_z_bucket     AS bucket_label,
                net_score, recommendation, n_observations
         FROM scoring.return_cluster_cell_score_extended
-        WHERE id = %s AND past_lag = fut_lag
+        WHERE id = %s AND past_lag = fut_lag AND fut_lag <= 33
         ORDER BY fut_lag, past_excess_return_z_bucket_num;", idv))
       idf_fed(fed)
 
@@ -4083,7 +4086,10 @@ server <- function(input, output, session) {
     fed$net_score <- as.numeric(fed$net_score)
     lags <- sort(unique(fed$fut_lag))
     lag_pos <- sqrt(lags)                       # sqrt spacing, same as Shortlist
-    bkeys <- sort(unique(fed$bucket))           # y: negative bucket at bottom
+    # bucket_num 1 = the most POSITIVE z-bucket; plotly draws the first
+    # category at the BOTTOM - reverse so most negative sits at the bottom,
+    # matching the caption
+    bkeys <- rev(sort(unique(fed$bucket)))
     blab_of <- tapply(fed$bucket_label, fed$bucket, function(x) x[1])
     blabels <- as.character(blab_of[as.character(bkeys)])
     z <- matrix(NA_real_, nrow = length(bkeys), ncol = length(lags),
