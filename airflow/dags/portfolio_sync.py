@@ -51,6 +51,10 @@ LEDGER_EPOCH = date(2026, 7, 3)
 HZ = 12                    # canonical horizon: board rule + grader universe
 QS_CAP = 25                # overall auto-seed cap (mirrors app.R QS_CAP)
 QS_CLUSTER_CAP = 5         # per-cluster cap (mirrors app.R QS_CLUSTER_CAP)
+QS_MIN_GRADE = 68          # adoption gate (mirrors app.R QS_MIN): only
+                           # qualstream passers enter the queue - Kevin's
+                           # policy call 2026-08-23; ungraded/below-bar names
+                           # stay board-visible but are never adopted
 QS_MAX_AGE_DAYS = 150      # grade freshness (mirrors app.R)
 SELL_RECENT_DAYS = 30      # exits older than this are history, not action items
 
@@ -164,9 +168,12 @@ def compute_board(cur):
     runs_of = {tk: sum(1 for d in ds if d >= per_lo)
                for tk, ds in buys_of.items()}
 
-    # dv$qs_buys: every buy-bucket name minus vetoes, ranked grade-first then
+    # dv$qs_buys (policy 2026-08-23): buy-bucket names that PASS qualstream
+    # (grade >= QS_MIN_GRADE, not vetoed), ranked grade-first then
     # persistence, capped 5/cluster then 25 overall
-    cand = [tk for tk, b in bucket.items() if b == "buy" and tk not in vetoed]
+    cand = [tk for tk, b in bucket.items()
+            if b == "buy" and tk not in vetoed
+            and grade.get(tk, 0) >= QS_MIN_GRADE]
     cand.sort(key=lambda t: (-(grade.get(t, float("-inf"))
                                if t in grade else float("-inf")),
                              -runs_of.get(t, 0), t))
