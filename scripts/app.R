@@ -2395,6 +2395,57 @@ ui <- navbarPage(
     )
   ),
 
+  # ── Tab: ID Flow (id-level in -> out X-ray) ──
+  tabPanel("ID Flow",
+    sidebarLayout(
+      make_sidebar("IDF", "ID Flow", tagList(
+        selectInput("id_valIDF", "Cluster ID", choices = c("Connect first..." = ""), selected = "")
+      )),
+      mainPanel(div(class = "main-card",
+        h4("One cluster, end to end: what feeds it, what it emits",
+           style = "color: #f8fafc; margin-bottom: 1rem; font-weight: 600;"),
+
+        # ---- verdict / evidence gate ----
+        tags$div(
+          style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #fbbf24; border-radius: 4px;
+                   color: #f8fafc; font-size: 0.85rem; line-height: 1.5;
+                   margin-bottom: 1rem; font-family: 'JetBrains Mono', monospace;",
+          uiOutput("idfVerdict")
+        ),
+
+        # ---- FED IN ----
+        h5("Fed in - the scored signal per return-bucket at each horizon",
+           style = "color: #38bdf8; font-weight: 600; margin-bottom: 0.4rem;"),
+        tags$div(
+          style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #38bdf8; border-radius: 4px;
+                   color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
+                   margin-bottom: 0.75rem;",
+          "Rows: past-return z-bucket (how the cluster's members did going IN, most negative at bottom). ",
+          "Columns: horizon fut_lag (1 to 33 months). ",
+          "Color: net_score of that cell (green = the model reads this bucket/horizon as bullish, red = bearish, near-white = neutral). ",
+          "Matched horizon only (past window = future window) - the clean one-cell-per-(bucket, horizon) slice. ",
+          "This is the raw evidence the ticker ranking is built from; blank = no scored cell."
+        ),
+        plotlyOutput("idfFedPlot", height = "460px"),
+
+        # ---- COMES OUT ----
+        h5("Comes out - the ranked tickers and their board action",
+           style = "color: #4ade80; font-weight: 600; margin: 1.4rem 0 0.4rem 0;"),
+        tags$div(
+          style = "padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.03);
+                   border-left: 2px solid #4ade80; border-radius: 4px;
+                   color: #94a3b8; font-size: 0.75rem; line-height: 1.4;
+                   margin-bottom: 0.75rem;",
+          "Every ticker this cluster serves today, by agg_rank (1 = strongest). ",
+          "Action is the live board call; dir score is agg_directional_score; votes are the BUY/SELL cell tallies behind it."
+        ),
+        DT::DTOutput("idfOutTable")
+      ))
+    )
+  ),
+
   # ── Tab: Rank Stability ──
   tabPanel("Rank Stability",
     sidebarLayout(
@@ -3915,6 +3966,176 @@ server <- function(input, output, session) {
                    color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
       margin = list(l = 160, r = 60, b = 60, t = 60)
     )
+  })
+
+  # ── ID FLOW: id-level in -> out X-ray ──
+  idf_fed     <- reactiveVal(NULL)   # scored-cell grid (bucket x fut_lag)
+  idf_out     <- reactiveVal(NULL)   # served tickers + board action
+  idf_verdict <- reactiveVal(NULL)   # one-row: tradeable + IC evidence
+  status_msgIDF <- reactiveVal("Ready")
+  output$statusMessageIDF <- renderText({ status_msgIDF() })
+
+  observeEvent(input$connect_btn, {
+    if (input$db_pass == "") { status_msgIDF("Error: Password is not set."); return() }
+    tryCatch({
+      con <- get_con(input)
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+      id_vals <- dbGetQuery(con,
+        "SELECT DISTINCT id FROM serving.return_cluster_ticker_summary_current ORDER BY 1")
+      updateSelectInput(session, "id_valIDF", choices = id_vals[[1]], selected = id_vals[[1]][1])
+      status_msgIDF("Filters loaded!")
+    }, error = function(e) status_msgIDF(paste("Error:", e$message)))
+  })
+
+  observeEvent(input$execute_IDF, {
+    if (input$db_pass == "") { status_msgIDF("Error: Password is not set."); return() }
+    if (is.null(input$id_valIDF) || input$id_valIDF == "") {
+      status_msgIDF("Error: Select a cluster first."); return()
+    }
+    status_msgIDF("Running query...")
+    idv <- input$id_valIDF
+    tryCatch({
+      con <- get_con(input)
+      on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+
+      # FED: matched-horizon scored cells (one value per bucket x fut_lag)
+      fed <- dbGetQuery(con, sprintf("
+        SELECT fut_lag,
+               past_excess_return_z_bucket_num AS bucket,
+               past_excess_return_z_bucket     AS bucket_label,
+               net_score, recommendation, n_observations
+        FROM scoring.return_cluster_cell_score_extended
+        WHERE id = %s AND past_lag = fut_lag
+        ORDER BY fut_lag, past_excess_return_z_bucket_num;", idv))
+      idf_fed(fed)
+
+      # COMES OUT: served tickers + live board action
+      out <- dbGetQuery(con, sprintf("
+        SELECT s.agg_rank,
+               s.ticker,
+               COALESCE(g.global_action, '-') AS action,
+               ROUND(s.agg_directional_score::numeric, 3) AS dir_score,
+               g.buy_votes, g.sell_votes,
+               s.coverage_cell_count AS cells,
+               s.evidence_status
+        FROM serving.return_cluster_ticker_summary_current s
+        LEFT JOIN serving.return_cluster_ticker_global_action_current g
+          ON g.id = s.id AND g.ticker = s.ticker
+        WHERE s.id = %s
+        ORDER BY s.agg_rank;", idv))
+      out$agg_rank <- as.integer(out$agg_rank)
+      idf_out(out)
+
+      # VERDICT: tradeable flag (from serving) + walk-forward IC gate evidence
+      vr <- dbGetQuery(con, sprintf("
+        SELECT DISTINCT cluster_is_tradeable, cluster_untradeable_reason,
+               evidence_id
+        FROM serving.return_cluster_ticker_summary_current
+        WHERE id = %s LIMIT 1;", idv))
+      ic <- dbGetQuery(con, sprintf("
+        SELECT ROUND(mean_ic::numeric,4) AS mean_ic,
+               ROUND(median_ic::numeric,4) AS median_ic,
+               n_cohorts, n_positive,
+               ROUND(mean_decile_spread::numeric,4) AS spread
+        FROM validation.walk_forward_id_ic
+        WHERE id = %s AND fut_lag = 12;", idv))
+      idf_verdict(list(id = idv, vr = vr, ic = ic,
+                       n_out = nrow(out),
+                       n_buy = sum(out$action == "BUY", na.rm = TRUE),
+                       n_hold = sum(out$action == "HOLD", na.rm = TRUE),
+                       n_sell = sum(out$action == "SELL", na.rm = TRUE)))
+
+      status_msgIDF(sprintf("Loaded id %s: %d cells fed, %d tickers out.",
+                            idv, nrow(fed), nrow(out)))
+    }, error = function(e) {
+      idf_fed(NULL); idf_out(NULL); idf_verdict(NULL)
+      status_msgIDF(paste("Error:", e$message))
+    })
+  })
+
+  output$idfVerdict <- renderUI({
+    v <- idf_verdict()
+    if (is.null(v)) return(HTML("Select a cluster id and Generate."))
+    tradeable <- !is.null(v$vr) && nrow(v$vr) && isTRUE(v$vr$cluster_is_tradeable[1])
+    badge <- if (tradeable)
+      "<span style='color:#4ade80;font-weight:700;'>TRADEABLE</span>"
+    else sprintf("<span style='color:#f87171;font-weight:700;'>NOT TRADEABLE</span>%s",
+      if (!is.null(v$vr) && nrow(v$vr) && !is.na(v$vr$cluster_untradeable_reason[1]))
+        sprintf(" <span style='color:#94a3b8;'>(%s)</span>", v$vr$cluster_untradeable_reason[1]) else "")
+    evid <- if (!is.null(v$vr) && nrow(v$vr) && !is.na(v$vr$evidence_id[1]))
+      sprintf("  ·  evidence id %s", v$vr$evidence_id[1]) else ""
+    icline <- if (!is.null(v$ic) && nrow(v$ic) && !is.na(v$ic$mean_ic[1]))
+      sprintf("walk-forward IC (12mo): mean %.3f, median %.3f, positive %d/%d, decile spread %.3f",
+              v$ic$mean_ic[1], v$ic$median_ic[1], as.integer(v$ic$n_positive[1]),
+              as.integer(v$ic$n_cohorts[1]), v$ic$spread[1])
+    else "walk-forward IC (12mo): no evidence row for this id"
+    HTML(sprintf(
+      "Cluster %s  ·  %s%s<br>%s<br>Emits %d ticker(s): <b style='color:#4ade80;'>%d BUY</b>, %d HOLD, <b style='color:#f87171;'>%d SELL</b>.",
+      v$id, badge, evid, icline, v$n_out, v$n_buy, v$n_hold, v$n_sell))
+  })
+
+  output$idfFedPlot <- renderPlotly({
+    fed <- idf_fed()
+    if (is.null(fed) || nrow(fed) == 0)
+      return(empty_plot("Generate to load the scored-signal grid."))
+    fed$fut_lag <- as.integer(fed$fut_lag)
+    fed$bucket  <- as.integer(fed$bucket)
+    fed$net_score <- as.numeric(fed$net_score)
+    lags <- sort(unique(fed$fut_lag))
+    lag_pos <- sqrt(lags)                       # sqrt spacing, same as Shortlist
+    bkeys <- sort(unique(fed$bucket))           # y: negative bucket at bottom
+    blab_of <- tapply(fed$bucket_label, fed$bucket, function(x) x[1])
+    blabels <- as.character(blab_of[as.character(bkeys)])
+    z <- matrix(NA_real_, nrow = length(bkeys), ncol = length(lags),
+                dimnames = list(blabels, as.character(lags)))
+    rec <- matrix("", nrow = length(bkeys), ncol = length(lags))
+    nob <- matrix(NA_integer_, nrow = length(bkeys), ncol = length(lags))
+    for (i in seq_len(nrow(fed))) {
+      ri <- which(bkeys == fed$bucket[i]); ci <- which(lags == fed$fut_lag[i])
+      if (length(ri) && length(ci)) {
+        z[ri, ci] <- fed$net_score[i]; rec[ri, ci] <- fed$recommendation[i]
+        nob[ri, ci] <- as.integer(fed$n_observations[i])
+      }
+    }
+    zabs <- max(abs(fed$net_score), na.rm = TRUE); if (!is.finite(zabs) || zabs == 0) zabs <- 1
+    custom <- array(NA, dim = c(dim(z), 2)); custom[,,1] <- rec; custom[,,2] <- nob
+    plot_ly(x = lag_pos, y = blabels, z = z, type = "heatmap",
+      colorscale = list(c(0,'#dc2626'), c(0.5,'#f5f5f4'), c(1,'#16a34a')),
+      zmin = -zabs, zmax = zabs, customdata = custom,
+      text = matrix(rep(as.character(lags), each = nrow(z)), nrow = nrow(z)),
+      hovertemplate = paste0("bucket %{y}<br>fut_lag %{text}<br>",
+        "net_score %{z:.3f}<br>recommendation %{customdata[0]}<br>",
+        "n_obs %{customdata[1]}<extra></extra>"),
+      colorbar = list(title = list(text = "net_score", font = list(color = "#f8fafc")),
+                      tickfont = list(color = "#94a3b8"))
+    ) %>% layout(
+      paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+      xaxis = list(title = "Future lag (months, sqrt-spaced)", type = "linear",
+                   tickvals = lag_pos, ticktext = as.character(lags),
+                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+      yaxis = list(title = "Past-return z-bucket", type = "category",
+                   color = "#94a3b8", gridcolor = "rgba(255,255,255,0.1)"),
+      margin = list(l = 120, r = 60, b = 60, t = 20))
+  })
+
+  output$idfOutTable <- DT::renderDT({
+    out <- idf_out()
+    if (is.null(out) || nrow(out) == 0)
+      return(DT::datatable(data.frame(Note = "Generate to load the served tickers."),
+        rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
+    show <- data.frame(
+      Rank = out$agg_rank, Ticker = toupper(out$ticker), Action = out$action,
+      `Dir score` = as.numeric(out$dir_score),
+      `Buy votes` = suppressWarnings(as.integer(out$buy_votes)),
+      `Sell votes` = suppressWarnings(as.integer(out$sell_votes)),
+      Cells = suppressWarnings(as.integer(out$cells)),
+      Evidence = out$evidence_status,
+      check.names = FALSE, stringsAsFactors = FALSE)
+    DT::datatable(show, rownames = FALSE, selection = "none", class = "compact",
+      options = list(dom = "tp", pageLength = 25, order = list(list(0, "asc")))) %>%
+      DT::formatStyle("Action", fontWeight = "600",
+        color = DT::styleEqual(c("BUY","SELL","HOLD"),
+                               c("#4ade80","#f87171","#fbbf24"), default = "#94a3b8"))
   })
 
   # ── RANK STABILITY: Reactive values ──
