@@ -893,7 +893,11 @@ hr {
    its left (the sidebar ends well above it), so the wide table shows every
    column at once. Wide screens only; narrow/mobile keeps it in the column. */
 @media (min-width: 1200px) {
-  details.pf-wide { margin-left: -22vw; width: calc(100% + 22vw); box-sizing: border-box; }
+  /* pf-wide once broke the portfolio panel out over the sidebar with a
+     hardcoded -22vw shift, which misrendered at other window sizes
+     (2026-08-23). The panel now stays in the main column; the positions
+     table scrolls horizontally on its own. */
+  details.pf-wide { box-sizing: border-box; }
 }
 
 /* Global loading progress bar: an estimated-progress overlay shown whenever
