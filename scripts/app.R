@@ -152,6 +152,10 @@ db_load_positions <- function(con) {
 # recoup_pinged_at is DAG-owned and deliberately absent so a save can't reset it.
 db_save_positions <- function(con, df, drop_ids = NULL) {
   drop_ids <- as.character(drop_ids[!is.na(drop_ids) & nzchar(drop_ids)])
+  # a duplicated id in one multi-row upsert aborts the whole statement
+  # ("cannot affect row a second time") - keep the last occurrence
+  if (!is.null(df) && nrow(df) > 0)
+    df <- df[!duplicated(as.character(df$id), fromLast = TRUE), , drop = FALSE]
   DBI::dbWithTransaction(con, {
     if (length(drop_ids))
       DBI::dbExecute(con, "DELETE FROM portfolio.positions WHERE id = $1",
@@ -237,6 +241,14 @@ pf_ensure_extras <- function(con) {
         n_adopt integer, n_snap integer, n_arch integer, n_recoup integer,
         msgs jsonb, sent boolean NOT NULL DEFAULT false,
         created_at timestamptz NOT NULL DEFAULT now())")
+    # per-message delivery cursor + give-up counter (outbox audit 2026-08-23:
+    # the per-day sent flag re-delivered the already-sent prefix on retry)
+    DBI::dbExecute(con, "
+      ALTER TABLE portfolio.sync_runs
+        ADD COLUMN IF NOT EXISTS sent_n integer NOT NULL DEFAULT 0")
+    DBI::dbExecute(con, "
+      ALTER TABLE portfolio.sync_runs
+        ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0")
     TRUE
   }, error = function(e) FALSE)
 }
@@ -1649,7 +1661,13 @@ LC_PORTFOLIO_TICKER_SQL <- "
 WITH buys(id, ticker, d, amt) AS (VALUES __BUYS__),
 maxd AS (SELECT MAX(date) AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'),
 fills AS (
+    -- fill_d = the day the buy actually prices (first close >= plan date):
+    -- anchoring the series on the PLAN date valued Friday's close against
+    -- Monday-priced shares broke the starts-at-0% invariant for weekend
+    -- entries (audit 2026-08-23)
     SELECT b.ticker, b.d::date AS buy_d, b.amt::numeric AS amt,
+      (SELECT i.date FROM cdm.ingest_combined i
+       WHERE i.ticker = b.ticker AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS fill_d,
       (SELECT i.adj_close FROM cdm.ingest_combined i
        WHERE i.ticker = b.ticker AND i.date >= b.d::date ORDER BY i.date LIMIT 1) AS px,
       (SELECT i.adj_close FROM cdm.ingest_combined i
@@ -1657,20 +1675,20 @@ fills AS (
     FROM buys b
 ),
 lots AS (
-    SELECT ticker, buy_d, amt, amt / NULLIF(px, 0) AS shares,
+    SELECT ticker, buy_d, fill_d, amt, amt / NULLIF(px, 0) AS shares,
            amt / NULLIF(spy_px, 0) AS spy_shares
     FROM fills WHERE px > 0 AND spy_px > 0
 ),
 vdates AS (
     SELECT g::date AS d FROM generate_series(
-        (SELECT MIN(buy_d) FROM lots), (SELECT d FROM maxd), INTERVAL '1 week') AS g
+        (SELECT MIN(fill_d) FROM lots), (SELECT d FROM maxd), INTERVAL '1 week') AS g
     UNION SELECT (SELECT d FROM maxd)
-    UNION SELECT buy_d FROM lots   -- each line starts at 0% on its own first buy
+    UNION SELECT fill_d FROM lots   -- each line starts at 0% on its own first fill
 ),
 tk AS (
     SELECT v.d AS vdate, l.ticker, SUM(l.shares) AS shares, SUM(l.amt) AS invested,
            SUM(l.spy_shares) AS spy_shares
-    FROM vdates v JOIN lots l ON l.buy_d <= v.d
+    FROM vdates v JOIN lots l ON l.fill_d <= v.d
     GROUP BY v.d, l.ticker
 ),
 tk_val AS (
@@ -1685,15 +1703,15 @@ tk_val AS (
 ),
 spy AS (
     SELECT v.d AS vdate, SUM(l.amt) AS invested, SUM(l.spy_shares) AS spy_sh
-    FROM vdates v JOIN lots l ON l.buy_d <= v.d
+    FROM vdates v JOIN lots l ON l.fill_d <= v.d
     GROUP BY v.d
 ),
 -- lump benchmark: the whole stake placed at the row's FIRST fill price - what
 -- the entry-policy audit calls HODL/lump-at-entry. One px per ticker.
 firstpx AS (
-    SELECT DISTINCT ON (ticker) ticker, buy_d AS first_d,
+    SELECT DISTINCT ON (ticker) ticker, fill_d AS first_d,
            px AS first_px, spy_px AS first_spy
-    FROM fills WHERE px > 0 AND spy_px > 0 ORDER BY ticker, buy_d
+    FROM fills WHERE px > 0 AND spy_px > 0 ORDER BY ticker, fill_d
 ),
 -- daily peak/trough of the vs-SPY excess since first fill (lump basis): the
 -- highest and lowest the position's edge has BEEN, not just where it is now
@@ -7118,13 +7136,24 @@ server <- function(input, output, session) {
   # the env is still the default) we switch tabs and bump lcAutoTick, which is
   # exactly the auto-refresh timer's path into the Generate observer. Fires
   # once per browser session; without a resolvable credential it stays quiet.
+  # Latches only on SUCCESS (lc_backend flips to "db"): the old version
+  # latched before Generate ran, so one DB blip at boot silently left the
+  # whole session on the parquet fallback with no retry (audit 2026-08-23).
+  # Retries every 15s, caps at 20 tries; only the first try switches tabs so
+  # a failing DB can't keep yanking the user back to Lifecycle.
   .lc_auto_started <- reactiveVal(FALSE)
-  observeEvent(input$db_pass, {
+  .lc_auto_tries   <- reactiveVal(0)
+  observe({
     if (isTRUE(.lc_auto_started())) return()
+    if (identical(lc_backend(), "db")) { .lc_auto_started(TRUE); return() }
+    invalidateLater(15000, session)
     if (is.null(input$db_pass) || !nzchar(input$db_pass)) return()
     if (!identical(input$db_env, DB_ENV_DEFAULT)) return()
-    .lc_auto_started(TRUE)
-    updateNavbarPage(session, "mainNav", selected = "Lifecycle")
+    tries <- isolate(.lc_auto_tries())
+    if (tries >= 20) { .lc_auto_started(TRUE); return() }
+    .lc_auto_tries(tries + 1)
+    if (tries == 0)
+      updateNavbarPage(session, "mainNav", selected = "Lifecycle")
     lcAutoTick(isolate(lcAutoTick()) + 1)
   })
   observeEvent(input$idsLC, {
@@ -7165,8 +7194,27 @@ server <- function(input, output, session) {
       showNotification("DB unreachable - change not saved.", type = "error"); return(invisible(FALSE)) }
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
     tryCatch({
-      db_save_positions(con, df, drop_ids = setdiff(.lc_known$ids, ids))
-      .lc_known$ids <- ids
+      # Resurrection guard (audit 2026-08-23): a row this session loaded from
+      # the DB (.lc_known$ids) that is now GONE from the DB was archived by
+      # the daily sync mid-session - re-upserting it would bring it back as a
+      # live zombie. Skip those rows (they vanish from the view on the next
+      # Generate); keep them in .lc_known$ids so every later save keeps
+      # skipping them. Rows new to the session (not in known) are real
+      # inserts and pass through untouched.
+      db_ids <- tryCatch(as.character(
+        DBI::dbGetQuery(con, "SELECT id FROM portfolio.positions")$id),
+        error = function(e) NULL)
+      gone <- if (is.null(db_ids)) character(0)
+              else setdiff(intersect(.lc_known$ids, ids), db_ids)
+      df_save <- if (length(gone) && !is.null(df) && nrow(df))
+        df[!(as.character(df$id) %in% gone), , drop = FALSE] else df
+      if (length(gone))
+        showNotification(sprintf(
+          "%s archived by the daily sync - not re-saved; Generate to refresh.",
+          paste(unique(toupper(df$ticker[as.character(df$id) %in% gone])),
+                collapse = ", ")), type = "warning")
+      db_save_positions(con, df_save, drop_ids = setdiff(.lc_known$ids, ids))
+      .lc_known$ids <- union(ids, gone)
       invisible(TRUE) },
       error = function(e) {
         showNotification(paste("Save failed:", e$message), type = "error"); invisible(FALSE) })
@@ -7404,8 +7452,12 @@ server <- function(input, output, session) {
     if (is.null(con)) { showNotification("No DB connection - connect first.", type = "error"); return() }
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
     inlist <- paste(sprintf("'%s'", gsub("'", "''", ids, fixed = TRUE)), collapse = ",")
+    # slices archive under suffixed ids (<id>~p1, ~p2 ...) so match on the base
     already <- tryCatch(as.character(DBI::dbGetQuery(con, sprintf(
-      "SELECT id FROM portfolio.closed_positions WHERE sold_date = CURRENT_DATE AND id IN (%s)",
+      "SELECT regexp_replace(id, '~p[0-9]+$', '') AS id
+       FROM portfolio.closed_positions
+       WHERE sold_date = CURRENT_DATE
+         AND regexp_replace(id, '~p[0-9]+$', '') IN (%s)",
       inlist))$id), error = function(e) character(0))
     if (length(already)) {
       hit <- ids %in% already
@@ -7422,8 +7474,22 @@ server <- function(input, output, session) {
     ret  <- 100 * (val / inv - 1); spyr <- 100 * (spyv / inv - 1)
     since <- if (!is.null(perf) && "since" %in% names(perf))
       as.character(perf$since)[match(ids, perf$id)] else rep(NA_character_, length(ids))
+    # Suffixed slice ids: the closed_positions PK is (id, sold_date), so a
+    # bare-id slice would COLLIDE with a same-day full archive and the final
+    # exit's money silently vanished under ON CONFLICT DO NOTHING (audit
+    # 2026-08-23). ~p<n> continues from the archived slice count per base id.
+    nprev <- tryCatch({
+      sc <- DBI::dbGetQuery(con, sprintf(
+        "SELECT regexp_replace(id, '~p[0-9]+$', '') AS base, COUNT(*) AS n
+         FROM portfolio.closed_positions
+         WHERE id ~ '~p[0-9]+$'
+           AND regexp_replace(id, '~p[0-9]+$', '') IN (%s)
+         GROUP BY 1", inlist))
+      setNames(as.integer(sc$n), as.character(sc$base))
+    }, error = function(e) integer(0))
+    kslice <- ifelse(is.na(nprev[ids]), 0L, nprev[ids]) + 1L
     rows <- data.frame(
-      id = ids, ticker = toupper(cur$ticker[sel]),
+      id = sprintf("%s~p%d", ids, kslice), ticker = toupper(cur$ticker[sel]),
       cluster_id = unname(id_of[toupper(cur$ticker[sel])]),
       cadence = as.character(cur$cadence[sel]),
       amount_usd = as.numeric(cur$amount_usd[sel]),
@@ -7454,8 +7520,8 @@ server <- function(input, output, session) {
     if (!length(sel)) { showNotification("Check one or more rows to resume.", type = "message"); return() }
     cur$end_date[sel] <- ""
     cur$sold_date[sel] <- ""
-    # clear the full-exit stamp but KEEP partial-sale history: those slices are
-    # archived money - wiping the fraction would double-count the stake.
+    # Recurring rows KEEP partial-sale history: their stake spans episodes and
+    # wiping the fraction would double-count already-archived slices.
     sfR <- suppressWarnings(as.numeric(cur$sold_fraction[sel]))
     cur$sold_fraction[sel] <- ifelse(!is.na(sfR) & sfR > 0 & sfR < 1, sfR, NA_real_)
     # one-shot resume DEFERS FORWARD: re-stamp start_date to today so the single
@@ -7466,14 +7532,34 @@ server <- function(input, output, session) {
     # personal view changes - and it becomes truthful. Recurring cadences keep
     # their stored start; their next scheduled buy resumes per cadence + gate.
     once <- sel[as.character(cur$cadence[sel]) == "once"]
-    if (length(once)) cur$start_date[once] <- format(Sys.Date())
+    if (length(once)) {
+      cur$start_date[once] <- format(Sys.Date())
+      # a resumed one-off is a FRESH full-amount entry: the banked slices
+      # belong to the closed episode (still in the archive), so carrying the
+      # fraction forward under-displayed the new stake (audit 2026-08-23)
+      cur$sold_fraction[once] <- NA_real_
+    }
     persist_positions(cur); lc_pos(cur)
     showNotification(sprintf("%s resumed - buying continues per cadence/model.",
                              paste(toupper(cur$ticker[sel]), collapse = ", ")), type = "message")
   })
-  # Clear all = reset to defaults: wipe positions AND dismissals, so the next
-  # Generate re-seeds the current qualstream orange-+ buys from scratch.
+  # Clear all = reset to defaults: wipe positions AND dismissals. The wipe is
+  # DB-wide, not session-wide: rows the sync DAG adopted after this session
+  # connected are not in .lc_known, and without the union below they would
+  # survive the Clear and reappear on the next Generate (audit 2026-08-23).
   observeEvent(input$lcPosClear, {
+    if (identical(lc_backend(), "db")) {
+      con <- tryCatch(get_con(input), error = function(e) NULL)
+      if (!is.null(con)) {
+        on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+        db_ids <- tryCatch(as.character(
+          DBI::dbGetQuery(con, "SELECT id FROM portfolio.positions")$id),
+          error = function(e) character(0))
+        db_dis <- db_load_dismissed(con)
+        .lc_known$ids <- union(.lc_known$ids, db_ids)
+        .lc_known$dis <- union(.lc_known$dis, db_dis)
+      }
+    }
     persist_positions(portfolio_empty()); lc_pos(portfolio_empty())
     persist_dismissed(character(0)); lc_dismissed(character(0))
   })
@@ -7817,11 +7903,11 @@ server <- function(input, output, session) {
   # a loaded grade set so a grade-expiry cliff never blanks the view.
   lc_pos_disp <- reactive({
     # The personal book is NEVER filtered: every row is Kevin's real money
-    # (rebase 2026-08-22), and the sync legitimately adopts queue names that
-    # are ungraded (CVNA/HWM) or graded below the orange-+ bar (TTMI/CW at 62 -
-    # the queue ranks on grade, it does not gate). Two rounds of "why is my
-    # position missing" (2026-08-22/23) both traced to this filter; the
-    # qualstream checkbox now governs the BOARD columns only.
+    # (rebase 2026-08-22). The adopt queue gates at grade >= QS_MIN
+    # (policy 2026-08-23), but deliberately KEPT below-bar holdings (CVNA/HWM
+    # at 62) live here too - two rounds of "why is my position missing"
+    # (2026-08-22/23) both traced to a display filter on this book; the
+    # qualstream checkbox governs the BOARD columns only.
     lc_pos()
   })
 
@@ -7906,14 +7992,7 @@ server <- function(input, output, session) {
       return(DT::datatable(
         data.frame(Note = "No positions yet - Generate to auto-load the qualstream buys, or adopt a model BUY / add a manual plan above."),
         rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
-    # the qualstream-only checkbox (default on) filters the shown positions via
-    # lc_pos_disp; untick it to see every position. This note shows only when the
-    # filter removes them all, never when the book is genuinely empty (above).
-    p <- lc_pos_disp()
-    if (is.null(p) || nrow(p) == 0)
-      return(DT::datatable(
-        data.frame(Note = "No qualstream picks in the book - untick 'Show qualstream + picks only' to see all positions."),
-        rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
+    p <- lc_pos_disp()   # = the full book; the display filter was removed 2026-08-23
     dv  <- tryCatch(derivedLC(), error = function(e) NULL)
     d   <- app_dataLC()
     perf <- tryCatch(lc_row_perf(), error = function(e) NULL)
@@ -8030,12 +8109,15 @@ server <- function(input, output, session) {
         out[part] <- sprintf("banked %d%% ✓", round(100 * sfr[part]))
         out
       },
-      # proceeds of this row's archived partial-sale slices (realized money)
+      # proceeds of this row's archived partial-sale slices (realized money).
+      # Slices archive under suffixed ids (<id>~p1, ~p2 - the same-day
+      # trim+archive PK collision fix, 2026-08-23), so sum by the base id.
       Banked   = {
         cl <- lc_closed()
         b <- rep(NA_real_, nrow(p))
         if (!is.null(cl) && nrow(cl) && "id" %in% names(cl)) {
-          agg <- tapply(as.numeric(cl$value_usd), as.character(cl$id), sum, na.rm = TRUE)
+          base <- sub("~p[0-9]+$", "", as.character(cl$id))
+          agg <- tapply(as.numeric(cl$value_usd), base, sum, na.rm = TRUE)
           b <- as.numeric(agg[as.character(p$id)])
         }
         ifelse(is.finite(b) & b > 0, sprintf("$%.2f", b), "-")
@@ -8125,6 +8207,21 @@ server <- function(input, output, session) {
         SELECT ticker, to_char(as_of,'YYYY-MM-DD') AS as_of, state
         FROM portfolio.state_history WHERE hz = $1 ORDER BY ticker, as_of",
         params = list(as.integer(hz))), error = function(e) NULL)
+    # history accumulates across book rebases and archived names - show only
+    # tickers in the CURRENT book, and under the "my money" basis clip each
+    # trail to that position's own start date so the pre-entry (or pre-rebase
+    # simulated) era doesn't open the trail (audit 2026-08-23)
+    if (!is.null(h) && nrow(h)) {
+      h <- h[toupper(h$ticker) %in% toupper(as.character(p$ticker)), , drop = FALSE]
+      if (identical(lc_track_basis(), "stored") && nrow(h)) {
+        st0 <- tapply(as.character(p$start_date), toupper(as.character(p$ticker)),
+                      function(x) suppressWarnings(min(as.Date(x), na.rm = TRUE)))
+        lo <- as.numeric(st0[toupper(h$ticker)])
+        lo[!is.finite(lo)] <- NA_real_
+        keep <- is.na(lo) | as.Date(h$as_of) >= as.Date(lo, origin = "1970-01-01")
+        h <- h[keep, , drop = FALSE]
+      }
+    }
     if (is.null(h) || !nrow(h))
       return(note("No snapshots yet - re-Generate over the coming days to build each trail."))
     parts <- lapply(split(seq_len(nrow(h)), h$ticker), function(ix) {

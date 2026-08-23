@@ -16,7 +16,9 @@ set -u
 
 STAMP="$(date -u +'%F %T')"
 # DEADMAN_TODAY_OVERRIDE: test hook - set to an impossible date to dry-fire the
-# alert path end-to-end (the ping really sends). Unset in the crontab.
+# missing-run alert path end-to-end (the ping really sends). Unset in the crontab.
+# DEADMAN_STALE_OVERRIDE: test hook for the OTHER branch - set to a positive
+# number to dry-fire the stale-outbox alert without seeding unsent rows.
 TODAY="${DEADMAN_TODAY_OVERRIDE:-$(date -u +%F)}"
 
 ROW="$(docker exec airflow-scheduler bash -lc \
@@ -25,6 +27,7 @@ ROW="$(docker exec airflow-scheduler bash -lc \
 LAST="${ROW%%|*}"
 STALE_UNSENT="${ROW##*|}"
 [ -z "$ROW" ] && { LAST="query-failed"; STALE_UNSENT="0"; }
+STALE_UNSENT="${DEADMAN_STALE_OVERRIDE:-$STALE_UNSENT}"
 
 MSG=""
 if [ "$LAST" != "$TODAY" ]; then

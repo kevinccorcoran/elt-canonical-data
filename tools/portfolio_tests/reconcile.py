@@ -21,18 +21,25 @@ import portfolio_sync as PS
 
 con = psycopg2.connect(os.environ["DATABASE_URL"])
 cur = con.cursor()
-bucket, grade, cluster, qs_buys = PS.compute_board(cur)
+bucket, grade, cluster, qs_buys, exit_of = PS.compute_board(cur)
 cur.execute("SELECT DISTINCT upper(ticker) FROM portfolio.positions")
 tracked = {r[0] for r in cur.fetchall()}
+cur.execute("SELECT upper(ticker) FROM portfolio.dismissed")
+dismissed = {r[0] for r in cur.fetchall()}
 
 board_buys = {t for t, b in bucket.items() if b == "buy"}
 tracked_buy = sorted(tracked & board_buys)
+# dismissed names stay in the gated queue (compute_board doesn't read the
+# dismissed table; sync_core filters them at adopt time) - subtract them here
+# so a deliberately dropped name never reads as "should have been adopted"
+would_adopt = sorted(set(qs_buys) - tracked - dismissed)
 
 print(f"queue (capped adopt list)          : {len(qs_buys)} -> {', '.join(qs_buys)}")
 print(f"board buy-bucket total             : {len(board_buys)}")
 print(f"tracked rows                       : {len(tracked)} tickers")
 print(f"tracked AND in buy bucket          : {len(tracked_buy)} -> {', '.join(tracked_buy)}")
-print(f"in queue but NOT tracked           : {sorted(set(qs_buys) - tracked)}")
+print(f"in queue, untracked, undismissed   : {would_adopt}")
+print(f"in queue but dismissed (expected)  : {sorted(set(qs_buys) & dismissed)}")
 print(f"tracked buys NOT in queue (normal) : {sorted(set(tracked_buy) - set(qs_buys))}")
 
 cur.execute("""SELECT as_of, qs_buys, n_adopt, n_arch, n_recoup, sent
