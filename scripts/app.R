@@ -2651,24 +2651,21 @@ ui <- navbarPage(
   tabPanel("Lifecycle",
     sidebarLayout(
       make_sidebar("LC", "Lifecycle", tagList(
-        selectInput("holdLC", "Hold length (model horizons)",
+        selectInput("holdLC", "Hold length",
                     choices = c("1 month" = "1", "2 months" = "2", "4 months" = "4",
                                 "7 months" = "7", "12 months" = "12",
                                 "20 months" = "20", "33 months" = "33"),
                     selected = "12"),
-        tags$span(paste("Pick horizon + hold: the board replays the model's hz-month strategy",
-                        "from its own record (walk-forward top slots + daily ledger)."),
-                  style = "color:#64748b; font-size:0.7rem; display:block; margin-bottom:0.6rem;"),
-        tags$p(paste("buy = standing rec · hold = dropped but still in its window ·",
-                     "sell = exit (gate flip / matured / delisted) · closed = exited >1mo."),
+        tags$p(paste("buy = standing rec · hold = dropped, window open ·",
+                     "sell = exited · closed = exited >1mo"),
                style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;"),
         radioButtons("lcBoardLayout", "Board layout",
-                     choices = c("Columns (board)" = "columns", "Stacked" = "stacked"),
+                     choices = c("Columns" = "columns", "Stacked" = "stacked"),
                      selected = "columns", inline = TRUE),
-        checkboxInput("lcBuyQSonly", "Show qualstream + picks only (all columns)", value = TRUE),
-        checkboxInput("lcBuyStats", "Buy: also show win% · runs", value = FALSE),
-        checkboxInput("lcAllPins", "Chart: show all qualstream pins (every entry, no lines)", value = FALSE),
-        checkboxInput("lcAutoRefresh", "Auto-refresh board (every 20s)", value = FALSE),
+        checkboxInput("lcBuyQSonly", "Qualstream + picks only", value = TRUE),
+        checkboxInput("lcBuyStats", "Show win% · runs", value = FALSE),
+        checkboxInput("lcAllPins", "All qualstream pins", value = FALSE),
+        checkboxInput("lcAutoRefresh", "Auto-refresh (20s)", value = FALSE),
         uiOutput("idFilterLC")
       )),
       mainPanel(div(class = "main-card",
@@ -2683,17 +2680,16 @@ ui <- navbarPage(
         # --- My portfolio: strategy follower (model-linked DCA + ladder sells) ---
         tags$details(open = NA, class = "pf-wide",
           style = "border:1px solid #1e293b; border-radius:8px; padding:0.6rem 0.9rem; margin-bottom:1rem;",
-          tags$summary("My portfolio - strategy follower",
+          tags$summary("My portfolio",
             uiOutput("lcPortSummary", inline = TRUE)),
           div(
             div(style = "color:#64748b; font-size:0.72rem; margin-bottom:0.6rem;",
-                paste("Maintained by the daily portfolio_sync run (hands-off): every queue BUY is",
-                      "adopted automatically at the $ below, exits are archived to Realized, and",
-                      "Telegram pings tell you when to act - this table just shows the shared book.",
-                      "Add manual plans below; simulated fills at daily closes vs a same-cash SPY.")),
+                paste("Hands-off: daily portfolio_sync adopts every queue BUY at the $ below,",
+                      "archives exits to Realized, and Telegram pings when to act.",
+                      "Simulated fills at daily closes vs a same-cash SPY.")),
             div(style = "display:flex; gap:1rem; flex-wrap:wrap;",
               div(style = "max-width:220px;",
-                  numericInput("lcSeedAmt", "Auto-adopt $ per new BUY", value = 100, min = 1)),
+                  numericInput("lcSeedAmt", "$ per new BUY", value = 100, min = 1)),
               # audit 2026-08-21: trimming at +25/+50% costs -3.3/-1.5pp vs holding;
               # at +100% the recoup sale is performance-free (+0.3pp, coin flip),
               # so the never-lose-money rule defaults there.
@@ -2701,7 +2697,7 @@ ui <- navbarPage(
                   numericInput("lcRecoupThr", "Recoup alert at +%", value = 100, min = 10))),
             uiOutput("lcAdoptRow"),
             div(style = "color:#94a3b8; font-size:0.72rem; margin:0.5rem 0 0.15rem; font-weight:600;",
-                "Or add a manual plan"),
+                "Manual plan"),
             fluidRow(
               column(2, textInput("lcPosTicker", "Ticker", "")),
               column(2, numericInput("lcPosAmt", "$ per buy", value = 100, min = 1)),
@@ -2712,40 +2708,35 @@ ui <- navbarPage(
               column(3, dateInput("lcPosStart", "Start date", value = Sys.Date() - 365))
             ),
             div(style = "margin:0.1rem 0 0.6rem;",
-              actionButton("lcPosAdd", "Add manual", class = "btn-primary", style = "margin-right:0.4rem;"),
-              actionButton("lcPosRemove", "Remove selected", style = "margin-right:0.4rem;"),
-              actionButton("lcPosHold", "Hold selected", style = "margin-right:0.4rem;"),
-              actionButton("lcPosSell", "Sell selected", style = "margin-right:0.4rem;"),
+              actionButton("lcPosAdd", "Add", class = "btn-primary", style = "margin-right:0.4rem;"),
+              actionButton("lcPosRemove", "Remove", style = "margin-right:0.4rem;"),
+              actionButton("lcPosHold", "Hold", style = "margin-right:0.4rem;",
+                           title = "Pause buying; the position keeps valuing"),
+              actionButton("lcPosSell", "Sell", style = "margin-right:0.4rem;",
+                           title = "Record a full exit"),
               div(style = "display:inline-block;width:70px;margin-right:0.15rem;vertical-align:middle;",
                   numericInput("lcPartPct", NULL, value = 50, min = 1, max = 95, step = 1)),
               actionButton("lcPosSellPart", "Sell part %", style = "margin-right:0.4rem;",
-                           title = "Record a partial sale (e.g. after a recoup ping): archives the sold slice, the row keeps running on the remaining stake"),
-              actionButton("lcPosResume", "Resume selected", style = "margin-right:0.4rem;"),
-              actionButton("lcPosArchive", "Archive sold", style = "margin-right:0.4rem;"),
-              actionButton("lcPosClear", "Clear all")),
+                           title = "Record a partial sale (the recoup-ping action): the slice is archived as Banked $, the row keeps running on the rest"),
+              actionButton("lcPosResume", "Resume", style = "margin-right:0.4rem;",
+                           title = "Return the row to the model's flow"),
+              actionButton("lcPosArchive", "Archive", style = "margin-right:0.4rem;",
+                           title = "Move Sell-ed rows to the read-only Realized table, frozen at their exit numbers"),
+              actionButton("lcPosClear", "Clear")),
             div(style = "color:#64748b; font-size:0.7rem; margin:0.1rem 0 0.35rem;",
-                paste("id = cluster. Check rows (or the header box for all), then Remove / Hold /",
-                      "Sell / Resume. Hold pauses buying (the position keeps valuing); Sell",
-                      "records a full exit; Resume returns the row to the model's flow.",
-                      "Sell part % records a partial sale (the recoup-ping action): the slice is",
-                      "archived as realized money (Banked $) and the row keeps running on the rest.",
-                      "Archive sold moves rows you have ACTUALLY sold (Sell them first) to the",
-                      "read-only realized table below, frozen at their exit numbers.",
-                      "Double-click a $/buy cell to change that row's amount.",
-                      "Invested / Value / P&L / Return are that row's own accumulated buys;",
-                      "vs SPY is the same dollars run into SPY (pp = percentage-point edge);",
-                      "vs HODL is against lumping the whole stake in at the first fill;",
-                      "Model % is the model trade's own move since ITS entry (survives buy→hold).",
-                      "The chart below draws each holding's cumulative return against the same-cash SPY line.")),
+                paste("id = cluster · check rows, then act (hover a button for what it does) ·",
+                      "double-click $/buy to edit ·",
+                      "vs SPY = same dollars in SPY · vs HODL = one lump at first fill ·",
+                      "Model % = the model trade since its own entry.")),
             DT::DTOutput("lcPosTable"),
             uiOutput("lcChartFilter"),
             plotlyOutput("lcPortfolioChart", height = "340px"),
             uiOutput("lcPortfolioNote"),
             div(style = "color:#94a3b8; font-size:0.72rem; margin:0.8rem 0 0.15rem; font-weight:600;",
-                "Transition history - each position's Buy → Hold → Sell path over time"),
+                "Transition history"),
             DT::DTOutput("lcTransitionsTable"),
             div(style = "color:#94a3b8; font-size:0.72rem; margin:0.9rem 0 0.15rem; font-weight:600;",
-                "Realized - archived positions (read-only) · green = closed in profit, red = closed at a loss"),
+                "Realized · green = profit · red = loss"),
             DT::DTOutput("lcClosedTable")
           )
         )
@@ -7590,7 +7581,7 @@ server <- function(input, output, session) {
     cl <- lc_closed()
     if (is.null(cl) || !nrow(cl))
       return(DT::datatable(
-        data.frame(Note = "Nothing archived yet - Sell a row, then Archive sold once you have actually exited."),
+        data.frame(Note = "Nothing archived yet - Sell a row, then Archive once you have actually exited."),
         rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
     usd  <- function(x) ifelse(is.na(x), "-", paste0("$", formatC(round(as.numeric(x)), format = "d", big.mark = ",")))
     susd <- function(x) ifelse(is.na(x), "-", sprintf("%s$%s", ifelse(as.numeric(x) < 0, "-", "+"),
@@ -7821,26 +7812,13 @@ server <- function(input, output, session) {
   # sell and persistence paths keep reading lc_pos() (the full book). Guarded on
   # a loaded grade set so a grade-expiry cliff never blanks the view.
   lc_pos_disp <- reactive({
-    p <- lc_pos()
-    if (is.null(p) || !nrow(p) || !isTRUE(input$lcBuyQSonly)) return(p)
-    dv <- tryCatch(derivedLC(), error = function(e) NULL)
-    if (is.null(dv) || !length(dv$qs_grade)) return(p)
-    tk   <- toupper(p$ticker)
-    g_v  <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
-    # UNGRADED names stay visible: the queue ranks (not gates) on grade, so a
-    # persistence-ranked adopt like CVNA/HWM (2026-08-22) is real owned money
-    # that just has no scorecard yet - hiding it made the book look short. The
-    # filter only drops names that FAILED grading (< QS_MIN) or left the board.
-    keep <- is.na(g_v[tk]) | g_v[tk] >= QS_MIN
-    # match the board's orange-+ set: still ON the board (board_ok = cohort
-    # entry or proven at horizon today). A paused / dropped name keeps its old
-    # grade but is no longer a current board pick, so it leaves the qs-only
-    # view. Untick the box to see every position regardless.
-    if (!is.null(dv$board_ok)) {
-      bo   <- setNames(as.logical(dv$board_ok), toupper(names(dv$board_ok)))[tk]
-      keep <- keep & !is.na(bo) & bo
-    }
-    p[keep, , drop = FALSE]
+    # The personal book is NEVER filtered: every row is Kevin's real money
+    # (rebase 2026-08-22), and the sync legitimately adopts queue names that
+    # are ungraded (CVNA/HWM) or graded below the orange-+ bar (TTMI/CW at 62 -
+    # the queue ranks on grade, it does not gate). Two rounds of "why is my
+    # position missing" (2026-08-22/23) both traced to this filter; the
+    # qualstream checkbox now governs the BOARD columns only.
+    lc_pos()
   })
 
   lc_port_series <- reactive({
