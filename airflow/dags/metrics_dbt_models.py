@@ -7,6 +7,7 @@ from airflow.models import Variable
 from airflow.operators.bash import BashOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
+from utils.alerting import on_failure_telegram
 from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command, get_inference_dbt_bash_command, get_inference_dbt_deps_command
 
 
@@ -46,6 +47,7 @@ runtime_env = Variable.get("ENV", default_var="dev") # nudged for re-parse
 
 default_args = {
     "owner": "airflow",
+    "on_failure_callback": on_failure_telegram,
     "depends_on_past": False,
     "email_on_failure": False,
     "email_on_retry": False,
