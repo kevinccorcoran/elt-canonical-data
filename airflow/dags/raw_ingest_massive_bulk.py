@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 
+from utils.alerting import on_failure_telegram
 from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command
 
 # IMPORTANT:
@@ -11,6 +12,7 @@ PROJECT_ROOT = "/opt/elt-canonical-data"
 
 default_args = {
     "owner": "airflow",
+    "on_failure_callback": on_failure_telegram,
     "depends_on_past": False,
     "retries": 1,
     "retry_delay": timedelta(minutes=5),

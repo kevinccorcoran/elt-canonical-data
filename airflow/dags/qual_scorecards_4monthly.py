@@ -70,6 +70,8 @@ from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.bash import BashOperator
 
+from utils.alerting import on_failure_telegram
+
 QUALSTREAM_ROOT = Path(
     os.environ.get("QUALSTREAM_ROOT", Path(__file__).resolve().parents[1])
 )
@@ -89,6 +91,7 @@ HOLDS_FLAG = " --include-holds" if INCLUDE_HOLDS else ""
 
 default_args = {
     "owner": "airflow",
+    "on_failure_callback": on_failure_telegram,
     # Repo convention: explicit False (no SMTP configured anywhere). Failure
     # visibility is the Airflow UI + the board's checkpoint banner, which reads
     # MAX(as_of) from qual.ticker_scorecards rather than trusting the calendar.

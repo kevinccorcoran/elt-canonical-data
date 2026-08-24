@@ -6,6 +6,7 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
 
+from utils.alerting import on_failure_telegram
 from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command
 
 # ──────────────────────────────────────────────
@@ -50,6 +51,7 @@ def compute_prev_day(**context):
 
 default_args = {
     "owner": "airflow",
+    "on_failure_callback": on_failure_telegram,
     "depends_on_past": False,
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
