@@ -39,18 +39,21 @@ with create_session() as s:
         if not runs:
             continue
         latest = runs[0]
+        # Recency bounds: a retired DAG whose last-ever run failed in January
+        # must not nag forever (seen on first live run: 3 dead DAGs surfaced).
         if dag_id in STALE_DAGS:
             last_ok = next((r for r in runs if r.state == DagRunState.SUCCESS), None)
             lim = STALE_DAGS[dag_id]
             if not last_ok or (now - last_ok.start_date) > timedelta(hours=lim):
                 age = "never" if not last_ok else "%.1fh" % ((now - last_ok.start_date).total_seconds()/3600)
                 msgs.append("no successful %s run in %s" % (dag_id, age))
-        if latest.state == DagRunState.FAILED:
+        if latest.state == DagRunState.FAILED and (now - latest.start_date) < timedelta(hours=48):
             msgs.append("%s latest run FAILED (%s)" % (dag_id, latest.run_id))
         budget = STUCK_BUDGET_H.get(dag_id, STUCK_DEFAULT_H)
         if budget is not None:
             for r in runs:
-                if r.state == DagRunState.RUNNING and (now - r.start_date) > timedelta(hours=budget):
+                if (r.state == DagRunState.RUNNING
+                        and timedelta(hours=budget) < (now - r.start_date) < timedelta(days=14)):
                     h = (now - r.start_date).total_seconds()/3600
                     msgs.append("%s STUCK in running for %.1fh (budget %dh) - check locks/queues" % (dag_id, h, budget))
 if msgs:
