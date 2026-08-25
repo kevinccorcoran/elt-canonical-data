@@ -2738,6 +2738,9 @@ ui <- navbarPage(
         checkboxInput("lcBuyStats", "Show win% · runs", value = FALSE),
         checkboxInput("lcAllPins", "All qualstream pins", value = FALSE),
         checkboxInput("lcTopPerf", "Top performers (hindsight, any qs)", value = FALSE),
+        conditionalPanel("input.lcTopPerf == true",
+          numericInput("lcTopPerfN", "└ how many top performers", value = 15,
+                       min = 1, max = 200, step = 1)),
         checkboxInput("lcAutoRefresh", "Auto-refresh (20s)", value = FALSE),
         uiOutput("idFilterLC")
       )),
@@ -8819,7 +8822,8 @@ server <- function(input, output, session) {
   # still renders without pins.
   lc_top_perf <- reactive({
     if (!isTRUE(input$lcTopPerf)) return(NULL)
-    frac <- 0.10                                   # "very top" = top decile
+    N <- suppressWarnings(as.integer(input$lcTopPerfN))   # user-set count
+    if (is.na(N) || N < 1L) N <- 15L
     d   <- tryCatch(app_dataLC(), error = function(e) NULL)
     det <- if (!is.null(d)) d$qscmp_detail else NULL
     cmp <- if (!is.null(d)) d$qscmp else NULL
@@ -8837,7 +8841,7 @@ server <- function(input, output, session) {
       if (length(x)) x[length(x)] else NA_real_ })
     fin <- fin[!is.na(fin)]
     if (!length(fin)) return(NULL)
-    k <- max(1L, ceiling(frac * length(fin)))
+    k <- min(N, length(fin))                       # top N by realized return
     top_tk <- names(sort(fin, decreasing = TRUE))[seq_len(k)]
     dtop <- det[det$ticker %in% top_tk, , drop = FALSE]
     tvec <- tapply(dtop$ret, dtop$d, function(x) mean(x, na.rm = TRUE) * 100)
@@ -8865,16 +8869,21 @@ server <- function(input, output, session) {
         trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
                             prov_tk, now_state, dv$hz, dl_tk), error = function(e) NULL)
         if (is.null(trail) || !nrow(trail)) next
-        bd <- as.Date(trail$date[trail$state == "buy"])
-        bd <- bd[!is.na(bd) & bd >= anchor]
-        if (!length(bd)) next
-        out[[tk]] <- data.frame(ticker = toupper(tk), date = bd,
-                                y = vapply(bd, line_at, numeric(1)),
-                                stringsAsFactors = FALSE)
+        allbuys <- as.Date(trail$date[trail$state == "buy"])
+        allbuys <- allbuys[!is.na(allbuys)]
+        if (!length(allbuys)) next
+        inwin <- sort(allbuys[allbuys >= anchor])
+        if (length(inwin))                          # bought within the window
+          out[[length(out) + 1L]] <- data.frame(ticker = toupper(tk), date = inwin,
+              y = vapply(inwin, line_at, numeric(1)), kind = "buy",
+              stringsAsFactors = FALSE)
+        else                                        # held since before the window
+          out[[length(out) + 1L]] <- data.frame(ticker = toupper(tk), date = anchor,
+              y = line_at(anchor), kind = "carried", stringsAsFactors = FALSE)
       }
       if (length(out)) do.call(rbind, out) else NULL
     }, error = function(e) NULL)
-    list(line = line, pins = pins, n = length(top_tk), frac = frac, tickers = top_tk)
+    list(line = line, pins = pins, n = length(top_tk), tickers = top_tk)
   })
 
   output$lcPortfolioChart <- renderPlotly({
@@ -10076,16 +10085,32 @@ server <- function(input, output, session) {
     tp_suffix <- ""
     if (!is.null(tp) && !is.null(tp$line) && nrow(tp$line)) {
       fig <- add_trace(fig, x = tp$line$d, y = tp$line$ret, type = "scatter", mode = "lines",
-        name = sprintf("Top %d%% performers · hindsight, any qs (%d)",
-                       round(tp$frac * 100), tp$n),
+        name = sprintf("Top %d performers · hindsight, any qs", tp$n),
         line = list(color = "#e879f9", width = 2.5, dash = "dash"),
         hovertemplate = "Top performers (hindsight)<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
-      if (!is.null(tp$pins) && nrow(tp$pins))
-        fig <- add_markers(fig, x = tp$pins$date, y = tp$pins$y, showlegend = FALSE,
-          marker = list(color = "#34d399", size = 8, symbol = "circle",
-                        line = list(color = "#0b1220", width = 1)),
-          text = sprintf("%s BUY %s", tp$pins$ticker, format(tp$pins$date)),
-          hovertemplate = "%{text}<extra></extra>")
+      # buy pins ride the line, ticker-labelled: green = bought in-window,
+      # grey square = held since before the window (carried in at the anchor).
+      if (!is.null(tp$pins) && nrow(tp$pins)) {
+        bp <- tp$pins[tp$pins$kind == "buy", , drop = FALSE]
+        cp <- tp$pins[tp$pins$kind == "carried", , drop = FALSE]
+        if (nrow(bp))
+          fig <- add_trace(fig, x = bp$date, y = bp$y, type = "scatter",
+            mode = "markers+text", showlegend = FALSE, text = bp$ticker,
+            textposition = "top center", textfont = list(color = "#34d399", size = 9),
+            marker = list(color = "#34d399", size = 8, symbol = "circle",
+                          line = list(color = "#0b1220", width = 1)),
+            hovertext = sprintf("%s BUY %s", bp$ticker, format(bp$date)),
+            hovertemplate = "%{hovertext}<extra></extra>")
+        if (nrow(cp))
+          fig <- add_trace(fig, x = cp$date, y = cp$y, type = "scatter",
+            mode = "markers+text", showlegend = FALSE, text = cp$ticker,
+            textposition = "top center", textfont = list(color = "#94a3b8", size = 9),
+            marker = list(color = "#94a3b8", size = 9, symbol = "square-open",
+                          line = list(color = "#0b1220", width = 1)),
+            hovertext = sprintf("%s · held since before %s (bought pre-window)",
+                                cp$ticker, format(as.Date(d$qscmp_anchor))),
+            hovertemplate = "%{hovertext}<extra></extra>")
+      }
       tp_suffix <- " · top performers"
     }
     # Clicked-chip overlay: the ticker's own return line (white, on top) + a
