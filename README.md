@@ -6,6 +6,15 @@ AlphaStream is an end-to-end data and machine-learning system. It ingests time-s
 
 Over 2012–2024, its picks beat the benchmark by roughly 8 percentage points a year.
 
+## Project status
+
+**Build phase: complete.** The end-to-end system is deployed and running in prod on a schedule: ingestion, canonical layer, clustering and scoring, walk-forward validation, the qualitative LLM grade, and the front end. The selection gate in the modeling layer was **frozen on 2026-08-13** as a pre-registered forward test, so results can be graded out-of-sample without re-tuning on the same market history.
+
+Work from here is **monitoring and optimization**, not new construction:
+
+- **Monitor** — the pipeline runs unattended, with alerting on every DAG and two independent watchdogs (a pipeline watch and a portfolio deadman) that page when silence would otherwise be mistaken for health. See the [Operations Manual](docs/operations_manual.md).
+- **Do not re-tune before the checkpoints.** Any objective, sizing, or filter change resets the forward clock the freeze exists to measure. Optimization ideas are parked until the 6-/12-month checkpoints grade the frozen rules.
+
 ## Repositories
 
 AlphaStream is organized into three repositories:
@@ -138,8 +147,15 @@ Supports:
 - Integrated qualstream, a qualitative LLM grade on each selection
 - Built the Lifecycle decision board: enter, hold, or exit for every active selection
 
-**Ongoing**
-- Add a WhatsApp push channel for alerts on the standing selections
+**2026 Q3 — Hands-off Operation & Alerting**
+- Froze the selection gate as a pre-registered forward test (build phase complete)
+- Hands-off daily portfolio sync: adopt buys, snapshot states, archive sells
+- Telegram alerting on every DAG, with plain-language, action-first pings
+- Pipeline watch: stale / failed / stuck-run detection plus a host-disk page
+- Portfolio deadman: catches a missed sync, an undelivered ping, or reconcile drift outside Airflow
+
+**Ongoing — Monitoring & Optimization**
+- Grade the frozen selection against realized outcomes at the 6-/12-month checkpoints
 - Optimize and test the qualstream grading layer
 - Audit the design against a structured set of decision principles
 
