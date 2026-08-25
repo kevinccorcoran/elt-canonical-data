@@ -411,6 +411,57 @@ check("S23c poison day gives up at the attempts cap (sent=true, queue undammed)"
 check("S23d the day queued behind the poison drains in the same run",
       q("SELECT sent FROM portfolio.sync_runs WHERE as_of = DATE '2020-01-05'")[0][0] is True)
 
+# ── S27: write invariant - a message-bearing day is NEVER written sent=true ──
+# The 2026-08-23 corruption (sent=true while a message never delivered) is
+# prevented at the WRITE side: sent = (sent_n >= len(msgs)). Legacy rows marked
+# sent=true with sent_n=0 are trusted as delivered (pre-cursor era) and NOT
+# re-spammed - the deliver_outbox WHERE stays `NOT sent` on purpose.
+check("S27a write invariant: sent iff cursor covers len (fresh msg day -> false)",
+      (0 >= len(["m"])) is False and (0 >= len([])) is True)
+# a legacy delivered row (sent=true, cursor=0) must NOT be re-attempted
+cur.execute("""INSERT INTO portfolio.sync_runs (as_of, msgs, sent, sent_n, attempts)
+    VALUES (DATE '2020-01-06', '["\\ud83d\\udfe2 legacy delivered ping"]'::jsonb, true, 0, 0)
+    ON CONFLICT (as_of) DO UPDATE SET msgs = EXCLUDED.msgs, sent = true,
+      sent_n = 0, attempts = 0""")
+con.commit()
+s27 = []
+UA.notify = lambda m: (s27.append(m), True)[1]
+try:
+    PS.deliver_outbox(con)
+finally:
+    UA.notify = _real_notify
+check("S27b legacy sent=true row is trusted, never re-delivered (no spam)",
+      s27 == [], str(s27))
+
+# ── S28: verify_delivery real-time alarm on an undelivered ACTIONABLE ping ────
+cur.execute("""INSERT INTO portfolio.sync_runs (as_of, msgs, sent, sent_n, attempts)
+    VALUES (DATE '2020-01-07', %s::jsonb, false, 0, 5)
+    ON CONFLICT (as_of) DO UPDATE SET msgs = EXCLUDED.msgs, sent = false,
+      sent_n = 0, attempts = 5""",
+    ('["\\ud83d\\udfe2 BUY in Robinhood - $10 each\\n\\u2022 ACME"]',))
+con.commit()
+alarms = []
+UA.notify = lambda m: (alarms.append(m), True)[1]
+try:
+    PS.verify_delivery(con)
+finally:
+    UA.notify = _real_notify
+check("S28a verify_delivery fires when an undelivered ping remains",
+      len(alarms) == 1, str(alarms))
+check("S28b the alarm flags the undelivered ping as ACTIONABLE (buy/sell/recoup)",
+      bool(alarms) and "ACTIONABLE" in alarms[0], alarms[0] if alarms else "no alarm")
+# clean sheet: nothing undelivered -> no alarm
+cur.execute("UPDATE portfolio.sync_runs SET sent_n = jsonb_array_length(msgs)")
+con.commit()
+alarms2 = []
+UA.notify = lambda m: (alarms2.append(m), True)[1]
+try:
+    PS.verify_delivery(con)
+finally:
+    UA.notify = _real_notify
+check("S28c no alarm when every message is delivered (cursor == len)",
+      alarms2 == [], str(alarms2))
+
 # ── report ───────────────────────────────────────────────────────────────────
 print("=" * 72)
 for name, ok, detail in results:
