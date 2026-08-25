@@ -121,43 +121,42 @@ Supports:
 ## Project Timeline
 
 **2024 — Foundation**
-- ELT pipeline built on Python, dbt, and Airflow
+- ELT pipeline on Python, dbt, and Airflow
 - Initial canonical data model
 - Separate dev and staging environments
 
 **2025 — Scale**
-- Migrated ingestion to a new data provider after the previous one was deprecated
-- Consolidated multiple sources into a single pipeline
-- Added a metrics layer over the historical dataset
-- Moved pipeline execution to the cloud
+- Migrated ingestion to a new data provider
+- Consolidated multiple sources into one pipeline
+- Added a metrics layer over the history
+- Moved execution to the cloud
 
 **2026 Q1 — Production Infrastructure**
-- Codebase split into a public infrastructure repo and a private logic repo
-- Stack containerized with Docker
-- Hosting moved to DigitalOcean with managed PostgreSQL
+- Split into public infrastructure and private logic repos
+- Containerized the stack with Docker
+- Moved hosting to DigitalOcean with managed PostgreSQL
 
 **2026 Q2 — Forecasting & Front End**
-- Reworked the forecasting layer with walk-forward validation and trust scoring
-- Expanded the front end with new views for ranges, coverage, and clusters
+- Reworked forecasting with walk-forward validation and trust scoring
+- Added front-end views for ranges, coverage, and clusters
 - Added 300% data coverage, removing survivorship bias
 
 **2026 Q3 — Reliability & Data Quality**
-- Added point-in-time forecasting with a backtest replay and a live out-of-sample log
+- Point-in-time forecasting with backtest replay and a live log
 - Gated forecasts to the rank ranges with proven edge
-- Integrated qualstream, a qualitative LLM grade on each selection
-- Built the Lifecycle decision board: enter, hold, or exit for every active selection
+- Added qualstream, a qualitative LLM grade per selection
+- Built the Lifecycle board: enter, hold, or exit
 
 **2026 Q3 — Hands-off Operation & Alerting**
-- Froze the selection gate as a pre-registered forward test to grade it out of sample
-- Automated the daily portfolio maintenance to adopt buys, record states, and archive sells
-- Added plain-language alerts on every pipeline stage with a clear action to take
-- Added a pipeline watchdog for stalled, failed, and stuck runs and for low disk
-- Added an independent watchdog that catches a missed sync, an undelivered alert, or book-versus-board drift
+- Froze the selection gate as a pre-registered forward test
+- Automated daily portfolio maintenance: buys, states, sells
+- Plain-language alerts on every pipeline stage
+- Watchdogs for stalled runs, low disk, and missed syncs
 
 **Ongoing — Monitoring & Optimization**
 - Monitor the live selection against realized outcomes
 - Optimize and test the qualitative grading layer
-- Audit the design against a set of decision principles
+- Audit the design against decision principles
 
 ---
 
