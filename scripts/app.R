@@ -9964,10 +9964,22 @@ server <- function(input, output, session) {
       A <- tr$table; B <- tr$wtable
       if (!is.null(A) && nrow(A)) A <- A[insel(A$ticker), , drop = FALSE]
       if (!is.null(B) && nrow(B)) B <- B[insel(B$ticker), , drop = FALSE]
+      # Top-performers filter: when the box is on, the strip reflects the hindsight
+      # top-performer set so its numbers update with the selection. These are
+      # outcome-selected winners, so avg/win read high - flagged with a note below.
+      tp_lc <- tryCatch(lc_top_perf(), error = function(e) NULL)
+      tp_on <- !is.null(tp_lc) && length(tp_lc$tickers) > 0
+      if (tp_on) {
+        tset <- toupper(tp_lc$tickers)
+        if (!is.null(A) && nrow(A)) A <- A[toupper(A$ticker) %in% tset, , drop = FALSE]
+        if (!is.null(B) && nrow(B)) B <- B[toupper(B$ticker) %in% tset, , drop = FALSE]
+      }
       tr <- lc_track_agg(A, B)
       if (!isTRUE(tr$n > 0))
         return(div(style = "color:#64748b; font-size:0.72rem; margin:0.2rem 0 0.7rem;",
-                   "No board trades in the selected clusters - adjust the cluster-id filter."))
+                   if (tp_on)
+                     "No board-traded names among the top performers (they may be pre-window holds or names never on the board)."
+                   else "No board trades in the selected clusters - adjust the cluster-id filter."))
       pill <- function(lab, big, sub, accent, valcol = "#e2e8f0")
         div(style = paste0("flex:1 1 0; min-width:120px; background:rgba(148,163,184,0.04);",
               " border:1px solid #1e293b; border-left:3px solid ", accent,
@@ -9978,6 +9990,9 @@ server <- function(input, output, session) {
                 " font-variant-numeric:tabular-nums;"), valcol), big),
           if (nzchar(sub)) div(style = "color:#64748b; font-size:0.64rem; margin-top:0.1rem;", sub))
       div(style = "margin:0.2rem 0 0.7rem;",
+        if (tp_on) div(style = paste0("color:#e879f9; font-size:0.66rem; font-weight:600;",
+              " margin-bottom:0.35rem;"),
+          sprintf("↳ top performers (%d traded) · hindsight-selected winners, descriptive", tr$n)),
         # PRIMARY: the full buy->sell round-trip record (one economic position each)
         div(style = "display:flex; gap:0.5rem; flex-wrap:wrap; align-items:stretch;",
           pill("trades", as.character(tr$n),
