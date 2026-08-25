@@ -2738,9 +2738,6 @@ ui <- navbarPage(
         checkboxInput("lcBuyStats", "Show win% · runs", value = FALSE),
         checkboxInput("lcAllPins", "All qualstream pins", value = FALSE),
         checkboxInput("lcTopPerf", "Top performers (hindsight, any qs)", value = FALSE),
-        conditionalPanel("input.lcTopPerf == true",
-          numericInput("lcTopPerfN", "└ how many top performers", value = 15,
-                       min = 1, max = 200, step = 1)),
         checkboxInput("lcAutoRefresh", "Auto-refresh (20s)", value = FALSE),
         uiOutput("idFilterLC")
       )),
@@ -8822,8 +8819,6 @@ server <- function(input, output, session) {
   # still renders without pins.
   lc_top_perf <- reactive({
     if (!isTRUE(input$lcTopPerf)) return(NULL)
-    N <- suppressWarnings(as.integer(input$lcTopPerfN))   # user-set count
-    if (is.na(N) || N < 1L) N <- 15L
     d   <- tryCatch(app_dataLC(), error = function(e) NULL)
     det <- if (!is.null(d)) d$qscmp_detail else NULL
     cmp <- if (!is.null(d)) d$qscmp else NULL
@@ -8840,9 +8835,16 @@ server <- function(input, output, session) {
     fin <- tapply(det$ret, det$ticker, function(x) { x <- x[!is.na(x)]
       if (length(x)) x[length(x)] else NA_real_ })
     fin <- fin[!is.na(fin)]
-    if (!length(fin)) return(NULL)
-    k <- min(N, length(fin))                       # top N by realized return
-    top_tk <- names(sort(fin, decreasing = TRUE))[seq_len(k)]
+    if (length(fin) < 4) return(NULL)              # too few to define a tier
+    # DYNAMIC cutoff: names whose realized return clears mean + 1 SD of the buy
+    # universe - the count emerges from the distribution (wide when returns are
+    # dispersed, tight when bunched), never a hand-picked N.
+    mu <- mean(fin); sdv <- stats::sd(fin)
+    if (is.na(sdv) || sdv <= 0) return(NULL)
+    thr <- mu + sdv
+    top_tk <- names(fin)[fin >= thr]
+    if (!length(top_tk)) return(NULL)
+    top_tk <- top_tk[order(fin[top_tk], decreasing = TRUE)]
     dtop <- det[det$ticker %in% top_tk, , drop = FALSE]
     tvec <- tapply(dtop$ret, dtop$d, function(x) mean(x, na.rm = TRUE) * 100)
     line <- data.frame(d = as.Date(cmp$d),
@@ -10085,7 +10087,7 @@ server <- function(input, output, session) {
     tp_suffix <- ""
     if (!is.null(tp) && !is.null(tp$line) && nrow(tp$line)) {
       fig <- add_trace(fig, x = tp$line$d, y = tp$line$ret, type = "scatter", mode = "lines",
-        name = sprintf("Top %d performers · hindsight, any qs", tp$n),
+        name = sprintf("Top performers ≥ mean+1σ · hindsight, any qs (%d)", tp$n),
         line = list(color = "#e879f9", width = 2.5, dash = "dash"),
         hovertemplate = "Top performers (hindsight)<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
       # buy pins ride the line, ticker-labelled: green = bought in-window,
