@@ -2738,6 +2738,7 @@ ui <- navbarPage(
         checkboxInput("lcBuyStats", "Show win% · runs", value = FALSE),
         checkboxInput("lcAllPins", "All qualstream pins", value = FALSE),
         checkboxInput("lcTopPerf", "Top performers (hindsight, any qs)", value = FALSE),
+        checkboxInput("lcAllPickLines", "All qualstream pick lines (white)", value = FALSE),
         checkboxInput("lcAutoRefresh", "Auto-refresh (20s)", value = FALSE),
         uiOutput("idFilterLC")
       )),
@@ -8828,6 +8829,71 @@ server <- function(input, output, session) {
     do.call(rbind, out)
   })
 
+  # ── All qualstream pick lines (white spaghetti) ──────────────────────────
+  # Opt-in (checkbox lcAllPickLines, OFF by default). Every passed-qualstream
+  # board name drawn as its OWN faint white return line - the green aggregate
+  # decomposed into its constituents, so the spread hiding behind the average
+  # shows. Same name set + cluster filter as lc_all_pins, but lines, no pins.
+  # A clicked chip's single overlay still draws bright white on top, so the
+  # focused name stands out of the pack (both are unset here in focus mode? no -
+  # unlike all-pins we do NOT hide in focus, the overlay just rides brighter).
+  lc_pick_lines <- reactive({
+    if (!isTRUE(input$lcAllPickLines)) return(NULL)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    if (is.null(dv) || is.null(dv$M)) return(NULL)
+    d <- app_dataLC()
+    anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
+    if (is.na(anchor)) return(NULL)
+    # qs-pass board names: grade >= QS_MIN AND on the board in a live state
+    grade_u <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+    tks <- dv$tickers[
+      dv$board_ok[dv$tickers] %in% TRUE &
+      dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
+      !is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN]
+    # cluster-id view filter (match the board + the sketch lines + all-pins)
+    sel_id <- lc_board_ids_sel()
+    if (!is.null(sel_id)) {
+      idc <- if (!is.null(d$gate$id))
+               setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker))
+             else setNames(integer(0), character(0))
+      if (!is.null(d$coh) && nrow(d$coh) > 0) {
+        ex <- d$coh[!(toupper(d$coh$ticker) %in% names(idc)), c("ticker", "id")]
+        ex <- ex[!duplicated(toupper(ex$ticker)), , drop = FALSE]
+        if (nrow(ex)) idc <- c(idc, setNames(as.integer(ex$id), toupper(ex$ticker)))
+      }
+      if (!length(sel_id)) tks <- tks[FALSE]
+      else { ii <- idc[toupper(tks)]; tks <- tks[is.na(ii) | ii %in% as.integer(sel_id)] }
+    }
+    if (!length(tks)) return(NULL)
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
+    px <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
+       WHERE ticker IN (%s) AND date >= '%s'
+         AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
+       ORDER BY ticker, date", inlist, format(anchor))), error = function(e) NULL)
+    if (is.null(px) || !nrow(px)) return(NULL)
+    px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
+    asof <- function(df, dd) { s <- df[df$d <= dd, , drop = FALSE]
+      if (!nrow(s)) NA_real_ else s$px[nrow(s)] }
+    out <- list()
+    for (tk in tks) {
+      tkr <- px[toupper(px$ticker) == toupper(tk), , drop = FALSE]
+      if (!nrow(tkr)) next
+      tkr <- tkr[order(tkr$d), , drop = FALSE]
+      base_tk <- asof(tkr, anchor); if (is.na(base_tk)) base_tk <- tkr$px[1]
+      if (is.na(base_tk) || base_tk == 0) next
+      tkr$ret <- (tkr$px / base_tk - 1) * 100          # rebase each to 0% at anchor
+      lo <- tkr[tkr$d >= anchor, c("d", "ret"), drop = FALSE]
+      if (!nrow(lo)) next
+      out[[toupper(tk)]] <- lo
+    }
+    if (!length(out)) return(NULL)
+    list(lines = out, n = length(out))
+  })
+
   # ── Top-performers (hindsight) line ──────────────────────────────────────
   # Opt-in (checkbox lcTopPerf, OFF by default). The top decile of the sketch's
   # BUY universe by REALIZED window return, ignoring qualstream pass/fail. This
@@ -10172,6 +10238,27 @@ server <- function(input, output, session) {
       }
       tp_suffix <- " · top performers"
     }
+    # All qualstream pick lines (opt-in, off by default): every passed-qualstream
+    # name as its OWN faint white return line - the green aggregate decomposed
+    # into its constituents. Lines only, no pins; one shared legend row toggles
+    # the whole bundle. A clicked chip's overlay draws brighter (below) on top so
+    # the focused name stands out of the pack.
+    pl <- tryCatch(lc_pick_lines(), error = function(e) NULL)
+    pl_suffix <- ""
+    if (!is.null(pl) && length(pl$lines)) {
+      first <- TRUE
+      for (nm in names(pl$lines)) {
+        ln <- pl$lines[[nm]]
+        fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
+          name = sprintf("Qualstream pick lines (%d)", pl$n),
+          legendgroup = "picklines", showlegend = first,
+          line = list(color = "rgba(248,250,252,0.30)", width = 1),
+          hovertext = nm,
+          hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
+        first <- FALSE
+      }
+      pl_suffix <- sprintf(" · %d pick lines", pl$n)
+    }
     # Clicked-chip overlay: the ticker's own return line (white, on top) + a
     # flag-pin at each lifecycle event, colored by state, labelled "<TK> BUY"
     # etc. with the growth-since-previous-pin (own %, and pp vs SPY) on hover.
@@ -10314,8 +10401,10 @@ server <- function(input, output, session) {
       # headroom so the upward label stack never clips against the plot top
       # (tuned to the tighter 13px-per-level stack + size-9 labels above)
       tpret <- if (!is.null(tp) && !is.null(tp$line)) tp$line$ret else numeric(0)
-      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret), na.rm = TRUE)
-      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, 0), na.rm = TRUE)
+      plret <- if (!is.null(pl) && length(pl$lines))
+                 unlist(lapply(pl$lines, function(x) x$ret), use.names = FALSE) else numeric(0)
+      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret), na.rm = TRUE)
+      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
       ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.085 * max(lvl)))
       ap_suffix <- " · all qualstream pins"
@@ -10327,7 +10416,7 @@ server <- function(input, output, session) {
     dark_layout(fig,
       title = list(text = paste0(sprintf(
           "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s",
-          format(d$qscmp_anchor, "%b %d")), cl_suffix, ov_suffix, ap_suffix, tp_suffix),
+          format(d$qscmp_anchor, "%b %d")), cl_suffix, ov_suffix, ap_suffix, tp_suffix, pl_suffix),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
@@ -10407,7 +10496,17 @@ server <- function(input, output, session) {
         span(style = "color:#f87171;", "sell"),
         "; label = ticker, dot at its own return, no lines. Hover a dot for its move.")
       else NULL
-    tagList(ov_note, ap_note,
+    pl_note <- if (isTRUE(input$lcAllPickLines))
+      div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+        span(style = "color:#f8fafc; font-weight:700;", "All qualstream pick lines on"),
+        " - every passed-qualstream (>= 68) board name as its own ",
+        span(style = "color:#f8fafc;", "faint white line"),
+        ", each rebased to 0% at the anchor. Hover a line for its ticker and return. ",
+        "The ", span(style = "color:#10b981;", "green line"),
+        " is their average - these are the paths behind it. Click a chip to brighten ",
+        "one out of the pack.")
+      else NULL
+    tagList(ov_note, ap_note, pl_note,
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
       sprintf(paste("Descriptive, not a walk-forward test: one retroactive grade run (%s) applied",
                     "backward, so membership is hindsight-picked - trust green-vs-orange, not either",
