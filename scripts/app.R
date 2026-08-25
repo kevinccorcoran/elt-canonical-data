@@ -8885,7 +8885,8 @@ server <- function(input, output, session) {
       }
       if (length(out)) do.call(rbind, out) else NULL
     }, error = function(e) NULL)
-    list(line = line, pins = pins, n = length(top_tk), tickers = top_tk)
+    list(line = line, pins = pins, n = length(top_tk), tickers = top_tk,
+         rets = round(fin[top_tk] * 100, 1))   # window return %, named by ticker
   })
 
   output$lcPortfolioChart <- renderPlotly({
@@ -9987,10 +9988,24 @@ server <- function(input, output, session) {
             if (isTRUE(input$lcBuyQSonly)) "qualstream+ name" else "board name",
             format(as.Date(LEDGER_EPOCH), "%b %d"))))
     })
+    # Top-performers column (opt-in via the lcTopPerf checkbox): the hindsight
+    # winners as clickable chips. chipf wires each to lcBoardClick, so clicking one
+    # overlays its white line on the sketch exactly like a buy/hold/sell chip. NULL
+    # when the box is off, so the board layout is untouched then.
+    tp_lc    <- tryCatch(lc_top_perf(), error = function(e) NULL)
+    tp_ticks <- if (!is.null(tp_lc)) tp_lc$tickers else character(0)
+    tp_notes <- if (length(tp_ticks)) sprintf("%+.1f%%", unname(tp_lc$rets[tp_ticks])) else character(0)
+    tp_col   <- if (length(tp_ticks))
+      kanban_col("top performers", "#e879f9", tp_ticks, tp_notes,
+                 "hindsight ≥ mean+1σ · click a name for its line",
+                 n_total = length(tp_ticks))
     if (identical(input$lcBoardLayout, "stacked")) {
       tagList(
         notes,
         track_strip,
+        if (length(tp_ticks))
+          section("top performers - hindsight ≥ mean+1σ (click for its line)",
+                  "#e879f9", tp_ticks, tp_notes, max_h = 220),
         section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
         section(sprintf("%s (%d of %d shown)", buy_title_stacked,
                         length(buys_shown), length(buys_all)),
@@ -10005,18 +10020,23 @@ server <- function(input, output, session) {
       tagList(
         notes,
         track_strip,
-        div(style = paste0("display:grid; grid-template-columns:repeat(3, minmax(0,1fr));",
-                           " gap:0.6rem; align-items:stretch; margin-bottom:0.5rem;"),
-          kanban_col("buy", col_of[["buy"]], buys_shown, b_note2, buy_sub,
-                     n_total = length(buys_all)),
-          kanban_col("hold", col_of[["hold"]], holds, h_note,
-                     if (buys_qsonly) "qualstream + only · entry · % of horizon"
-                     else "dropped recs · entry · % of horizon",
-                     n_total = length(holds_all)),
-          kanban_col("sell", col_of[["sell"]], sells, unname(why[sells]),
-                     if (buys_qsonly) "qualstream + only · exit now · reason"
-                     else "exit now · reason",
-                     n_total = length(sells_all))),
+        local({
+          cols <- list(
+            kanban_col("buy", col_of[["buy"]], buys_shown, b_note2, buy_sub,
+                       n_total = length(buys_all)),
+            kanban_col("hold", col_of[["hold"]], holds, h_note,
+                       if (buys_qsonly) "qualstream + only · entry · % of horizon"
+                       else "dropped recs · entry · % of horizon",
+                       n_total = length(holds_all)),
+            kanban_col("sell", col_of[["sell"]], sells, unname(why[sells]),
+                       if (buys_qsonly) "qualstream + only · exit now · reason"
+                       else "exit now · reason",
+                       n_total = length(sells_all)))
+          if (!is.null(tp_col)) cols <- c(list(tp_col), cols)   # top performers first
+          do.call(div, c(list(style = sprintf(paste0("display:grid;",
+                    " grid-template-columns:repeat(%d, minmax(0,1fr)); gap:0.6rem;",
+                    " align-items:stretch; margin-bottom:0.5rem;"), length(cols))), cols))
+        }),
         shadow_block,
         closed_foot)
     }
