@@ -8639,7 +8639,29 @@ server <- function(input, output, session) {
     if (qs_crossed)
       ev <- rbind(ev, data.frame(date = qa_d, kind = "qualstream",
                                  state = "qualstream", stringsAsFactors = FALSE))
-    if (!nrow(ev)) return(list(tk = tk, no_events = TRUE))
+    if (!nrow(ev)) {
+      # No board events for this name (e.g. a top-performer that was never a
+      # current board ticker). Still draw its own rebased price line so a
+      # table->viz click behaves like a buy/hold/sell chip - just no pins.
+      pxo <- tryCatch(dbGetQuery(con, sprintf(
+        "SELECT date::text AS d, adj_close AS px FROM cdm.ingest_combined
+         WHERE ticker = '%s' AND date >= '%s'
+           AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
+         ORDER BY date", tkq, format(anchor))), error = function(e) NULL)
+      if (is.null(pxo) || !nrow(pxo)) return(list(tk = tk, no_events = TRUE))
+      pxo$d <- as.Date(pxo$d); pxo$px <- as.numeric(pxo$px)
+      pxo <- pxo[order(pxo$d), , drop = FALSE]
+      b <- pxo$px[pxo$d >= anchor][1]; if (is.na(b) || b == 0) b <- pxo$px[1]
+      if (is.na(b) || b == 0) return(list(tk = tk, no_events = TRUE))
+      pxo$ret <- (pxo$px / b - 1) * 100
+      lo <- pxo[pxo$d >= anchor, c("d", "ret"), drop = FALSE]
+      if (!nrow(lo)) return(list(tk = tk, no_events = TRUE))
+      return(list(tk = tk, line = lo, passed = FALSE,
+        ev = data.frame(date = as.Date(character(0)), kind = character(0),
+          state = character(0), ret = numeric(0), own = numeric(0),
+          vsspy = numeric(0), px = numeric(0), spx = numeric(0),
+          stringsAsFactors = FALSE)))
+    }
     # prices from min(anchor, first event) so a pre-anchor entry still prices the
     # first in-window pin's growth; the LINE is rebased at the anchor bar below.
     px_start <- min(anchor, min(as.Date(ev$date)))
