@@ -2,9 +2,12 @@
 # Deadman for the hands-off portfolio loop: silence must mean "healthy", so
 # something OUTSIDE Airflow has to notice when the daily portfolio_sync run
 # never happened (dead scheduler, stuck chain, import error - all of which
-# produce no failure callback). Alerts on two conditions:
+# produce no failure callback). Alerts on three conditions:
 #   1. no portfolio.sync_runs row for today (the run never completed)
 #   2. undelivered pings older than today (Telegram kept failing across runs)
+#   3. reconcile drift: an OPEN book position reads SELL on the board but was
+#      not archived (the sync archives SELL-flips every run, so a survivor is a
+#      stuck archive, not transient drift - low-noise by construction)
 #
 # Install on the droplet (root crontab; the chain finishes ~10:00 UTC, so
 # 16:30 UTC leaves generous slack before alerting):
@@ -29,11 +32,21 @@ STALE_UNSENT="${ROW##*|}"
 [ -z "$ROW" ] && { LAST="query-failed"; STALE_UNSENT="0"; }
 STALE_UNSENT="${DEADMAN_STALE_OVERRIDE:-$STALE_UNSENT}"
 
+# Reconcile drift: open positions the board now reads SELL but the sync did not
+# archive. DEADMAN_DRIFT_OVERRIDE dry-fires this branch without seeding rows.
+DRIFT="$(docker exec airflow-scheduler bash -lc \
+  "psql \"\$DATABASE_URL\" -tA -c \"SELECT count(*) FROM portfolio.positions p WHERE p.sold_date IS NULL AND EXISTS (SELECT 1 FROM serving.return_cluster_ticker_global_action_current g WHERE upper(g.ticker) = upper(p.ticker) AND g.global_action = 'SELL')\"" \
+  2>/dev/null)" || DRIFT="0"
+[ -z "$DRIFT" ] && DRIFT="0"
+DRIFT="${DEADMAN_DRIFT_OVERRIDE:-$DRIFT}"
+
 MSG=""
 if [ "$LAST" != "$TODAY" ]; then
   MSG="🚨 portfolio_sync did NOT run today (last: $LAST). The daily chain or the scheduler is down - check Airflow on the droplet. Until it runs: no adopts, no sell/recoup pings."
 elif [ "${STALE_UNSENT:-0}" -gt 0 ] 2>/dev/null; then
   MSG="🚨 portfolio_sync ran, but $STALE_UNSENT day(s) of Telegram pings are still undelivered (outbox). Telegram delivery is failing - check TELEGRAM_* env / network on the droplet."
+elif [ "${DRIFT:-0}" -gt 0 ] 2>/dev/null; then
+  MSG="🚨 $DRIFT open book position(s) read SELL on the board but were NOT archived by today's sync - the archive step may be stuck. Check portfolio_sync and the board."
 fi
 
 if [ -z "$MSG" ]; then
