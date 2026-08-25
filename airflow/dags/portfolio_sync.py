@@ -560,6 +560,57 @@ def deliver_outbox(con):
         break  # keep chronological order; later days wait behind this one
 
 
+def verify_delivery(con):
+    """Real-time money-path alarm: after deliver_outbox, any message still
+    short of its cursor (sent_n < len) is a ping that did NOT reach the phone
+    THIS run. The old design only learned of this from the 16:30 deadman the
+    NEXT day, and only for whole unsent days - a single BUY instruction could
+    vanish for hours unnoticed (2026-08-23). This pings immediately, checks the
+    CURSOR not the `sent` flag (so a mis-flagged row can't hide), and calls out
+    when an undelivered ping is an actionable BUY/SELL/recoup vs a narrative.
+    Best-effort: never raises into the sync."""
+    try:
+        from utils.alerting import notify
+    except Exception:
+        log.exception("alerting unavailable - delivery verification skipped")
+        return
+    try:
+        cur = con.cursor()
+        # Scope to NOT sent: the write-side invariant (sent = cursor >= len, in
+        # run()) guarantees a still-unsent row is genuinely undelivered, so this
+        # never fires on the legacy pre-cursor rows (sent=true, sent_n=0 default)
+        # that a bare `cursor < len` would wrongly flag - the trap that a first
+        # cut of this fix fell into.
+        rows = _rows(cur, """
+            SELECT as_of, msgs, COALESCE(sent_n, 0)
+            FROM portfolio.sync_runs
+            WHERE NOT sent AND COALESCE(sent_n, 0) < jsonb_array_length(msgs)
+            ORDER BY as_of""")
+        undelivered = []
+        for as_of, msgs, sent_n in rows:
+            undelivered.extend(str(m) for m in list(msgs)[sent_n:])
+        if not undelivered:
+            return
+        # An actionable ping starts with one of the money emojis (BUY/SELL/
+        # recoup); a board-narrative line does not.
+        action_markers = ("\U0001F7E2", "\U0001F534", "\U0001F3AF")  # 🟢 🔴 🎯
+        n_action = sum(1 for m in undelivered if m[:4].strip().startswith(action_markers))
+        head = (f"\U0001F6A8 {len(undelivered)} board ping(s) FAILED to deliver "
+                f"(Telegram down?)")
+        if n_action:
+            head += f" - {n_action} ACTIONABLE (buy/sell/recoup) - check the dashboard now"
+        # Try to surface the first actionable body so the trade isn't lost even
+        # if only this alarm gets through.
+        first_action = next((m for m in undelivered
+                             if m[:4].strip().startswith(action_markers)), None)
+        body = ("\n—\n" + first_action[:600]) if first_action else ""
+        if not notify(head + body):
+            log.error("verify_delivery: alarm itself failed to send - "
+                      "%d undelivered, %d actionable", len(undelivered), n_action)
+    except Exception:
+        log.exception("verify_delivery errored (swallowed)")
+
+
 def run(dry=False):
     # env guard: this maintains the PROD book only (local schedulers skip).
     # An UNRESOLVABLE env raises instead of quietly defaulting to dev (audit
@@ -654,12 +705,13 @@ def run(dry=False):
                   n_recoup = EXCLUDED.n_recoup, msgs = EXCLUDED.msgs,
                   sent = EXCLUDED.sent, sent_n = EXCLUDED.sent_n""",
                 (today, qs_buys, len(adopts), snaps, len(archived),
-                 len(recoups), json.dumps(day_msgs), not day_msgs,
-                 keep_sent_n))
+                 len(recoups), json.dumps(day_msgs),
+                 keep_sent_n >= len(day_msgs), keep_sent_n))
             con.commit()
             # 4. PING after commit (a failed write can't produce a false ping;
             # a failed ping is retried from the outbox, never lost)
             deliver_outbox(con)
+            verify_delivery(con)
             log.info("sync done: %d adopted, %d snapshots, %d archived, %d recoup",
                      len(adopts), snaps, len(archived), len(recoups))
     finally:
