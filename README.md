@@ -149,7 +149,7 @@ Supports:
 
 **2026 Q3 — Hands-off Operation & Alerting**
 - Froze the selection gate as a pre-registered forward test
-- Automated daily portfolio maintenance: buys, states, sells
+- Automated daily portfolio maintenance: enter, hold, or exit
 - Plain-language alerts on every pipeline stage
 - Watchdogs for stalled runs, low disk, and missed syncs
 
