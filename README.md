@@ -148,16 +148,16 @@ Supports:
 - Built the Lifecycle decision board: enter, hold, or exit for every active selection
 
 **2026 Q3 — Hands-off Operation & Alerting**
-- Froze the selection gate as a pre-registered forward test (build phase complete)
-- Hands-off daily portfolio sync: adopt buys, snapshot states, archive sells
-- Telegram alerting on every DAG, with plain-language, action-first pings
-- Pipeline watch: stale / failed / stuck-run detection plus a host-disk page
-- Portfolio deadman: catches a missed sync, an undelivered ping, or reconcile drift outside Airflow
+- Froze the selection gate as a pre-registered forward test to grade it out of sample
+- Automated the daily portfolio maintenance to adopt buys, record states, and archive sells
+- Added plain-language alerts on every pipeline stage with a clear action to take
+- Added a pipeline watchdog for stalled, failed, and stuck runs and for low disk
+- Added an independent watchdog that catches a missed sync, an undelivered alert, or book-versus-board drift
 
 **Ongoing — Monitoring & Optimization**
-- Grade the frozen selection against realized outcomes at the 6-/12-month checkpoints
-- Optimize and test the qualstream grading layer
-- Audit the design against a structured set of decision principles
+- Monitor the live selection against realized outcomes
+- Optimize and test the qualitative grading layer
+- Audit the design against a set of decision principles
 
 ---
 
