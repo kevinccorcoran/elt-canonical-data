@@ -2737,6 +2737,7 @@ ui <- navbarPage(
         checkboxInput("lcBuyQSonly", "Qualstream + picks only", value = TRUE),
         checkboxInput("lcBuyStats", "Show win% · runs", value = FALSE),
         checkboxInput("lcAllPins", "All qualstream pins", value = FALSE),
+        checkboxInput("lcTopPerf", "Top performers (hindsight, any qs)", value = FALSE),
         checkboxInput("lcAutoRefresh", "Auto-refresh (20s)", value = FALSE),
         uiOutput("idFilterLC")
       )),
@@ -8805,6 +8806,77 @@ server <- function(input, output, session) {
     do.call(rbind, out)
   })
 
+  # ── Top-performers (hindsight) line ──────────────────────────────────────
+  # Opt-in (checkbox lcTopPerf, OFF by default). The top decile of the sketch's
+  # BUY universe by REALIZED window return, ignoring qualstream pass/fail. This
+  # is an explicit HINDSIGHT ceiling: it is selected on the outcome and is NOT
+  # achievable ex ante, so the render draws it dashed and labels it "hindsight".
+  # Universe = qscmp_detail (current BUYs that were qs-graded); "regardless of
+  # qualstream" means the >=68 pass/fail split is ignored, NOT that buys
+  # qualstream never graded are pulled in (that would need a wider source).
+  # Buy pins reuse the board lifecycle trail (lc_board_trail), buy events only,
+  # riding this line; best-effort - if the derived model isn't ready the line
+  # still renders without pins.
+  lc_top_perf <- reactive({
+    if (!isTRUE(input$lcTopPerf)) return(NULL)
+    frac <- 0.10                                   # "very top" = top decile
+    d   <- tryCatch(app_dataLC(), error = function(e) NULL)
+    det <- if (!is.null(d)) d$qscmp_detail else NULL
+    cmp <- if (!is.null(d)) d$qscmp else NULL
+    if (is.null(det) || !nrow(det) || is.null(cmp) || !nrow(cmp)) return(NULL)
+    # mirror the sketch's cluster narrowing so the line tracks the visible board
+    sel_raw  <- lc_board_ids_sel()
+    sel_ids  <- suppressWarnings(as.integer(sel_raw))
+    avail_id <- tryCatch(lc_board_filter_ids(), error = function(e) integer(0))
+    if (!is.null(sel_raw) && length(sel_ids) > 0 && !setequal(sel_ids, avail_id))
+      det <- det[!is.na(det$id) & det$id %in% sel_ids, , drop = FALSE]
+    if (!nrow(det)) return(NULL)
+    # final realized return per ticker = its last non-NA ret in the window
+    det <- det[order(det$ticker, det$d), , drop = FALSE]
+    fin <- tapply(det$ret, det$ticker, function(x) { x <- x[!is.na(x)]
+      if (length(x)) x[length(x)] else NA_real_ })
+    fin <- fin[!is.na(fin)]
+    if (!length(fin)) return(NULL)
+    k <- max(1L, ceiling(frac * length(fin)))
+    top_tk <- names(sort(fin, decreasing = TRUE))[seq_len(k)]
+    dtop <- det[det$ticker %in% top_tk, , drop = FALSE]
+    tvec <- tapply(dtop$ret, dtop$d, function(x) mean(x, na.rm = TRUE) * 100)
+    line <- data.frame(d = as.Date(cmp$d),
+                       ret = round(as.numeric(tvec[as.character(cmp$d)]), 2),
+                       stringsAsFactors = FALSE)
+    line <- line[!is.na(line$ret), , drop = FALSE]
+    if (!nrow(line)) return(NULL)
+    pins <- tryCatch({
+      dv <- derivedLC()
+      anchor <- as.Date(d$qscmp_anchor)
+      dvtk <- dv$tickers; names(dvtk) <- toupper(dvtk)
+      line_at <- function(dd) { dd <- as.Date(dd, origin = "1970-01-01")
+        s <- line$ret[line$d <= dd]
+        if (length(s)) s[length(s)] else line$ret[1] }
+      out <- list()
+      for (tk0 in top_tk) {
+        tk <- unname(dvtk[toupper(tk0)]); if (is.na(tk)) next
+        now_state <- if (tk %in% names(dv$state_now)) dv$state_now[[tk]] else NA_character_
+        prov_tk <- !is.null(dv$prov_of) && tk %in% names(dv$prov_of) && isTRUE(dv$prov_of[[tk]])
+        dl_tk <- if (!is.null(d$meta) && nrow(d$meta) &&
+                     any(toupper(d$meta$ticker) == toupper(tk)))
+                   suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == toupper(tk)][1]))
+                 else as.Date(NA)
+        trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
+                            prov_tk, now_state, dv$hz, dl_tk), error = function(e) NULL)
+        if (is.null(trail) || !nrow(trail)) next
+        bd <- as.Date(trail$date[trail$state == "buy"])
+        bd <- bd[!is.na(bd) & bd >= anchor]
+        if (!length(bd)) next
+        out[[tk]] <- data.frame(ticker = toupper(tk), date = bd,
+                                y = vapply(bd, line_at, numeric(1)),
+                                stringsAsFactors = FALSE)
+      }
+      if (length(out)) do.call(rbind, out) else NULL
+    }, error = function(e) NULL)
+    list(line = line, pins = pins, n = length(top_tk), frac = frac, tickers = top_tk)
+  })
+
   output$lcPortfolioChart <- renderPlotly({
     p <- lc_pos()
     if (is.null(p) || nrow(p) == 0)
@@ -9997,6 +10069,25 @@ server <- function(input, output, session) {
         name = sprintf("Passed qualstream ≥ 68 (%d)", n_p),
         line = list(color = "#10b981", width = 3),
         hovertemplate = "Passed ≥68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    # Top-performers HINDSIGHT ceiling (opt-in, off by default): top decile of
+    # buys by realized return, any qs. Dashed + labelled "hindsight" because it
+    # is outcome-selected and not achievable ex ante. Buy pins ride the line.
+    tp <- tryCatch(lc_top_perf(), error = function(e) NULL)
+    tp_suffix <- ""
+    if (!is.null(tp) && !is.null(tp$line) && nrow(tp$line)) {
+      fig <- add_trace(fig, x = tp$line$d, y = tp$line$ret, type = "scatter", mode = "lines",
+        name = sprintf("Top %d%% performers · hindsight, any qs (%d)",
+                       round(tp$frac * 100), tp$n),
+        line = list(color = "#e879f9", width = 2.5, dash = "dash"),
+        hovertemplate = "Top performers (hindsight)<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+      if (!is.null(tp$pins) && nrow(tp$pins))
+        fig <- add_markers(fig, x = tp$pins$date, y = tp$pins$y, showlegend = FALSE,
+          marker = list(color = "#34d399", size = 8, symbol = "circle",
+                        line = list(color = "#0b1220", width = 1)),
+          text = sprintf("%s BUY %s", tp$pins$ticker, format(tp$pins$date)),
+          hovertemplate = "%{text}<extra></extra>")
+      tp_suffix <- " · top performers"
+    }
     # Clicked-chip overlay: the ticker's own return line (white, on top) + a
     # flag-pin at each lifecycle event, colored by state, labelled "<TK> BUY"
     # etc. with the growth-since-previous-pin (own %, and pp vs SPY) on hover.
@@ -10138,8 +10229,9 @@ server <- function(input, output, session) {
       ann <- c(ann, apann)
       # headroom so the upward label stack never clips against the plot top
       # (tuned to the tighter 13px-per-level stack + size-9 labels above)
-      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret), na.rm = TRUE)
-      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, 0), na.rm = TRUE)
+      tpret <- if (!is.null(tp) && !is.null(tp$line)) tp$line$ret else numeric(0)
+      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret), na.rm = TRUE)
+      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
       ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.085 * max(lvl)))
       ap_suffix <- " · all qualstream pins"
@@ -10151,7 +10243,7 @@ server <- function(input, output, session) {
     dark_layout(fig,
       title = list(text = paste0(sprintf(
           "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s",
-          format(d$qscmp_anchor, "%b %d")), cl_suffix, ov_suffix, ap_suffix),
+          format(d$qscmp_anchor, "%b %d")), cl_suffix, ov_suffix, ap_suffix, tp_suffix),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
