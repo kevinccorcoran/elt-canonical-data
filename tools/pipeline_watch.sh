@@ -18,11 +18,18 @@ STATE=/var/tmp/alphastream_pipeline_watch.last
 if [ -f "$STATE" ] && [ $(( $(date +%s) - $(cat "$STATE") )) -lt 21600 ]; then
   echo "$(date -u +%FT%TZ) SKIP (alerted <6h ago)"; exit 0
 fi
-OUT=$(docker exec -i airflow-scheduler python3 - <<PY
+# Host disk fills silently and takes EVERY DAG down at once - the daily-chain
+# stale alert would only notice hours later. Check the host filesystem (this
+# script runs on the droplet, not in a container) and pass it into the alert.
+HOST_DISK_PCT=$(df -P / | awk 'NR==2{gsub("%","",$5); print $5}')
+OUT=$(docker exec -i -e HOST_DISK_PCT="$HOST_DISK_PCT" airflow-scheduler python3 - <<PY
+import os
 from datetime import datetime, timedelta, timezone
 from airflow.models import DagRun, Variable
 from airflow.utils.session import create_session
 from airflow.utils.state import DagRunState
+
+DISK_ALERT_PCT = 85
 
 STALE_DAGS = {"cdm_ingest_massive": 26, "raw_ingest_massive_daily": 26}
 STUCK_BUDGET_H = {"walk_forward_dbt_models": 15, "raw_ingest_massive_bulk": None}  # None = exempt
@@ -30,6 +37,12 @@ STUCK_DEFAULT_H = 4
 
 now = datetime.now(timezone.utc)
 msgs = []
+try:
+    disk = int(os.environ.get("HOST_DISK_PCT", "0"))
+    if disk >= DISK_ALERT_PCT:
+        msgs.append("host disk at %d%% (>=%d%%) - free space before it takes every DAG down" % (disk, DISK_ALERT_PCT))
+except ValueError:
+    pass
 with create_session() as s:
     dag_ids = [r[0] for r in s.query(DagRun.dag_id).distinct().all()]
     for dag_id in sorted(dag_ids):
