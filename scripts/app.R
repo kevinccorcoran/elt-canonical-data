@@ -9736,6 +9736,36 @@ server <- function(input, output, session) {
       if (u %in% names(strip_ret)) return(strip_ret[[u]])
       if (u %in% names(board_ret)) board_ret[[u]] else NA_real_
     }
+    # Best hold length PER NAME (Kevin 2026-08-26): from the cross-horizon
+    # shortlist evidence, the hold length among 4/7/12mo where the name is a
+    # top-slot buy (wf_bin 1 of a long id) with the highest realized win% - a
+    # small blue badge on the chip so buy/hold/sell shows each name's most-
+    # promising horizon in place, no dropdown-flipping needed.
+    best_hz <- setNames(integer(0), character(0))
+    best_hz_win <- setNames(numeric(0), character(0))
+    if (!is.null(d$sl) && nrow(d$sl)) {
+      tp <- d$sl[!is.na(d$sl$rank_bin) & d$sl$rank_bin == 1L &
+                 !is.na(d$sl$eid) & d$sl$eid <= 12 &
+                 d$sl$fut_lag %in% c(4L, 7L, 12L), , drop = FALSE]
+      if (nrow(tp)) {
+        tp <- tp[order(toupper(tp$ticker),
+                       -ifelse(is.na(tp$bin_win_pct), -1, tp$bin_win_pct)), ]
+        tp <- tp[!duplicated(toupper(tp$ticker)), , drop = FALSE]
+        best_hz     <- setNames(as.integer(tp$fut_lag), toupper(tp$ticker))
+        best_hz_win <- setNames(tp$bin_win_pct, toupper(tp$ticker))
+      }
+    }
+    hz_badge <- function(t) {
+      u <- toupper(t); h <- best_hz[u]
+      if (length(h) != 1 || is.na(h)) return(NULL)
+      w <- best_hz_win[u]
+      span(if (length(w) == 1 && !is.na(w)) sprintf("%dmo %s%%", h, format(round(w)))
+           else sprintf("%dmo", h),
+        style = paste0("margin-left:5px; font-size:0.64rem; font-weight:700;",
+          " color:#38bdf8; background:#38bdf81f; border:1px solid #38bdf855;",
+          " border-radius:4px; padding:0 4px; vertical-align:middle;"),
+        title = "most-promising hold length (top-slot win%)")
+    }
     chipf <- function(t, colr, note = "", strike = FALSE, plus = FALSE, nw = NA, ret = NA) span(
       style = sprintf(paste0("display:inline-block; background:%s14; color:%s;",
                              " border:1px solid %s44; border-radius:5px; padding:2px 8px;",
@@ -9746,6 +9776,7 @@ server <- function(input, output, session) {
       title = "click for state history",
       if (nzchar(note)) sprintf("%s · %s", t, note) else t,
       if (plus) span("+", style = "color:#fb923c; font-weight:800; margin-left:3px;"),
+      hz_badge(t),
       # The RETURN number itself is the button: shows this name's current-trade
       # return (green/red), click opens the full flip history vs SPY. stopPropagation
       # so it never also singles the ticker out on the chart. Falls back to a "P&L"
