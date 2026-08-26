@@ -10200,6 +10200,23 @@ server <- function(input, output, session) {
     sl <- d$sl
     g  <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
     cand <- sort(unique(names(g)[!is.na(g) & g >= QS_MIN]))
+    # OWN book: open positions (sold_date empty) drive the Holding column AND join
+    # the universe, so a name you hold that has since dropped off the board / below
+    # qualstream (adopted as a buy, now SKIP - e.g. CVNA/HWM) still shows here as an
+    # owned hold instead of vanishing. Per ticker: entry count + latest add date, so
+    # a re-fired name shows its most recent hold clock and how many entries it has.
+    pp <- tryCatch(lc_pos(), error = function(e) NULL)
+    own_cnt <- integer(0); own_last <- numeric(0)
+    if (!is.null(pp) && nrow(pp)) {
+      op <- pp[is.na(pp$sold_date) | !nzchar(as.character(pp$sold_date)), , drop = FALSE]
+      if (nrow(op)) {
+        otk <- toupper(op$ticker)
+        own_cnt  <- table(otk)
+        own_last <- tapply(as.Date(op$start_date), otk, function(x) max(x, na.rm = TRUE))
+      }
+    }
+    owned_ticks <- names(own_cnt)
+    cand <- sort(unique(c(cand, owned_ticks)))
     if (!length(cand)) return(NULL)
     HZS <- c(4L, 7L, 12L)
     cell_for <- function(tku, fl) {
@@ -10225,7 +10242,6 @@ server <- function(input, output, session) {
       a <- gate_now[[u]]
       if (identical(a, "BUY")) "buy" else if (identical(a, "SELL")) "sell" else "hold"
     }, character(1)), names(gate_now))
-    pp <- tryCatch(lc_pos(), error = function(e) NULL)
     if (!is.null(pp) && nrow(pp)) {
       pe <- as.character(pp$end_date); ps <- as.character(pp$sold_date)
       for (t in toupper(pp$ticker[!is.na(pe) & nzchar(pe) & (is.na(ps) | !nzchar(ps))])) st[t] <- "hold"
@@ -10243,12 +10259,25 @@ server <- function(input, output, session) {
           w <- cells[[as.character(fl)]]$win; if (is.na(w)) -1 else w }, numeric(1)))]
         else NA_integer_
       state <- if (tku %in% names(st)) st[[tku]] else NA_character_
-      list(tk = tku, grade = g[[tku]], eid = eid, cells = cells, best = best,
-           state = state, ntop = ntop, win7 = if (is.na(win7)) -1 else win7)
+      # grade guarded: owned-off-board names are not in the qualstream grade map.
+      gr <- if (tku %in% names(g)) g[[tku]] else NA_real_
+      # Holding clock: the hold period is the name's BEST horizon (fallback 7mo for
+      # an owned name with no top-slot evidence, e.g. an off-board hold); "left" =
+      # that many months from the LATEST entry, minus elapsed.
+      owned <- tku %in% owned_ticks
+      n_ent <- if (owned) as.integer(own_cnt[[tku]]) else NA_integer_
+      add_num <- if (owned && tku %in% names(own_last)) own_last[[tku]] else NA_real_
+      add_d <- if (!is.na(add_num) && is.finite(add_num)) as.Date(add_num, origin = "1970-01-01") else as.Date(NA)
+      hold_mo <- if (!is.na(best)) as.numeric(best) else 7
+      left_mo <- if (owned && !is.na(add_d)) hold_mo - as.numeric(Sys.Date() - add_d) / 30.44 else NA_real_
+      list(tk = tku, grade = gr, eid = eid, cells = cells, best = best,
+           state = state, ntop = ntop, win7 = if (is.na(win7)) -1 else win7,
+           owned = owned, n_ent = n_ent, add_d = add_d, left_mo = left_mo)
     })
     sord <- c(buy = 0, hold = 1, sell = 2, closed = 3)
     ord  <- order(vapply(recs, function(r) {
                     v <- sord[r$state]; if (length(v) != 1 || is.na(v)) 4 else v }, numeric(1)),
+                  -vapply(recs, function(r) as.numeric(isTRUE(r$owned)), numeric(1)),
                   -vapply(recs, `[[`, numeric(1), "ntop"),
                   -vapply(recs, `[[`, numeric(1), "win7"))
     recs <- recs[ord]
@@ -10272,9 +10301,24 @@ server <- function(input, output, session) {
       else
         tags$td(style = "text-align:center;color:#334155;", "—")
     }
+    # Holding cell: "N× · <latest add> · <time left>" for an owned name, else a dash.
+    # N = open entry count for the ticker, latest add = most recent entry date, time
+    # left = months remaining on the (BEST-horizon) hold from that latest entry.
+    hold_td <- function(r) {
+      if (!isTRUE(r$owned))
+        return(tags$td(style = "text-align:center;color:#334155;", "—"))
+      add <- if (is.na(r$add_d)) "?" else format(r$add_d, "%b %d")
+      lft <- if (is.na(r$left_mo)) ""
+             else if (r$left_mo <= 0) " · matured"
+             else sprintf(" · %.1fmo left", r$left_mo)
+      tags$td(style = "text-align:center;color:#cbd5e1;white-space:nowrap;font-size:0.72rem;",
+              sprintf("%d× · %s%s", r$n_ent, add, lft))
+    }
     body <- lapply(recs, function(r) tags$tr(
+      style = if (isTRUE(r$owned)) "background:rgba(16,185,129,0.06);" else "",
       tags$td(style = "color:#e2e8f0;font-weight:600;padding:2px 8px;", r$tk),
       state_td(r$state),
+      hold_td(r),
       best_td(r$best),
       tags$td(style = "text-align:center;color:#94a3b8;",
               if (is.na(r$eid)) "—" else as.character(r$eid)),
@@ -10288,10 +10332,10 @@ server <- function(input, output, session) {
       tags$div(style = "color:#f1f5f9;font-weight:700;font-size:0.95rem;margin:0.3rem 0 0.1rem;",
                "Master list — every best bet, all horizons"),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
-        HTML("One row per name, never swaps. STATE = current buy/hold/sell · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. Sorted buys first, then by strength.")),
+        HTML("One row per name, never swaps. STATE = current buy/hold/sell (filter-independent) · HOLDING = your open entries (count&times; · latest add · time left on the hold), owned rows tinted green and floated to the top of their state · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. New adopts appear here automatically.")),
       tags$div(style = "overflow-x:auto;",
         tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
-          tags$thead(tags$tr(th("Ticker", "left"), th("State"), th("Best"),
+          tags$thead(tags$tr(th("Ticker", "left"), th("State"), th("Holding"), th("Best"),
                              th("Cluster"), th("Grade"),
                              th("4 mo"), th("7 mo"), th("12 mo"))),
           tags$tbody(body)))
