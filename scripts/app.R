@@ -10276,7 +10276,7 @@ server <- function(input, output, session) {
       tags$td(style = "text-align:center;color:#cbd5e1;white-space:nowrap;font-size:0.72rem;",
               sprintf("%d× · %s%s", r$n_ent, add, lft))
     }
-    body <- lapply(recs, function(r) tags$tr(
+    row_tr <- function(r) tags$tr(
       style = if (isTRUE(r$owned)) "background:rgba(16,185,129,0.06);" else "",
       tags$td(style = "color:#e2e8f0;font-weight:600;padding:2px 8px;", r$tk),
       state_td(r$state),
@@ -10287,14 +10287,33 @@ server <- function(input, output, session) {
       tags$td(style = "text-align:center;color:#94a3b8;",
               if (is.na(r$grade)) "—" else as.character(round(r$grade))),
       fmt_cell(r$cells[["4"]]), fmt_cell(r$cells[["7"]]), fmt_cell(r$cells[["12"]])
-    ))
+    )
+    # Group the ONE table by buy / hold / sell with a full-width section header, so
+    # the board's kanban and the horizon table are the same surface: buy/hold/sell
+    # is the grouping, and every holding period (4/7/12mo) stays on each row. Owned
+    # names are tinted and float to the top of their group.
+    scol_hdr <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626", other = "#64748b")
+    slab_hdr <- c(buy = "BUY", hold = "HOLD", sell = "SELL", other = "UNRANKED")
+    skey <- function(r) if (is.na(r$state)) "other" else r$state
+    scount <- table(vapply(recs, skey, character(1)))
+    grp_hdr <- function(s) tags$tr(tags$td(colspan = 9, style = sprintf(paste0(
+      "padding:9px 8px 3px;color:%s;font-weight:800;font-size:0.76rem;",
+      "text-transform:uppercase;letter-spacing:0.05em;border-bottom:2px solid %s55;"),
+      scol_hdr[[s]], scol_hdr[[s]]),
+      sprintf("%s — %d", slab_hdr[[s]], as.integer(scount[[s]]))))
+    body <- list(); prev <- NULL
+    for (r in recs) {
+      s <- skey(r)
+      if (!identical(s, prev)) { body[[length(body) + 1L]] <- grp_hdr(s); prev <- s }
+      body[[length(body) + 1L]] <- row_tr(r)
+    }
     th <- function(x, al = "center") tags$th(style = sprintf(
       "text-align:%s;color:#cbd5e1;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em;padding:3px 8px;border-bottom:1px solid #1e293b;", al), x)
     tagList(
       tags$div(style = "color:#f1f5f9;font-weight:700;font-size:0.95rem;margin:0.3rem 0 0.1rem;",
                "Master list — every best bet, all horizons"),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
-        HTML("One row per name, never swaps. STATE = current buy/hold/sell (filter-independent) · HOLDING = your open entries (count&times; · latest add · time left on the hold), owned rows tinted green and floated to the top of their state · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. New adopts appear here automatically.")),
+        HTML("One table, grouped by BUY / HOLD / SELL, every holding period on each row. STATE = current buy/hold/sell (filter-independent) · HOLDING = your open entries (count&times; · latest add · time left on the hold), owned rows tinted green and floated to the top of their group · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. New adopts appear here automatically.")),
       tags$div(style = "overflow-x:auto;",
         tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
           tags$thead(tags$tr(th("Ticker", "left"), th("State"), th("Holding"), th("Best"),
