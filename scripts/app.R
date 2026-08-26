@@ -2746,6 +2746,10 @@ ui <- navbarPage(
         # Decision board leads the panel: the at-a-glance buy/hold/sell surface is
         # the primary artifact, so it sits at the top; benchmark + portfolio follow.
         uiOutput("boardLC"),
+        tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 0.9rem;"),
+        # Cross-horizon best-bets matrix: one table, each name's top-slot status
+        # + win% at 4/7/12mo, so a bet is chosen by the hold length it leads at.
+        uiOutput("bestBetsLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1.1rem;"),
         # Benchmark comparison (+ click a board chip to overlay that ticker here).
         plotlyOutput("qsCompareLC", height = "380px"),
@@ -10149,6 +10153,74 @@ server <- function(input, output, session) {
         shadow_block,
         closed_foot)
     }
+  })
+
+  # ── Best bets by horizon (4 / 7 / 12mo) ──────────────────────────────────
+  # ONE table across horizons so a bet is picked BY the hold length it is
+  # strongest at, instead of flipping the Hold-length selector and diffing in
+  # your head (Kevin 2026-08-26). Reads the per-(ticker, fut_lag) shortlist
+  # evidence already loaded in app_dataLC()$sl: for each qualstream passer it
+  # shows, at 4/7/12mo, whether the name is a TOP-SLOT buy (wf_bin 1 of a long
+  # id) and that slot's realized win rate. Display-only; changes no rule.
+  output$bestBetsLC <- renderUI({
+    d  <- tryCatch(app_dataLC(), error = function(e) NULL)
+    dv <- tryCatch(derivedLC(),  error = function(e) NULL)
+    if (is.null(d) || is.null(d$sl) || !nrow(d$sl) || is.null(dv)) return(NULL)
+    sl <- d$sl
+    g  <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+    cand <- sort(unique(names(g)[!is.na(g) & g >= QS_MIN]))
+    if (!length(cand)) return(NULL)
+    HZS <- c(4L, 7L, 12L)
+    cell_for <- function(tku, fl) {
+      r <- sl[toupper(sl$ticker) == tku & sl$fut_lag == fl, , drop = FALSE]
+      if (!nrow(r)) return(list(top = FALSE, bin = NA, win = NA_real_, eid = NA))
+      r <- r[1, ]
+      list(top = (!is.na(r$rank_bin) && r$rank_bin == 1L &&
+                  !is.na(r$eid) && r$eid <= 12),
+           bin = r$rank_bin, win = r$bin_win_pct, eid = r$eid)
+    }
+    recs <- lapply(cand, function(tk) {
+      tku <- toupper(tk)
+      cells <- setNames(lapply(HZS, function(fl) cell_for(tku, fl)), as.character(HZS))
+      eid <- cells[["7"]]$eid; if (is.na(eid)) eid <- cells[["12"]]$eid
+      ntop <- sum(vapply(cells, function(cc) isTRUE(cc$top), logical(1)))
+      win7 <- cells[["7"]]$win
+      list(tk = tku, grade = g[[tku]], eid = eid, cells = cells,
+           ntop = ntop, win7 = if (is.na(win7)) -1 else win7)
+    })
+    ord  <- order(-vapply(recs, `[[`, numeric(1), "ntop"),
+                  -vapply(recs, `[[`, numeric(1), "win7"))
+    recs <- recs[ord]
+    fmt_cell <- function(cc) {
+      if (isTRUE(cc$top))
+        tags$td(style = "text-align:center;color:#34d399;font-weight:600;white-space:nowrap;",
+                sprintf("✓ %s%%", if (is.na(cc$win)) "?" else format(round(cc$win))))
+      else if (!is.na(cc$bin))
+        tags$td(style = "text-align:center;color:#64748b;", sprintf("b%d", cc$bin))
+      else
+        tags$td(style = "text-align:center;color:#334155;", "—")
+    }
+    body <- lapply(recs, function(r) tags$tr(
+      tags$td(style = "color:#e2e8f0;font-weight:600;padding:2px 8px;", r$tk),
+      tags$td(style = "text-align:center;color:#94a3b8;",
+              if (is.na(r$eid)) "—" else as.character(r$eid)),
+      tags$td(style = "text-align:center;color:#94a3b8;",
+              if (is.na(r$grade)) "—" else as.character(round(r$grade))),
+      fmt_cell(r$cells[["4"]]), fmt_cell(r$cells[["7"]]), fmt_cell(r$cells[["12"]])
+    ))
+    th <- function(x, al = "center") tags$th(style = sprintf(
+      "text-align:%s;color:#cbd5e1;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em;padding:3px 8px;border-bottom:1px solid #1e293b;", al), x)
+    tagList(
+      tags$div(style = "color:#f1f5f9;font-weight:700;font-size:0.95rem;margin:0.3rem 0 0.1rem;",
+               "Best bets by horizon"),
+      tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
+        HTML("&#10003; = top-slot buy at that hold length with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. Sorted by how many horizons a name leads; pick a name at the hold length it is greenest.")),
+      tags$div(style = "overflow-x:auto;",
+        tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
+          tags$thead(tags$tr(th("Ticker", "left"), th("Cluster"), th("Grade"),
+                             th("4 mo"), th("7 mo"), th("12 mo"))),
+          tags$tbody(body)))
+    )
   })
 
   # Does the qualstream marking help? Equal-weight return of the current BUYs
