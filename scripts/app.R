@@ -2727,7 +2727,7 @@ ui <- navbarPage(
                     choices = c("1 month" = "1", "2 months" = "2", "4 months" = "4",
                                 "7 months" = "7", "12 months" = "12",
                                 "20 months" = "20", "33 months" = "33"),
-                    selected = "12"),
+                    selected = "7"),
         tags$p(paste("buy = standing rec · hold = dropped, window open ·",
                      "sell = exited · closed = exited >1mo"),
                style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;"),
