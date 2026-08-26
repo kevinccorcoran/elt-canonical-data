@@ -9354,7 +9354,12 @@ server <- function(input, output, session) {
   # live ledger. The walk is unchanged; only the inputs got deeper.
   derivedLC <- reactive({
     d <- app_dataLC(); req(d)
-    hz <- suppressWarnings(as.integer(input$holdLC)); if (is.na(hz)) hz <- 12L
+    # holdLC selector was retired 2026-08-26, so input$holdLC is NULL and
+    # as.integer(NULL) is integer(0) (length zero, not NA) - guard on length too,
+    # else `if (is.na(integer(0)))` throws "argument is of length zero". The board
+    # now always derives at the canonical 12-month gate horizon.
+    hz <- suppressWarnings(as.integer(input$holdLC))
+    if (length(hz) != 1 || is.na(hz)) hz <- 12L
     led <- d$led
     ch  <- if (!is.null(d$coh) && nrow(d$coh) > 0)
              d$coh[d$coh$fut_lag == hz, , drop = FALSE]
