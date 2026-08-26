@@ -10210,18 +10210,50 @@ server <- function(input, output, session) {
                   !is.na(r$eid) && r$eid <= 12),
            bin = r$rank_bin, win = r$bin_win_pct, eid = r$eid)
     }
+    # Current buy/hold/sell state per name, with the user's hand-overrides
+    # applied (same rule as the board: a paused row -> hold, a hand-sold row ->
+    # sell), so this master list agrees with the board columns.
+    st <- setNames(as.character(dv$state_now), toupper(names(dv$state_now)))
+    pp <- tryCatch(lc_pos(), error = function(e) NULL)
+    if (!is.null(pp) && nrow(pp)) {
+      pe <- as.character(pp$end_date); ps <- as.character(pp$sold_date)
+      heldtk <- toupper(pp$ticker[!is.na(pe) & nzchar(pe) & (is.na(ps) | !nzchar(ps))])
+      st[intersect(heldtk, names(st))] <- "hold"
+      soldtk <- toupper(pp$ticker[!is.na(ps) & nzchar(ps)])
+      st[intersect(soldtk, names(st))] <- "sell"
+    }
     recs <- lapply(cand, function(tk) {
       tku <- toupper(tk)
       cells <- setNames(lapply(HZS, function(fl) cell_for(tku, fl)), as.character(HZS))
       eid <- cells[["7"]]$eid; if (is.na(eid)) eid <- cells[["12"]]$eid
       ntop <- sum(vapply(cells, function(cc) isTRUE(cc$top), logical(1)))
       win7 <- cells[["7"]]$win
-      list(tk = tku, grade = g[[tku]], eid = eid, cells = cells,
-           ntop = ntop, win7 = if (is.na(win7)) -1 else win7)
+      tops <- HZS[vapply(HZS, function(fl) isTRUE(cells[[as.character(fl)]]$top), logical(1))]
+      best <- if (length(tops))
+        tops[which.max(vapply(tops, function(fl) {
+          w <- cells[[as.character(fl)]]$win; if (is.na(w)) -1 else w }, numeric(1)))]
+        else NA_integer_
+      state <- if (tku %in% names(st)) st[[tku]] else NA_character_
+      list(tk = tku, grade = g[[tku]], eid = eid, cells = cells, best = best,
+           state = state, ntop = ntop, win7 = if (is.na(win7)) -1 else win7)
     })
-    ord  <- order(-vapply(recs, `[[`, numeric(1), "ntop"),
+    sord <- c(buy = 0, hold = 1, sell = 2, closed = 3)
+    ord  <- order(vapply(recs, function(r) {
+                    v <- sord[r$state]; if (length(v) != 1 || is.na(v)) 4 else v }, numeric(1)),
+                  -vapply(recs, `[[`, numeric(1), "ntop"),
                   -vapply(recs, `[[`, numeric(1), "win7"))
     recs <- recs[ord]
+    scol <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626", closed = "#64748b")
+    state_td <- function(s) {
+      if (is.na(s)) return(tags$td(style = "text-align:center;color:#334155;", "—"))
+      cc <- scol[[s]]; if (is.null(cc)) cc <- "#94a3b8"
+      tags$td(style = "text-align:center;",
+        tags$span(toupper(s), style = sprintf(
+          "color:%s;font-weight:700;font-size:0.68rem;border:1px solid %s66;border-radius:4px;padding:1px 6px;", cc, cc)))
+    }
+    best_td <- function(h) if (is.na(h))
+      tags$td(style = "text-align:center;color:#334155;", "—")
+      else tags$td(style = "text-align:center;color:#38bdf8;font-weight:700;", sprintf("%dmo", h))
     fmt_cell <- function(cc) {
       if (isTRUE(cc$top))
         tags$td(style = "text-align:center;color:#34d399;font-weight:600;white-space:nowrap;",
@@ -10233,6 +10265,8 @@ server <- function(input, output, session) {
     }
     body <- lapply(recs, function(r) tags$tr(
       tags$td(style = "color:#e2e8f0;font-weight:600;padding:2px 8px;", r$tk),
+      state_td(r$state),
+      best_td(r$best),
       tags$td(style = "text-align:center;color:#94a3b8;",
               if (is.na(r$eid)) "—" else as.character(r$eid)),
       tags$td(style = "text-align:center;color:#94a3b8;",
@@ -10243,12 +10277,13 @@ server <- function(input, output, session) {
       "text-align:%s;color:#cbd5e1;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em;padding:3px 8px;border-bottom:1px solid #1e293b;", al), x)
     tagList(
       tags$div(style = "color:#f1f5f9;font-weight:700;font-size:0.95rem;margin:0.3rem 0 0.1rem;",
-               "Best bets by horizon"),
+               "Master list — every best bet, all horizons"),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
-        HTML("&#10003; = top-slot buy at that hold length with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. Sorted by how many horizons a name leads; pick a name at the hold length it is greenest.")),
+        HTML("One row per name, never swaps. STATE = current buy/hold/sell · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. Sorted buys first, then by strength.")),
       tags$div(style = "overflow-x:auto;",
         tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
-          tags$thead(tags$tr(th("Ticker", "left"), th("Cluster"), th("Grade"),
+          tags$thead(tags$tr(th("Ticker", "left"), th("State"), th("Best"),
+                             th("Cluster"), th("Grade"),
                              th("4 mo"), th("7 mo"), th("12 mo"))),
           tags$tbody(body)))
     )
