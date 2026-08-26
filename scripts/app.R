@@ -10210,17 +10210,26 @@ server <- function(input, output, session) {
                   !is.na(r$eid) && r$eid <= 12),
            bin = r$rank_bin, win = r$bin_win_pct, eid = r$eid)
     }
-    # Current buy/hold/sell state per name, with the user's hand-overrides
-    # applied (same rule as the board: a paused row -> hold, a hand-sold row ->
-    # sell), so this master list agrees with the board columns.
-    st <- setNames(as.character(dv$state_now), toupper(names(dv$state_now)))
+    # STATE is the LIVE per-ticker gate signal (serving.global_action), which is
+    # FILTER-INDEPENDENT: a name's buy/hold/sell is a fixed fact of the current
+    # model, NOT something that flips when you change the Hold-length dropdown
+    # (Kevin 2026-08-26 - the earlier version read dv$state_now, derived at the
+    # selected horizon, so it moved with the filter). BUY = live buy signal,
+    # SELL = live sell/exit, everything else (SKIP / dropped-but-open) = hold.
+    # Book hand-overrides still win (a paused row -> hold, a hand-sold -> sell).
+    gate_now <- if (!is.null(d$gate) && nrow(d$gate) &&
+                    all(c("ticker", "gate_today") %in% names(d$gate)))
+      setNames(toupper(as.character(d$gate$gate_today)), toupper(d$gate$ticker))
+      else setNames(character(0), character(0))
+    st <- setNames(vapply(names(gate_now), function(u) {
+      a <- gate_now[[u]]
+      if (identical(a, "BUY")) "buy" else if (identical(a, "SELL")) "sell" else "hold"
+    }, character(1)), names(gate_now))
     pp <- tryCatch(lc_pos(), error = function(e) NULL)
     if (!is.null(pp) && nrow(pp)) {
       pe <- as.character(pp$end_date); ps <- as.character(pp$sold_date)
-      heldtk <- toupper(pp$ticker[!is.na(pe) & nzchar(pe) & (is.na(ps) | !nzchar(ps))])
-      st[intersect(heldtk, names(st))] <- "hold"
-      soldtk <- toupper(pp$ticker[!is.na(ps) & nzchar(ps)])
-      st[intersect(soldtk, names(st))] <- "sell"
+      for (t in toupper(pp$ticker[!is.na(pe) & nzchar(pe) & (is.na(ps) | !nzchar(ps))])) st[t] <- "hold"
+      for (t in toupper(pp$ticker[!is.na(ps) & nzchar(ps)])) st[t] <- "sell"
     }
     recs <- lapply(cand, function(tk) {
       tku <- toupper(tk)
