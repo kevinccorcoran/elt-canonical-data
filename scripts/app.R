@@ -10376,17 +10376,15 @@ server <- function(input, output, session) {
       xs <- as.numeric(ap$date)
       xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
       span <- max(xhi - xlo, 1)
-      # ANGLED FAN (2026-08-26, Kevin's sketch): tickers clustered on one peak
-      # share the same x, so they can only separate by stacking + ANGLE. Parallel
-      # same-angle labels still collided, so each stack level gets a DISTINCT fan
-      # angle (steep at the base, shallower higher up, cycled) and a wider
-      # vertical step, so a diagonal label radiates clear of the one below it
-      # instead of overlapping it. The collision test uses the tilted footprint.
-      FAN <- c(-74, -58, -42, -26)                 # fan angles, cycled per level
-      cosf <- cos(50 * pi / 180)                   # ~avg horizontal footprint
+      # TIDY VERTICAL COLUMN (2026-08-26): angling the labels turned dense
+      # clusters into a crossing mess. The legible layout for many tickers on one
+      # date is a straight stacked column of small HORIZONTAL chips, one per line
+      # above the dot. Key fix: MAXLVL is high so a big cluster keeps climbing
+      # into its own column instead of piling excess labels onto the top row
+      # (the original overlap cause). The dots stay hoverable for the numbers.
       labw <- vapply(seq_len(nrow(ap)), function(i)
-        (nchar(ap$ticker[i]) * 6 * cosf + 10) * span / 760, numeric(1))
-      lvl <- integer(nrow(ap)); MAXLVL <- 14L
+        (nchar(ap$ticker[i]) * 6 + 12) * span / 760, numeric(1))
+      lvl <- integer(nrow(ap)); MAXLVL <- 24L
       for (i in seq_len(nrow(ap))) {
         L <- 0L
         while (L < MAXLVL) {
@@ -10398,15 +10396,12 @@ server <- function(input, output, session) {
       }
       apann <- lapply(seq_len(nrow(ap)), function(i) {
         cc <- apcol[[ap$state[i]]]
-        # near the right edge, anchor right + flip the tilt so the label fans
-        # up-LEFT and never runs off the plot; otherwise fan up-right.
-        near_r <- (xhi - xs[i]) / span < 0.06
-        ang <- FAN[(lvl[i] %% length(FAN)) + 1]
         list(x = format(ap$date[i]), y = ap$ret[i], xref = "x", yref = "y",
-             text = ap$ticker[i], textangle = if (near_r) -ang else ang,
-             xanchor = if (near_r) "right" else "left", yanchor = "bottom",
+             text = ap$ticker[i],
+             xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
+             yanchor = "bottom",
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
-             ax = 0, ay = -10 - 21 * lvl[i], font = list(color = cc, size = 9),
+             ax = 0, ay = -9 - 15 * lvl[i], font = list(color = cc, size = 9),
              # OPAQUE bg: the bright green basket line the dots ride bleeds through
              # and washes the label to a pale box (Kevin, recurring). A plain hex
              # should be opaque, but pin opacity=1 explicitly to rule out any
@@ -10424,7 +10419,7 @@ server <- function(input, output, session) {
       yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret), na.rm = TRUE)
       ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
-      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.09 + 0.14 * max(lvl)))
+      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.09 + 0.11 * max(lvl)))
       ap_suffix <- " · all qualstream pins"
     }
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
