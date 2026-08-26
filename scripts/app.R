@@ -2723,19 +2723,7 @@ ui <- navbarPage(
   tabPanel("Lifecycle",
     sidebarLayout(
       make_sidebar("LC", "Lifecycle", tagList(
-        selectInput("holdLC", "Hold length",
-                    choices = c("1 month" = "1", "2 months" = "2", "4 months" = "4",
-                                "7 months" = "7", "12 months" = "12",
-                                "20 months" = "20", "33 months" = "33"),
-                    selected = "7"),
-        tags$p(paste("buy = standing rec · hold = dropped, window open ·",
-                     "sell = exited · closed = exited >1mo"),
-               style = "color: #64748b; font-size: 0.72rem; margin-bottom: 0.5rem;"),
-        radioButtons("lcBoardLayout", "Board layout",
-                     choices = c("Columns" = "columns", "Stacked" = "stacked"),
-                     selected = "columns", inline = TRUE),
         checkboxInput("lcBuyQSonly", "Qualstream + picks only", value = TRUE),
-        checkboxInput("lcBuyStats", "Show win% · runs", value = FALSE),
         checkboxInput("lcAllPins", "All qualstream pins", value = TRUE),
         checkboxInput("lcTopPerf", "Top performers (hindsight, any qs)", value = FALSE),
         checkboxInput("lcAllPickLines", "All qualstream pick lines (white)", value = FALSE),
@@ -8251,11 +8239,21 @@ server <- function(input, output, session) {
     perf <- tryCatch(lc_row_perf(), error = function(e) NULL)
     id_of <- if (!is.null(d) && !is.null(d$gate$id))
       setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker)) else integer(0)
+    # State reads the LIVE per-ticker gate (serving.global_action) - the SAME
+    # source the master list uses - so a name's buy/hold/sell is identical in both
+    # tables and independent of any horizon selector (retired 2026-08-26). BUY =
+    # buy, SELL = sell, SKIP / anything else = hold. The book overrides below
+    # (paused -> hold, sold -> sell) still win.
+    gate_now <- if (!is.null(d) && !is.null(d$gate) && nrow(d$gate) &&
+                    all(c("ticker", "gate_today") %in% names(d$gate)))
+      setNames(toupper(as.character(d$gate$gate_today)), toupper(d$gate$ticker))
+      else setNames(character(0), character(0))
     states <- vapply(seq_len(nrow(p)), function(i) {
       if (!identical(p$mode[i], "model")) return("-")
       tk <- toupper(p$ticker[i])
-      s <- if (!is.null(dv) && tk %in% names(dv$state_now)) dv$state_now[[tk]] else ""
-      if (is.null(s) || is.na(s)) "" else s
+      a <- if (tk %in% names(gate_now)) gate_now[[tk]] else ""
+      if (identical(a, "BUY")) "buy" else if (identical(a, "SELL")) "sell"
+      else if (nzchar(a)) "hold" else ""
     }, character(1))
     # user overrides: end_date stamp (not sold) = paused -> "hold"; sold_date
     # stamp = exited -> "sell". Resume clears both and the model state returns.
@@ -9996,14 +9994,7 @@ server <- function(input, output, session) {
         span("+", style = "color:#fb923c; font-weight:800;"),
         sprintf(" passed qualstream: %s.",
           paste(sprintf("%s %d", qs_top,
-                        as.integer(round(qs_grade[qs_top]))), collapse = ", ")))),
-      note_line(tagList(
-        "·n on a chip = evidence breadth: how many credibility-weighted",
-        " 12-month cells backed the name at the last walk-forward cutoff. ",
-        span("Amber n <= 4 = narrow", style = "color:#f59e0b; font-weight:700;"),
-        ": in the two clusters holding most buys, narrow top-bin names",
-        " realized hit ~51-57% vs ~72-73% for broad (n >= 8) - prefer broad",
-        " names when sizing. Display only; the board rule is unchanged.")))
+                        as.integer(round(qs_grade[qs_top]))), collapse = ", ")))))
     # Kanban column: same chips as the stacked sections (chipf reused verbatim, so
     # orange +, delisted strikethrough and the notes are identical), only laid out
     # side by side. Chips still wrap inside each column and the column scrolls
@@ -10143,47 +10134,13 @@ server <- function(input, output, session) {
       kanban_col("top performers", "#e879f9", tp_ticks, tp_notes,
                  "hindsight ≥ mean+1σ · click a name for its line",
                  n_total = length(tp_ticks))
-    if (identical(input$lcBoardLayout, "stacked")) {
-      tagList(
-        notes,
-        track_strip,
-        if (length(tp_ticks))
-          section("top performers - hindsight ≥ mean+1σ (click for its line)",
-                  "#e879f9", tp_ticks, tp_notes, max_h = 220),
-        section("sell - exit now", col_of[["sell"]], sells, unname(why[sells])),
-        section(sprintf("%s (%d of %d shown)", buy_title_stacked,
-                        length(buys_shown), length(buys_all)),
-                col_of[["buy"]], buys_shown, b_note2),
-        shadow_block,
-        section("hold - the period's dropped recs, still open (entry · % of horizon)",
-                col_of[["hold"]], holds, h_note, max_h = 220),
-        closed_foot)
-    } else {
-      # Lifecycle order left to right: buy -> hold -> sell (sell = the terminal
-      # "exit now" state, kept red so urgency still reads at a glance).
-      tagList(
-        notes,
-        track_strip,
-        local({
-          cols <- list(
-            kanban_col("buy", col_of[["buy"]], buys_shown, b_note2, buy_sub,
-                       n_total = length(buys_all)),
-            kanban_col("hold", col_of[["hold"]], holds, h_note,
-                       if (buys_qsonly) "qualstream + only · entry · % of horizon"
-                       else "dropped recs · entry · % of horizon",
-                       n_total = length(holds_all)),
-            kanban_col("sell", col_of[["sell"]], sells, unname(why[sells]),
-                       if (buys_qsonly) "qualstream + only · exit now · reason"
-                       else "exit now · reason",
-                       n_total = length(sells_all)))
-          if (!is.null(tp_col)) cols <- c(list(tp_col), cols)   # top performers first
-          do.call(div, c(list(style = sprintf(paste0("display:grid;",
-                    " grid-template-columns:repeat(%d, minmax(0,1fr)); gap:0.6rem;",
-                    " align-items:stretch; margin-bottom:0.5rem;"), length(cols))), cols))
-        }),
-        shadow_block,
-        closed_foot)
-    }
+    # The buy/hold/sell kanban columns were retired 2026-08-26: they derived state
+    # at the selected Hold-length (a 7mo lifecycle view) and were qualstream-hidden,
+    # so their counts disagreed with the live-gate master list below AND the
+    # portfolio table (Kevin: "why column and table not same counts"). The master
+    # list is now the single name board; this strip keeps only the honesty notes,
+    # the realized-trade metrics, and the closed-count footer.
+    tagList(notes, track_strip, closed_foot)
   })
 
   # ── Best bets by horizon (4 / 7 / 12mo) ──────────────────────────────────
