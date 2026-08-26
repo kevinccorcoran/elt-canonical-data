@@ -2736,10 +2736,10 @@ ui <- navbarPage(
                      selected = "columns", inline = TRUE),
         checkboxInput("lcBuyQSonly", "Qualstream + picks only", value = TRUE),
         checkboxInput("lcBuyStats", "Show win% · runs", value = FALSE),
-        checkboxInput("lcAllPins", "All qualstream pins", value = FALSE),
+        checkboxInput("lcAllPins", "All qualstream pins", value = TRUE),
         checkboxInput("lcTopPerf", "Top performers (hindsight, any qs)", value = FALSE),
         checkboxInput("lcAllPickLines", "All qualstream pick lines (white)", value = FALSE),
-        checkboxInput("lcAutoRefresh", "Auto-refresh (20s)", value = FALSE),
+        checkboxInput("lcAutoRefresh", "Auto-refresh (hourly)", value = TRUE),
         uiOutput("idFilterLC")
       )),
       mainPanel(div(class = "main-card",
@@ -9110,7 +9110,13 @@ server <- function(input, output, session) {
   # isolate()d so typing it does not fire per-keystroke fetches.
   observe({
     if (!isTRUE(input$lcAutoRefresh)) return()
-    invalidateLater(20000)
+    # Hourly (2026-08-26, Kevin): keep the board current against PROD while the
+    # laptop is on and connected, without a click. The clock keeps running on
+    # hidden tabs but the tick is suppressed there (returning to Lifecycle fires
+    # an immediate refresh anyway, mainNav is a reactive dep), and an unset
+    # password (not connected) short-circuits, so a disconnected session never
+    # queries. 3600000 ms = 1 hour.
+    invalidateLater(3600000)
     if (!identical(input$mainNav, "Lifecycle")) return()
     if (isolate(is.null(input$db_pass) || input$db_pass == "")) return()
     isolate(lcAutoTick(lcAutoTick() + 1))
@@ -10370,8 +10376,15 @@ server <- function(input, output, session) {
       xs <- as.numeric(ap$date)
       xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
       span <- max(xhi - xlo, 1)
+      # ANGLED labels (2026-08-26, Kevin's sketch): flat boxes stacked vertically
+      # still collided when many tickers cluster on one peak. Tilting each label
+      # ~55deg shrinks its HORIZONTAL footprint to cos(55) of the flat width, so
+      # the labels fan up-and-out from the dots instead of overlapping. The
+      # collision test uses the tilted width, and fewer levels are needed.
+      TILT <- -55
+      cosf <- cos(TILT * pi / 180)
       labw <- vapply(seq_len(nrow(ap)), function(i)
-        (nchar(ap$ticker[i]) * 6 + 16) * span / 760, numeric(1))
+        (nchar(ap$ticker[i]) * 6 * cosf + 8) * span / 760, numeric(1))
       lvl <- integer(nrow(ap)); MAXLVL <- 8L
       for (i in seq_len(nrow(ap))) {
         L <- 0L
@@ -10384,11 +10397,14 @@ server <- function(input, output, session) {
       }
       apann <- lapply(seq_len(nrow(ap)), function(i) {
         cc <- apcol[[ap$state[i]]]
+        # near the right edge, anchor right + flip the tilt so the label fans
+        # up-LEFT and never runs off the plot; otherwise fan up-right.
+        near_r <- (xhi - xs[i]) / span < 0.06
         list(x = format(ap$date[i]), y = ap$ret[i], xref = "x", yref = "y",
-             text = ap$ticker[i],
-             xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
+             text = ap$ticker[i], textangle = if (near_r) -TILT else TILT,
+             xanchor = if (near_r) "right" else "left", yanchor = "bottom",
              showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
-             ax = 0, ay = -11 - 13 * lvl[i], font = list(color = cc, size = 9),
+             ax = 0, ay = -10 - 15 * lvl[i], font = list(color = cc, size = 9),
              # OPAQUE bg: the bright green basket line the dots ride bleeds through
              # and washes the label to a pale box (Kevin, recurring). A plain hex
              # should be opaque, but pin opacity=1 explicitly to rule out any
@@ -10406,7 +10422,7 @@ server <- function(input, output, session) {
       yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret), na.rm = TRUE)
       ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
-      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.07 + 0.085 * max(lvl)))
+      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.09 + 0.11 * max(lvl)))
       ap_suffix <- " · all qualstream pins"
     }
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
