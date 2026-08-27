@@ -10713,8 +10713,12 @@ server <- function(input, output, session) {
       tpret <- if (!is.null(tp) && !is.null(tp$line)) tp$line$ret else numeric(0)
       plret <- if (!is.null(pl) && length(pl$lines))
                  unlist(lapply(pl$lines, function(x) x$ret), use.names = FALSE) else numeric(0)
-      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret), na.rm = TRUE)
-      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret, 0), na.rm = TRUE)
+      # include the checked master-list lines so the axis always fits them - a name
+      # that dips below 0 or spikes high must not clip against the fixed pin range.
+      ckret <- if (!is.null(ckl) && length(ckl))
+                 unlist(lapply(ckl, function(x) x$line$ret), use.names = FALSE) else numeric(0)
+      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret, ckret), na.rm = TRUE)
+      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret, ckret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
       ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.09 + 0.11 * max(lvl)))
       ap_suffix <- " · all qualstream pins"
