@@ -2740,7 +2740,7 @@ ui <- navbarPage(
         uiOutput("bestBetsLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1.1rem;"),
         # Benchmark comparison (+ click a board chip to overlay that ticker here).
-        plotlyOutput("qsCompareLC", height = "380px"),
+        plotlyOutput("qsCompareLC", height = "640px"),
         uiOutput("qsCompareNoteLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1rem;"),
         # --- My portfolio: strategy follower (model-linked DCA + ladder sells) ---
