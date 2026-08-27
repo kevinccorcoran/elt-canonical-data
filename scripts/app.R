@@ -7369,6 +7369,12 @@ server <- function(input, output, session) {
   # clicked board chip -> the ticker whose lifecycle timeline is shown below the
   # board (NULL = nothing selected, panel hidden). Set by the lcBoardClick observer.
   lc_hist_tk   <- reactiveVal(NULL)
+  # master-list checkboxes -> the set of tickers to draw as their own lines on the
+  # sketch (persisted across re-renders/hourly refresh so a checked name stays on).
+  lc_sketch_ticks <- reactiveVal(character(0))
+  observeEvent(input$lcSketchChecked, {
+    lc_sketch_ticks(toupper(as.character(input$lcSketchChecked)))
+  }, ignoreNULL = FALSE)
   lcAutoTick   <- reactiveVal(0)
   # Auto-start (2026-08-22): opening the app should need zero clicks - land on
   # Lifecycle, connect to the default environment (Production) with the
@@ -8896,6 +8902,46 @@ server <- function(input, output, session) {
     list(lines = out, n = length(out))
   })
 
+  # ── Checked master-list names -> their own return lines ───────────────────
+  # Driven by the master-list row checkboxes (lc_sketch_ticks). Each checked name
+  # is priced from cdm.ingest_combined and rebased to 0% at the SAME anchor as the
+  # benchmark lines, so a name's line is directly comparable to SPY / the baskets.
+  # Independent of the qualstream/cluster filters: if you checked it, it draws.
+  lc_checked_lines <- reactive({
+    tks <- toupper(lc_sketch_ticks()); tks <- tks[nzchar(tks)]
+    if (!length(tks)) return(NULL)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    d <- app_dataLC()
+    anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
+    if (is.na(anchor)) return(NULL)
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
+    px <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
+       WHERE ticker IN (%s) AND date >= '%s'
+         AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
+       ORDER BY ticker, date", inlist, format(anchor))), error = function(e) NULL)
+    if (is.null(px) || !nrow(px)) return(NULL)
+    px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
+    asof <- function(df, dd) { s <- df[df$d <= dd, , drop = FALSE]
+      if (!nrow(s)) NA_real_ else s$px[nrow(s)] }
+    out <- list()
+    for (tk in tks) {
+      tkr <- px[toupper(px$ticker) == tk, , drop = FALSE]
+      if (!nrow(tkr)) next
+      tkr <- tkr[order(tkr$d), , drop = FALSE]
+      base_tk <- asof(tkr, anchor); if (is.na(base_tk)) base_tk <- tkr$px[1]
+      if (is.na(base_tk) || base_tk == 0) next
+      tkr$ret <- (tkr$px / base_tk - 1) * 100
+      lo <- tkr[tkr$d >= anchor, c("d", "ret"), drop = FALSE]
+      if (!nrow(lo)) next
+      out[[tk]] <- lo
+    }
+    if (!length(out)) return(NULL)
+    out
+  })
+
   # ── Top-performers (hindsight) line ──────────────────────────────────────
   # Opt-in (checkbox lcTopPerf, OFF by default). The top decile of the sketch's
   # BUY universe by REALIZED window return, ignoring qualstream pass/fail. This
@@ -10276,8 +10322,15 @@ server <- function(input, output, session) {
       tags$td(style = "text-align:center;color:#cbd5e1;white-space:nowrap;font-size:0.72rem;",
               sprintf("%d× · %s%s", r$n_ent, add, lft))
     }
+    # persisted checked set (isolate: ticking a box must not re-render the whole
+    # table - only the sketch reacts, via lc_sketch_ticks / lc_checked_lines)
+    chk_ticks <- toupper(isolate(lc_sketch_ticks()))
     row_tr <- function(r) tags$tr(
       style = if (isTRUE(r$owned)) "background:rgba(16,185,129,0.06);" else "",
+      tags$td(style = "text-align:center;padding:2px 4px;",
+        tags$input(type = "checkbox", class = "sketchrow", `data-tk` = r$tk,
+                   `aria-label` = paste("plot", r$tk, "on the sketch"),
+                   checked = if (r$tk %in% chk_ticks) NA else NULL)),
       tags$td(style = "color:#e2e8f0;font-weight:600;padding:2px 8px;", r$tk),
       state_td(r$state),
       hold_td(r),
@@ -10296,7 +10349,7 @@ server <- function(input, output, session) {
     slab_hdr <- c(buy = "BUY", hold = "HOLD", sell = "SELL", other = "UNRANKED")
     skey <- function(r) if (is.na(r$state)) "other" else r$state
     scount <- table(vapply(recs, skey, character(1)))
-    grp_hdr <- function(s) tags$tr(tags$td(colspan = 9, style = sprintf(paste0(
+    grp_hdr <- function(s) tags$tr(tags$td(colspan = 10, style = sprintf(paste0(
       "padding:9px 8px 3px;color:%s;font-weight:800;font-size:0.76rem;",
       "text-transform:uppercase;letter-spacing:0.05em;border-bottom:2px solid %s55;"),
       scol_hdr[[s]], scol_hdr[[s]]),
@@ -10313,13 +10366,21 @@ server <- function(input, output, session) {
       tags$div(style = "color:#f1f5f9;font-weight:700;font-size:0.95rem;margin:0.3rem 0 0.1rem;",
                "Master list — every best bet, all horizons"),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
-        HTML("One table, grouped by BUY / HOLD / SELL, every holding period on each row. STATE = current buy/hold/sell (filter-independent) · HOLDING = your open entries (count&times; · latest add · time left on the hold), owned rows tinted green and floated to the top of their group · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. New adopts appear here automatically.")),
+        HTML("One table, grouped by BUY / HOLD / SELL, every holding period on each row. Tick a row's box to draw that name's own line on the sketch below. STATE = current buy/hold/sell (filter-independent) · HOLDING = your open entries (count&times; · latest add · time left on the hold), owned rows tinted green and floated to the top of their group · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. New adopts appear here automatically.")),
       tags$div(style = "overflow-x:auto;",
         tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
-          tags$thead(tags$tr(th("Ticker", "left"), th("State"), th("Holding"), th("Best"),
+          tags$thead(tags$tr(th("Plot"), th("Ticker", "left"), th("State"), th("Holding"), th("Best"),
                              th("Cluster"), th("Grade"),
                              th("4 mo"), th("7 mo"), th("12 mo"))),
-          tags$tbody(body)))
+          tags$tbody(body))),
+      # Delegated, bound once (survives the hourly re-render): any checkbox change
+      # collects every ticked row into lcSketchChecked, which drives lc_sketch_ticks
+      # -> lc_checked_lines -> the per-name lines on the sketch.
+      tags$script(HTML(
+        "if(!window.__lcSketchWired){window.__lcSketchWired=true;",
+        "$(document).on('change','input.sketchrow',function(){",
+        "var sel=[];$('input.sketchrow:checked').each(function(){sel.push(this.getAttribute('data-tk'));});",
+        "Shiny.setInputValue('lcSketchChecked',sel,{priority:'event'});});}"))
     )
   })
 
@@ -10436,6 +10497,25 @@ server <- function(input, output, session) {
         first <- FALSE
       }
       pl_suffix <- sprintf(" · %d pick lines", pl$n)
+    }
+    # Checked master-list names: each ticked row draws its own rebased return line
+    # in a distinct color, with a legend entry, so you can compare a handful of
+    # names head-to-head against SPY / the baskets. Lines only (no pins); a clicked
+    # chip's white overlay still rides brightest on top.
+    ckl <- tryCatch(lc_checked_lines(), error = function(e) NULL)
+    ck_suffix <- ""
+    if (!is.null(ckl) && length(ckl)) {
+      ckpal <- c("#f472b6", "#38bdf8", "#a3e635", "#fb923c", "#c084fc",
+                 "#22d3ee", "#fb7185", "#4ade80", "#e879f9", "#facc15")
+      ci <- 0L
+      for (nm in names(ckl)) {
+        ci <- ci + 1L; ln <- ckl[[nm]]
+        fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
+          name = nm, legendgroup = paste0("ck_", nm), showlegend = TRUE,
+          line = list(color = ckpal[((ci - 1L) %% length(ckpal)) + 1L], width = 2),
+          hovertemplate = paste0(nm, "<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
+      }
+      ck_suffix <- sprintf(" · %d checked", length(ckl))
     }
     # Clicked-chip overlay: the ticker's own return line (white, on top) + a
     # flag-pin at each lifecycle event, colored by state, labelled "<TK> BUY"
