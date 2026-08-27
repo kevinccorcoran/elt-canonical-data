@@ -8914,6 +8914,7 @@ server <- function(input, output, session) {
     d <- app_dataLC()
     anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(anchor)) return(NULL)
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)   # for the buy/hold/sell pins
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
     inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
@@ -8926,6 +8927,8 @@ server <- function(input, output, session) {
     px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
     asof <- function(df, dd) { s <- df[df$d <= dd, , drop = FALSE]
       if (!nrow(s)) NA_real_ else s$px[nrow(s)] }
+    ret_asof <- function(lo, dd) { s <- lo[lo$d <= dd, , drop = FALSE]
+      if (!nrow(s)) NA_real_ else s$ret[nrow(s)] }
     out <- list()
     for (tk in tks) {
       tkr <- px[toupper(px$ticker) == tk, , drop = FALSE]
@@ -8936,7 +8939,31 @@ server <- function(input, output, session) {
       tkr$ret <- (tkr$px / base_tk - 1) * 100
       lo <- tkr[tkr$d >= anchor, c("d", "ret"), drop = FALSE]
       if (!nrow(lo)) next
-      out[[tk]] <- lo
+      # lifecycle pins (buy/hold/sell transitions) placed on THIS name's own line,
+      # so a checked name shows when it was bought / held / sold, dated, in context.
+      ev <- data.frame(date = as.Date(character(0)), state = character(0),
+                       ret = numeric(0), stringsAsFactors = FALSE)
+      if (!is.null(dv) && !is.null(dv$M) && tk %in% rownames(dv$M)) {
+        now_state <- if (!is.null(dv$state_now) && tk %in% names(dv$state_now))
+                       dv$state_now[[tk]] else NA_character_
+        prov_tk <- !is.null(dv$prov_of) && tk %in% names(dv$prov_of) &&
+                   isTRUE(dv$prov_of[[tk]])
+        dl_tk <- if (!is.null(d$meta) && nrow(d$meta) > 0 && any(toupper(d$meta$ticker) == tk))
+                   suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == tk][1]))
+                 else as.Date(NA)
+        trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
+                                         prov_tk, now_state, dv$hz, dl_tk), error = function(e) NULL)
+        if (!is.null(trail) && nrow(trail)) {
+          td <- as.Date(trail$date); keep <- td >= anchor      # only in-window pins
+          if (any(keep)) {
+            td <- td[keep]; ts <- trail$state[keep]
+            rr <- vapply(td, function(x) ret_asof(lo, x), numeric(1))
+            ev <- data.frame(date = td, state = ts, ret = rr, stringsAsFactors = FALSE)
+            ev <- ev[!is.na(ev$ret), , drop = FALSE]
+          }
+        }
+      }
+      out[[tk]] <- list(line = lo, ev = ev)
     }
     if (!length(out)) return(NULL)
     out
@@ -10507,13 +10534,31 @@ server <- function(input, output, session) {
     if (!is.null(ckl) && length(ckl)) {
       ckpal <- c("#f472b6", "#38bdf8", "#a3e635", "#fb923c", "#c084fc",
                  "#22d3ee", "#fb7185", "#4ade80", "#e879f9", "#facc15")
+      ck_sym <- c(buy = "triangle-up", hold = "circle", sell = "triangle-down", closed = "x")
+      ck_pincol <- c(buy = "#34d399", hold = "#fbbf24", sell = "#f87171", closed = "#94a3b8")
       ci <- 0L
       for (nm in names(ckl)) {
-        ci <- ci + 1L; ln <- ckl[[nm]]
+        ci <- ci + 1L
+        col <- ckpal[((ci - 1L) %% length(ckpal)) + 1L]
+        ln <- ckl[[nm]]$line; ev <- ckl[[nm]]$ev
         fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
           name = nm, legendgroup = paste0("ck_", nm), showlegend = TRUE,
-          line = list(color = ckpal[((ci - 1L) %% length(ckpal)) + 1L], width = 2),
+          line = list(color = col, width = 2),
           hovertemplate = paste0(nm, "<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
+        # dated buy/hold/sell pins riding this name's own line
+        if (!is.null(ev) && nrow(ev)) {
+          for (s in unique(ev$state)) {
+            sub <- ev[ev$state == s, , drop = FALSE]
+            fig <- add_markers(fig, x = sub$date, y = sub$ret,
+              legendgroup = paste0("ck_", nm), showlegend = FALSE,
+              marker = list(
+                symbol = if (s %in% names(ck_sym)) ck_sym[[s]] else "circle",
+                color  = if (s %in% names(ck_pincol)) ck_pincol[[s]] else "#94a3b8",
+                size = 10, line = list(color = col, width = 1)),
+              hovertext = sprintf("%s %s %s", nm, toupper(s), format(sub$date)),
+              hovertemplate = "%{hovertext}<br>%{y:.1f}%<extra></extra>")
+          }
+        }
       }
       ck_suffix <- sprintf(" · %d checked", length(ckl))
     }
