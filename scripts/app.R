@@ -10534,8 +10534,8 @@ server <- function(input, output, session) {
     if (!is.null(ckl) && length(ckl)) {
       ckpal <- c("#f472b6", "#38bdf8", "#a3e635", "#fb923c", "#c084fc",
                  "#22d3ee", "#fb7185", "#4ade80", "#e879f9", "#facc15")
-      ck_sym <- c(buy = "triangle-up", hold = "circle", sell = "triangle-down", closed = "x")
-      ck_pincol <- c(buy = "#34d399", hold = "#fbbf24", sell = "#f87171", closed = "#94a3b8")
+      ck_sym <- c(buy = "triangle-up", hold = "diamond", sell = "triangle-down", closed = "x")
+      ck_pincol <- c(buy = "#22c55e", hold = "#f59e0b", sell = "#ef4444", closed = "#94a3b8")
       ci <- 0L
       for (nm in names(ckl)) {
         ci <- ci + 1L
@@ -10545,16 +10545,24 @@ server <- function(input, output, session) {
           name = nm, legendgroup = paste0("ck_", nm), showlegend = TRUE,
           line = list(color = col, width = 2),
           hovertemplate = paste0(nm, "<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
-        # dated buy/hold/sell pins riding this name's own line
+        # dated buy/hold/sell pins riding this name's own line: big distinct
+        # markers (buy = green up-triangle, hold = amber diamond, sell = red
+        # down-triangle) with an always-visible state label so the lifecycle reads
+        # off the line without hovering (sell labels above, buy/hold below).
         if (!is.null(ev) && nrow(ev)) {
           for (s in unique(ev$state)) {
             sub <- ev[ev$state == s, , drop = FALSE]
-            fig <- add_markers(fig, x = sub$date, y = sub$ret,
+            pc  <- if (s %in% names(ck_pincol)) ck_pincol[[s]] else "#94a3b8"
+            fig <- add_trace(fig, x = sub$date, y = sub$ret, type = "scatter",
+              mode = "markers+text",
               legendgroup = paste0("ck_", nm), showlegend = FALSE,
               marker = list(
                 symbol = if (s %in% names(ck_sym)) ck_sym[[s]] else "circle",
-                color  = if (s %in% names(ck_pincol)) ck_pincol[[s]] else "#94a3b8",
-                size = 10, line = list(color = col, width = 1)),
+                color = pc, size = 14, line = list(color = "#0b1220", width = 1.4)),
+              text = toupper(s),
+              textposition = if (identical(s, "sell")) "top center" else "bottom center",
+              textfont = list(color = pc, size = 10),
+              cliponaxis = FALSE,
               hovertext = sprintf("%s %s %s", nm, toupper(s), format(sub$date)),
               hovertemplate = "%{hovertext}<br>%{y:.1f}%<extra></extra>")
           }
