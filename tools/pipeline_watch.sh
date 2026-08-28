@@ -60,8 +60,12 @@ with create_session() as s:
         # Recency bounds: a retired DAG whose last-ever run failed in January
         # must not nag forever (seen on first live run: 3 dead DAGs surfaced).
         if dag_id in STALE_DAGS:
-            from airflow.models import DAG
-            dag_obj = s.query(DAG).filter_by(dag_id=dag_id).first()
+            # DagModel is the ORM row (is_paused lives there); airflow.models.DAG
+            # is the authoring class and s.query(DAG) throws (caught 2026-08-28
+            # on the first prod run after the exec-failure path stopped
+            # swallowing stderr).
+            from airflow.models import DagModel
+            dag_obj = s.query(DagModel).filter_by(dag_id=dag_id).first()
             if dag_obj and dag_obj.is_paused:
                 pass  # paused DAGs exempt from stale check
             else:
