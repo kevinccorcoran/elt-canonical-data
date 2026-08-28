@@ -7,8 +7,12 @@ flow so the strategy-follower book maintains itself with no Generate click:
   1. ADOPT   every current validated-board BUY (the dashboard's dv$qs_buys rule:
              open ledger position + proven slot at the 12-month canonical
              horizon + monthly majority; vetoes excluded; grade ranks; max 5
-             per cluster, 25 overall) that is not tracked or dismissed, as a
-             one-off plan at the user's auto_adopt_amount setting.
+             per cluster, 25 overall) that is not tracked, not dismissed and
+             has NO closed model episode, as a one-off plan at the user's
+             auto_adopt_amount setting. A name already round-tripped once
+             (closed_positions row exists) is NEVER auto-re-added (policy
+             2026-08-28): it pings once per episode ("2nd time around", with
+             the last round's result) and waits for a manual Adopt.
   2. SNAPSHOT every tracked ticker's bucket to portfolio.state_history
              (ticker, as_of=today, hz=12) - the Buy->Hold->Sell trail no longer
              depends on opening the dashboard.
@@ -18,9 +22,10 @@ flow so the strategy-follower book maintains itself with no Generate click:
              partial sales were recorded via sold_fraction), row leaves the
              active book, Telegram ping carries the P&L verdict. Losses archive
              like profits (follow-the-model decision, 2026-08-21). Model-sell
-             archives do NOT dismiss (a new BUY episode re-enters later); a
-             hand-sale AGAINST a live BUY does dismiss, so a deliberately
-             exited name is not re-adopted the next morning.
+             archives do NOT dismiss, but the closed episode blocks any
+             auto-re-adopt (step 1): a later re-fire is announced, not
+             bought. A hand-sale AGAINST a live BUY does dismiss, so a
+             deliberately exited name is not even announced again.
   3b RECOUP  one ping per position (recoup_pinged_at) when it has EVER closed
              >= recoup_threshold_pct above entry and still sits near it -
              high-water based, so outages and gap-ups can't lose the event.
@@ -282,7 +287,10 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry,
     lets a tracked model position whose SELL scrolled out of the 30d bucket
     window (e.g. the chain was down for a month) still be archived instead of
     sticking in the book forever.
-    Returns (adopts, snaps, archived, recoups, skipped); caller commits."""
+    Returns (adopts, snaps, archived, recoups, skipped, reentries); caller
+    commits. reentries = [(ticker, episode_n, (sold_date, ret_pct, outcome)
+    | None)] - queue names with a prior closed episode, announced but NOT
+    adopted (policy 2026-08-28)."""
     pos = _rows(cur, """
         SELECT id, upper(ticker), amount_usd, cadence, day1,
                start_date, end_date, sold_date, mode,
@@ -291,8 +299,45 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry,
     dismissed = {r[0].upper() for r in _rows(cur, "SELECT ticker FROM portfolio.dismissed")}
     tracked = {r[1] for r in pos}
 
-    # 1. ADOPT
-    to_add = [tk for tk in qs_buys if tk not in tracked and tk not in dismissed]
+    # 1. ADOPT - but a name we already round-tripped (a closed model episode
+    # exists) is NEVER auto-re-added (policy 2026-08-28): a model sell means
+    # that trade is finished, and a later BUY re-fire must not rebuild the
+    # position on autopilot. Instead it pings ONCE per new episode ("2nd
+    # time" etc., keyed ticker+episode in reentry_pinged so a name sitting in
+    # the queue for a week doesn't nag daily) with the last round's result -
+    # Kevin decides re-buys by hand via Adopt in the dashboard.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio.reentry_pinged (
+            ticker    text        NOT NULL,
+            episode   int         NOT NULL,
+            pinged_at timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (ticker, episode))""")
+    # count EPISODES, not archive rows: partial-sale slices land as separate
+    # rows under suffixed ids (<id>~p1, ~p2, ... - see the dashboard's
+    # 'Sell part %' flow), so a raw count(*) would inflate the ordinal
+    # ("3rd time around" on a genuine 2nd entry). Strip the slice suffix and
+    # count distinct base ids = one per round trip.
+    closed_n = {t: int(n) for t, n in _rows(cur, """
+        SELECT upper(ticker),
+               count(DISTINCT regexp_replace(id, '~p[0-9]+$', ''))
+        FROM portfolio.closed_positions
+        GROUP BY upper(ticker)""")}
+    queue = [tk for tk in qs_buys if tk not in tracked and tk not in dismissed]
+    to_add = [tk for tk in queue if not closed_n.get(tk)]
+    reentries = []
+    for tk in (t for t in queue if closed_n.get(t)):
+        ep = closed_n[tk] + 1
+        if _rows(cur, """SELECT 1 FROM portfolio.reentry_pinged
+                         WHERE ticker = %s AND episode = %s""", (tk, ep)):
+            continue  # this episode was already announced
+        last = _rows(cur, """
+            SELECT sold_date, ret_pct, outcome FROM portfolio.closed_positions
+            WHERE upper(ticker) = %s ORDER BY sold_date DESC LIMIT 1""", (tk,))
+        reentries.append((tk, ep, last[0] if last else None))
+        if not dry:
+            cur.execute("""
+                INSERT INTO portfolio.reentry_pinged (ticker, episode)
+                VALUES (%s, %s) ON CONFLICT DO NOTHING""", (tk, ep))
     adopts, skipped = [], []
     if amount is None:
         skipped = to_add
@@ -372,12 +417,13 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry,
             cur.execute("DELETE FROM portfolio.positions WHERE id = %s", (rid,))
             if hand_sold and not model_sell and bucket.get(tk) in ("buy", "hold"):
                 # A hand-sale AGAINST a live BUY or HOLD is a deliberate exit;
-                # without this the still-open name would be re-adopted with a
-                # fresh "NEW BUY" ping the moment it (re-)fires BUY (audit
-                # 2026-08-23: the old buy-only check let a hand-sold HOLD slip
-                # back in). Model sells stay un-dismissed so a genuinely new
-                # BUY episode re-enters; un-dismiss = Adopt manually in the
-                # dashboard.
+                # dismissing silences it completely - no re-adopt AND no
+                # re-entry announcement (audit 2026-08-23: the old buy-only
+                # check let a hand-sold HOLD slip back in). Model sells stay
+                # un-dismissed: their closed episode already blocks the
+                # auto-re-adopt (step 1, policy 2026-08-28), so a re-fire is
+                # announced once per episode instead; un-dismiss = Adopt
+                # manually in the dashboard.
                 cur.execute("""
                     INSERT INTO portfolio.dismissed (ticker) VALUES (%s)
                     ON CONFLICT (ticker) DO NOTHING""", (tk,))
@@ -428,11 +474,11 @@ def sync_core(cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry,
                 cur.execute(
                     "UPDATE portfolio.positions SET recoup_pinged_at = %s WHERE id = %s",
                     (today, rid))
-    return adopts, snaps, archived, recoups, skipped
+    return adopts, snaps, archived, recoups, skipped, reentries
 
 
 def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None,
-               bad_amount=None):
+               bad_amount=None, reentries=None):
     """The exact Telegram texts. Single source shared by run() and the test
     harnesses, so the wording the tests validate is the wording that ships.
     Format (Kevin, 2026-08-21): the ACTION comes first in plain words, one
@@ -457,6 +503,26 @@ def build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped=None,
         msgs.append(f"\U0001F7E2 BUY in Robinhood - ${amount:g} each\n"
                     f"{lines}\n"
                     "The table tracks these from today.")
+    # Re-entries: a name already round-tripped once fires BUY again. Announce
+    # the episode number and the last result, but do NOT rebuy or re-add -
+    # that call is Kevin's (policy 2026-08-28).
+    if reentries:
+        ord_of = {2: "2nd", 3: "3rd"}
+        for tk, ep, last in reentries:
+            nth = ord_of.get(ep, f"{ep}th")
+            hist = ""
+            if last:
+                sold_d, ret, outcome = last
+                try:
+                    hist = (f"Last round: sold {sold_d} at {float(ret):+.0f}% "
+                            f"({outcome}).\n")
+                except (TypeError, ValueError):
+                    hist = f"Last round: sold {sold_d} ({outcome}).\n"
+            msgs.append(f"\U0001F501 {tk} says BUY again - {nth} time around, "
+                        "NOT bought, NOT re-added to your table\n"
+                        f"{hist}"
+                        "You already played this one. Rebuy only on purpose: "
+                        "Adopt in the dashboard puts it back on the books.")
     if bad_amount is not None:
         msgs.append("\U000026A0\U0000FE0F The '$ per new BUY' setting looks wrong "
                     f"(${bad_amount:g}) - ignored, nothing adopts until it is "
@@ -658,11 +724,11 @@ def run(dry=False):
         if not (thr >= 10):
             thr = 100.0
 
-        adopts, snaps, archived, recoups, skipped = sync_core(
+        adopts, snaps, archived, recoups, skipped, reentries = sync_core(
             cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry,
             exit_of=exit_of)
         msgs = build_msgs(adopts, archived, recoups, amount, grade, cluster,
-                          skipped, bad_amount=bad_amount)
+                          skipped, bad_amount=bad_amount, reentries=reentries)
 
         if dry:
             con.rollback()
@@ -673,6 +739,9 @@ def run(dry=False):
             print(f"settings: amount={'UNSET' if amount is None else amount} thr={thr}")
             print(f"qs_buys ({len(qs_buys)}): {', '.join(qs_buys)}")
             print(f"would adopt ({len(adopts)}): {', '.join(tk for _, tk in adopts) or '-'}")
+            if reentries:
+                print("would announce re-entry (NOT adopt): "
+                      + ", ".join(f"{tk} (ep {ep})" for tk, ep, _ in reentries))
             if skipped:
                 print(f"would SKIP (amount unset): {', '.join(skipped)}")
             print(f"would snapshot: {snaps} tracked rows")

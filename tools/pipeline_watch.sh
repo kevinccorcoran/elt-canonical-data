@@ -22,7 +22,12 @@ fi
 # stale alert would only notice hours later. Check the host filesystem (this
 # script runs on the droplet, not in a container) and pass it into the alert.
 HOST_DISK_PCT=$(df -P / | awk 'NR==2{gsub("%","",$5); print $5}')
-OUT=$(docker exec -i -e HOST_DISK_PCT="$HOST_DISK_PCT" airflow-scheduler python3 - <<PY
+# The check body is held in a variable so it can run against EITHER container:
+# scheduler first, webserver as fallback (audit 2026-08-28: with the body glued
+# to the scheduler exec, a down scheduler - the primary failure class this
+# watch exists to catch - produced empty OUT, indistinguishable from healthy,
+# and total silence).
+PYCODE=$(cat <<'PY'
 import os
 from datetime import datetime, timedelta, timezone
 from airflow.models import DagRun, Variable
@@ -55,11 +60,16 @@ with create_session() as s:
         # Recency bounds: a retired DAG whose last-ever run failed in January
         # must not nag forever (seen on first live run: 3 dead DAGs surfaced).
         if dag_id in STALE_DAGS:
-            last_ok = next((r for r in runs if r.state == DagRunState.SUCCESS), None)
-            lim = STALE_DAGS[dag_id]
-            if not last_ok or (now - last_ok.start_date) > timedelta(hours=lim):
-                age = "never" if not last_ok else "%.1fh" % ((now - last_ok.start_date).total_seconds()/3600)
-                msgs.append("no successful %s run in %s" % (dag_id, age))
+            from airflow.models import DAG
+            dag_obj = s.query(DAG).filter_by(dag_id=dag_id).first()
+            if dag_obj and dag_obj.is_paused:
+                pass  # paused DAGs exempt from stale check
+            else:
+                last_ok = next((r for r in runs if r.state == DagRunState.SUCCESS), None)
+                lim = STALE_DAGS[dag_id]
+                if not last_ok or (now - last_ok.start_date) > timedelta(hours=lim):
+                    age = "never" if not last_ok else "%.1fh" % ((now - last_ok.start_date).total_seconds()/3600)
+                    msgs.append("no successful %s run in %s" % (dag_id, age))
         if latest.state == DagRunState.FAILED and (now - latest.start_date) < timedelta(hours=48):
             msgs.append("%s latest run FAILED (%s)" % (dag_id, latest.run_id))
         budget = STUCK_BUDGET_H.get(dag_id, STUCK_DEFAULT_H)
@@ -88,5 +98,28 @@ else:
     print("OK")
 PY
 )
+run_watch() {  # $1 = container name
+  printf '%s' "$PYCODE" | docker exec -i -e HOST_DISK_PCT="$HOST_DISK_PCT" "$1" python3 - 2>/dev/null
+}
+OUT=$(run_watch airflow-scheduler)
+if [ -z "$OUT" ]; then
+  # scheduler exec failed - that is itself an incident. Run the checks via the
+  # webserver AND ping about the dead scheduler through it (utils.alerting
+  # resolves creds itself; same pattern as portfolio_deadman.sh).
+  OUT=$(run_watch airflow-webserver)
+  if [ -n "$OUT" ]; then
+    docker exec airflow-webserver python3 -c '
+import sys; sys.path.insert(0, "/opt/airflow/dags")
+from utils.alerting import notify
+notify("\U0001F6A8 [prod] pipeline watch: airflow-scheduler container exec FAILED - checks ran via webserver; the scheduler is likely down, no DAGs are running")
+' >/dev/null 2>&1 && date +%s > "$STATE"
+    OUT="SCHEDULER_EXEC_FAILED (ran via webserver) $OUT"
+  else
+    # both containers unreachable: no check ran and no alert path exists.
+    # Documented residual - a host-level send would need creds on the host,
+    # which the no-secrets design forbids. The log line is the only trace.
+    OUT="EXEC_FAILED - docker exec failed on scheduler AND webserver; no checks ran, no alert sent"
+  fi
+fi
 echo "$(date -u +%FT%TZ) $OUT"
 case "$OUT" in *ALERT_SENT*) date +%s > "$STATE";; esac

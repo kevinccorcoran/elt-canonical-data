@@ -39,6 +39,19 @@ CREATE TABLE IF NOT EXISTS portfolio.dismissed (
     dismissed_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Re-entry ping ledger (policy 2026-08-28): a name whose model episode
+-- already closed is never auto-re-adopted when it fires BUY again - the sync
+-- announces it once per episode ("2nd time around") and Kevin re-buys by
+-- hand if he wants. One row per (ticker, episode) = one announcement;
+-- episode N = closed_positions count + 1 at ping time. portfolio_sync also
+-- creates this on the fly, so existing deploys need no manual migration.
+CREATE TABLE IF NOT EXISTS portfolio.reentry_pinged (
+    ticker    text        NOT NULL,
+    episode   int         NOT NULL,
+    pinged_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (ticker, episode)
+);
+
 -- Transition log: one snapshot per ticker per Generate, so a position's
 -- Buy -> Hold -> Sell -> Closed path is reviewable over time. Upsert on
 -- (ticker, as_of, hz): re-Generating the same day refreshes that row; new days
