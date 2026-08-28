@@ -61,7 +61,12 @@ def check(name, cond, detail=""):
 
 
 def cleanup():
+    cur.execute("""CREATE TABLE IF NOT EXISTS portfolio.reentry_pinged (
+        ticker text NOT NULL, episode int NOT NULL,
+        pinged_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (ticker, episode))""")
     for sql in (
+        "DELETE FROM portfolio.reentry_pinged WHERE upper(ticker) LIKE 'ZG%'",
         "DELETE FROM monitoring.prediction_ledger WHERE upper(ticker) LIKE 'ZG%'",
         "DELETE FROM validation.walk_forward_ticker_rank WHERE upper(ticker) LIKE 'ZG%'",
         "DELETE FROM qual.ticker_scorecards WHERE upper(ticker) LIKE 'ZG%'",
@@ -199,10 +204,11 @@ check("S28c stale exit is out of the bucket but carried in exit_of",
 zb = {t: b for t, b in bucket.items() if t in FIX}
 zq = [t for t in qs_buys if t in FIX]
 zx = {t: d for t, d in exit_of.items() if t in FIX}
-adopts, snaps, archived, recoups, skipped = PS.sync_core(
+adopts, snaps, archived, recoups, skipped, reentries = PS.sync_core(
     cur, zb, grade, cluster, zq, AMT, THR, RUN_D, dry=False, exit_of=zx)
 con.commit()
-msgs = PS.build_msgs(adopts, archived, recoups, AMT, grade, cluster, skipped)
+msgs = PS.build_msgs(adopts, archived, recoups, AMT, grade, cluster, skipped,
+                     reentries=reentries)
 
 a_tks = {tk for _, tk in adopts}
 check("S22 pass-1 adopts exactly the gate passers {ZGPASS, ZGEDGE}",
@@ -235,7 +241,7 @@ bucket2, grade2, cluster2, qs_buys2, exit_of2 = PS.compute_board(cur)
 check("S22e freshly graded 70 enters the queue next pass", "ZGNONE" in qs_buys2)
 zb2 = {t: b for t, b in bucket2.items() if t in FIX}
 zq2 = [t for t in qs_buys2 if t in FIX]
-adopts2, _, _, _, _ = PS.sync_core(
+adopts2, _, _, _, _, _ = PS.sync_core(
     cur, zb2, grade2, cluster2, zq2, AMT, THR, RUN_D, dry=False,
     exit_of={t: d for t, d in exit_of2.items() if t in FIX})
 con.commit()

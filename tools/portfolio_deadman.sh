@@ -32,10 +32,10 @@ STALE_UNSENT="${ROW##*|}"
 [ -z "$ROW" ] && { LAST="query-failed"; STALE_UNSENT="0"; }
 STALE_UNSENT="${DEADMAN_STALE_OVERRIDE:-$STALE_UNSENT}"
 
-# Reconcile drift: open positions the board now reads SELL but the sync did not
+# Reconcile drift: open model positions the board now reads SELL but the sync did not
 # archive. DEADMAN_DRIFT_OVERRIDE dry-fires this branch without seeding rows.
 DRIFT="$(docker exec airflow-scheduler bash -lc \
-  "psql \"\$DATABASE_URL\" -tA -c \"SELECT count(*) FROM portfolio.positions p WHERE p.sold_date IS NULL AND EXISTS (SELECT 1 FROM serving.return_cluster_ticker_global_action_current g WHERE upper(g.ticker) = upper(p.ticker) AND g.global_action = 'SELL')\"" \
+  "psql \"\$DATABASE_URL\" -tA -c \"SELECT count(*) FROM portfolio.positions p WHERE p.sold_date IS NULL AND p.mode = 'model' AND EXISTS (SELECT 1 FROM serving.return_cluster_ticker_global_action_current g WHERE upper(g.ticker) = upper(p.ticker) AND g.global_action = 'SELL')\"" \
   2>/dev/null)" || DRIFT="0"
 [ -z "$DRIFT" ] && DRIFT="0"
 DRIFT="${DEADMAN_DRIFT_OVERRIDE:-$DRIFT}"
@@ -58,6 +58,12 @@ echo "$STAMP ALERT: $MSG"
 # utils.alerting.notify resolves the Telegram credentials itself (dotenv) -
 # a bare docker-exec env does NOT carry TELEGRAM_*, so never use raw urllib here.
 docker exec airflow-scheduler python3 -c '
+import sys
+sys.path.insert(0, "/opt/airflow/dags")
+from utils.alerting import notify
+print("telegram:", "sent" if notify(sys.argv[1]) else "SEND FAILED")
+' "$MSG" 2>/dev/null || \
+docker exec airflow-webserver python3 -c '
 import sys
 sys.path.insert(0, "/opt/airflow/dags")
 from utils.alerting import notify

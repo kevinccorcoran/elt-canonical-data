@@ -27,9 +27,11 @@ The 4-monthly DAG is RETIRED (paused in prod; file kept for reversibility) --
 this DAG now covers both fresh-buy grading and the holds refresh. Grades are
 upsert-idempotent per (ticker, as_of, rubric_version).
 
-Failures ping Kevin via Telegram (same env contract as tests/utilities/notify.py:
-TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID). A missing env or a failed ping
-only logs -- it never re-fails the task. Rationale: the one prior
+Failures ping Kevin via Telegram through utils.alerting.on_failure_telegram
+(TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID from env, falling back to Airflow
+Variables so the ping survives a container recreation - the 2026-08-15
+recreate silently killed the old raw-os.getenv callback). A missing cred or a
+failed ping only logs -- it never re-fails the task. Rationale: the one prior
 Airflow grading failure (2026-08-05) sat unnoticed for 8 days; a dead grader
 means new buys silently enter ungraded and drop out of the board's orange-+
 filter and portfolio seeding.
@@ -55,11 +57,9 @@ the worker's python.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
-import urllib.request
 from datetime import timedelta
 from pathlib import Path
 
@@ -68,39 +68,9 @@ from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.bash import BashOperator
 
+from utils.alerting import on_failure_telegram
+
 log = logging.getLogger(__name__)
-
-
-def _notify_failure(context) -> None:
-    """Telegram-ping the grading failure; never raise.
-
-    Env contract matches tests/utilities/notify.py (TELEGRAM_BOT_TOKEN +
-    TELEGRAM_CHAT_ID -- the alert does not auto-discover the chat id, so pin it).
-    Anything short of a sent message -- unset env, network error, non-200 -- is
-    logged and swallowed so the callback can never turn a task failure into a
-    second failure or mask the original log. Kept stdlib-only and self-contained
-    (no cross-package import) so the DAG carries no extra worker dependency beyond
-    what the grader already needs.
-    """
-    try:
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        chat_id = os.getenv("TELEGRAM_CHAT_ID")
-        if not token or not chat_id:
-            log.warning("qual failure notify skipped: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set")
-            return
-        ti = context.get("task_instance")
-        msg = "qual grading FAILED: %s.%s %s" % (
-            getattr(ti, "dag_id", "?"), getattr(ti, "task_id", "?"),
-            context.get("ds", "?"))
-        req = urllib.request.Request(
-            "https://api.telegram.org/bot%s/sendMessage" % token,
-            data=json.dumps({"chat_id": chat_id, "text": msg}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            log.info("qual failure notify sent (HTTP %s)", resp.status)
-    except Exception:
-        log.exception("qual failure notify errored (swallowed)")
 
 QUALSTREAM_ROOT = Path(
     os.environ.get("QUALSTREAM_ROOT", Path(__file__).resolve().parents[1])
@@ -135,8 +105,7 @@ default_args = {
     # spend does not balloon; still keep retries low.
     "retries": 1,
     "retry_delay": timedelta(minutes=10),
-    # fires after the FINAL failed attempt; see _notify_failure for the contract
-    "on_failure_callback": _notify_failure,
+    "on_failure_callback": on_failure_telegram,
 }
 
 with DAG(

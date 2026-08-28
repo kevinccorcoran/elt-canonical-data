@@ -146,13 +146,14 @@ for day in D:
     thr_rows = q("SELECT value FROM portfolio.app_settings WHERE key='recoup_threshold_pct'")
     thr = float(thr_rows[0][0]) if thr_rows else 100.0
 
-    adopts, snaps, archived, recoups, skipped = PS.sync_core(
+    adopts, snaps, archived, recoups, skipped, reentries = PS.sync_core(
         cur, zb, grade, cluster, zq, amount, thr, day, dry=False)
     if day == D[0] and adopts:
         # same-day re-run (idempotent) so the fresh adopt gets its day-1 snapshot
         PS.sync_core(cur, zb, grade, cluster, zq, amount, thr, day, dry=False)
 
-    msgs = PS.build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped)
+    msgs = PS.build_msgs(adopts, archived, recoups, amount, grade, cluster, skipped,
+                         reentries=reentries)
     tag = f"[DEV E2E {LABEL[day]} - simulation, do NOT trade] "
     msgs = [tag + m for m in msgs]
     cur.execute("""INSERT INTO portfolio.sync_runs

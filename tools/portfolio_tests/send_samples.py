@@ -17,7 +17,7 @@ sys.path.insert(0, "/opt/airflow/dags")
 from portfolio_sync import build_msgs
 from utils.alerting import notify
 
-TAG = "[TEST v5]"
+TAG = "[TEST v6]"  # v6: + re-entry announcement and bad-amount warning shapes
 
 adopts = [("rid1", "ZZTA")]
 archived = [
@@ -31,9 +31,15 @@ recoups = [
     ("ZZTJ", 58.0, 58.0, 63.3,  7.0, "ZZTJ-sync5-20260822", 30),  # 30% already banked
 ]
 skipped = ["ZZTM", "ZZTN"]
+reentries = [
+    # (tk, episode, (sold_date, ret_pct, outcome) | None)
+    ("ZZTG", 2, ("2026-07-18", 20.0, "profit")),   # with last-round history
+    ("ZZTH", 3, None),                             # history row missing
+]
 
 msgs = build_msgs(adopts, archived, recoups, 5.0,
-                  grade={"ZZTA": 74}, cluster={"ZZTA": 9}, skipped=skipped)
+                  grade={"ZZTA": 74}, cluster={"ZZTA": 9}, skipped=skipped,
+                  bad_amount=25000.0, reentries=reentries)
 text = (f"{TAG} exact wording from the DEPLOYED build_msgs - one sample of "
         "every message type, then ignore:\n\n" + "\n\n".join(msgs))
 print(text)

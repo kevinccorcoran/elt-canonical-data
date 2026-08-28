@@ -92,6 +92,9 @@ cur.execute("""CREATE TABLE IF NOT EXISTS portfolio.sync_runs (
     created_at timestamptz NOT NULL DEFAULT now())""")
 cur.execute("ALTER TABLE portfolio.sync_runs ADD COLUMN IF NOT EXISTS sent_n integer NOT NULL DEFAULT 0")
 cur.execute("ALTER TABLE portfolio.sync_runs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0")
+cur.execute("""CREATE TABLE IF NOT EXISTS portfolio.reentry_pinged (
+    ticker text NOT NULL, episode int NOT NULL,
+    pinged_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (ticker, episode))""")
 
 
 def cleanup():
@@ -100,6 +103,7 @@ def cleanup():
                 "DELETE FROM portfolio.closed_positions WHERE upper(ticker) LIKE 'ZZT%'",
                 "DELETE FROM portfolio.state_history WHERE upper(ticker) LIKE 'ZZT%'",
                 "DELETE FROM portfolio.dismissed WHERE upper(ticker) LIKE 'ZZT%'",
+                "DELETE FROM portfolio.reentry_pinged WHERE upper(ticker) LIKE 'ZZT%'",
                 "DELETE FROM portfolio.sync_runs WHERE as_of < DATE '2021-01-01'"):
         cur.execute(sql)
 
@@ -190,10 +194,11 @@ grade   = {"ZZTA": 74.0, "ZZTG": 71.0}
 cluster = {"ZZTA": 9, "ZZTG": 7}
 qs_buys = ["ZZTA", "ZZTG", "ZZTF"]
 
-adopts, snaps, archived, recoups, skipped = PS.sync_core(
+adopts, snaps, archived, recoups, skipped, reentries = PS.sync_core(
     cur, bucket, grade, cluster, qs_buys, AMT, THR, TODAY, dry=False)
 con.commit()
-msgs = PS.build_msgs(adopts, archived, recoups, AMT, grade, cluster, skipped)
+msgs = PS.build_msgs(adopts, archived, recoups, AMT, grade, cluster, skipped,
+                     reentries=reentries)
 
 # ── asserts, pass 1 ──────────────────────────────────────────────────────────
 results = []
@@ -207,7 +212,15 @@ a_tks = {tk for _, tk in adopts}
 check("S1 new buy adopted (ZZTA)", "ZZTA" in a_tks)
 check("S1b adopted at the configured $5",
       q("SELECT amount_usd FROM portfolio.positions WHERE upper(ticker)='ZZTA'")[0][0] == 5)
-check("S8 re-entry re-adopted (ZZTG, archived before)", "ZZTG" in a_tks)
+# S8 flipped 2026-08-28: a closed episode's re-fire must NOT auto-re-add;
+# it announces the episode instead ("2nd time around") and leaves the buy
+# decision to Kevin. Dedup: the same episode never pings twice (S8c, pass 2).
+check("S8 re-entry NOT re-adopted (ZZTG, archived before)", "ZZTG" not in a_tks)
+check("S8a re-entry announced with episode number",
+      any(tk == "ZZTG" and ep == 2 for tk, ep, _ in reentries), str(reentries))
+check("S8b re-entry ping says not re-added",
+      any("ZZTG" in m and "NOT" in m for m in msgs),
+      str([m for m in msgs if "ZZTG" in m]))
 st = {r[0]: (r[1], r[2]) for r in q(
     "SELECT upper(ticker), state, why FROM portfolio.state_history "
     "WHERE as_of=%s AND upper(ticker) LIKE 'ZZT%%'", (TODAY,))}
@@ -273,9 +286,11 @@ check("closed table rows = 8 (ZZTG-old + ZZTK-slice + C/D/F + ZZTK-final + "
       "ZZTS-slice + ZZTS-final)", closed_n == 8, str(closed_n))
 
 # ── pass 2: same day re-run (idempotence + no-dup recoup + no re-adopt) ──────
-adopts2, _, archived2, recoups2, _ = PS.sync_core(
+adopts2, _, archived2, recoups2, _, reentries2 = PS.sync_core(
     cur, bucket, grade, cluster, qs_buys, AMT, THR, TODAY, dry=False)
 con.commit()
+check("S8c re-entry episode pings once (no repeat on re-run)",
+      not any(tk == "ZZTG" for tk, *_ in reentries2), str(reentries2))
 check("S14 re-run pings no duplicate recoup (recoup_pinged_at stamps)",
       not {tk for tk, *_ in recoups2} & {"ZZTE", "ZZTI"}, str(recoups2))
 check("S15c dismissed hand-sold name NOT re-adopted on the next run",
@@ -283,7 +298,7 @@ check("S15c dismissed hand-sold name NOT re-adopted on the next run",
 check("pass-2 adopts nothing new (idempotent day)", not adopts2, str(adopts2))
 
 # ── S16: auto_adopt_amount unset -> skip + warn ──────────────────────────────
-a3, _, _, _, sk3 = PS.sync_core(
+a3, _, _, _, sk3, _ = PS.sync_core(
     cur, {"ZZTM": "buy"}, {}, {}, ["ZZTM"], None, THR, TODAY, dry=False)
 m3 = PS.build_msgs(a3, [], [], None, {}, {}, sk3)
 check("S16a amount unset -> no adoption", not a3 and sk3 == ["ZZTM"], str((a3, sk3)))
