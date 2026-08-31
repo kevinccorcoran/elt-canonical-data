@@ -21,7 +21,7 @@ AlphaStream is organized into three repositories:
 
 - **`elt-canonical-data`** (this repo, public) — the data layer. Ingestion, raw storage, cleaned canonical tables, and shared infrastructure and documentation.
 - **`inference-models`** (private) — the modeling layer: unsupervised clustering, statistical scoring, walk-forward validation, and serving tables that sit on top of the canonical tables.
-- **`qualstream`** (private, newly integrated) — a standalone agent that grades each group member qualitatively with one Claude call per member, judged only from a point-in-time data block (no web search, so every grade is reproducible and backtestable), refreshed every 4 months.
+- **`qualstream`** (private, decoupled) — a standalone agent that grades each group member qualitatively with one Claude call per member, judged only from a point-in-time data block (no web search, so every grade is reproducible and backtestable), refreshed every 4 months.
 
 ## Environments
 
@@ -128,7 +128,7 @@ Supports:
 **2025 — Scale**
 - Migrated ingestion to a new data provider
 - Consolidated multiple sources into one pipeline
-- Added a metrics layer over the history
+- Added a semantic layer of standardized metrics over the history
 - Moved execution to the cloud
 
 **2026 Q1 — Production Infrastructure**
@@ -139,7 +139,7 @@ Supports:
 **2026 Q2 — Forecasting & Front End**
 - Reworked forecasting with walk-forward validation and trust scoring
 - Added front-end views for ranges, coverage, and clusters
-- Added 300% data coverage, removing survivorship bias
+- Expanded data coverage by 300%, removing survivorship bias
 
 **2026 Q3 — Reliability & Data Quality**
 - Point-in-time forecasting with backtest replay and a live log
