@@ -61,6 +61,20 @@ def _walk_forward_not_running() -> bool:
             f"walk_forward_dbt_models has {len(active)} active/queued run(s); "
             "skipping the serving rebuild to avoid mixed-generation evidence."
         )
+        # The skip is a SUCCESS state, so no failure callback fires - on
+        # 2026-09-01 the quarterly WF blocked the whole daily chain (no board
+        # refresh, no grader, no sync) and the first signal was the deadman
+        # 8 hours later. Ping the skip explicitly; a failed send never blocks.
+        try:
+            from utils.alerting import notify
+            notify(
+                "⏸️ [prod] daily chain SKIPPED - walk_forward is "
+                "running/queued, so today's board/grades/sync wait. If WF ends "
+                "early, re-trigger inference_dbt_models; else tomorrow's run "
+                "catches up. The portfolio deadman will also fire at 16:30 UTC."
+            )
+        except Exception:
+            print("skip-notify failed (non-fatal)")
         return False
     return True
 
