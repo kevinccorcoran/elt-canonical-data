@@ -9369,7 +9369,7 @@ server <- function(input, output, session) {
       # even though a grade no longer hard-gates entry - a veto is an active
       # thumbs-down, the absence of a grade is not.
       qsv <- tryCatch(dbGetQuery(con, "
-        SELECT DISTINCT ON (ticker) ticker, veto
+        SELECT DISTINCT ON (ticker) ticker, veto, as_of::text AS as_of
         FROM qual.ticker_scorecards
         WHERE rubric_version = 'buy_decision_v1'
         ORDER BY ticker, as_of DESC, graded_at DESC"),
@@ -9432,7 +9432,15 @@ server <- function(input, output, session) {
                   shadow = shadow, breadth = breadth,
                   qs_veto = if (!is.null(qsv) && nrow(qsv) > 0)
                               toupper(qsv$ticker[qsv$veto %in% TRUE])
-                            else character(0))
+                            else character(0),
+                  # latest grade date per ticker ANY verdict (vetoes included):
+                  # the grading-gap tripwire needs "was it graded", not "did it
+                  # pass" - built from d$qs alone, a vetoed name looked ungraded
+                  # and false-fired the GRADING GAP banner (FTDR/TSM, 2026-09-01)
+                  qs_any_asof = if (!is.null(qsv) && nrow(qsv) > 0)
+                                  setNames(suppressWarnings(as.Date(qsv$as_of)),
+                                           toupper(qsv$ticker))
+                                else NULL)
       app_dataLC(dat)
       status_msgLC(sprintf(
         "Loaded - %d proven cohort picks across %d quarterly cutoffs + %d live series across %d snapshots.",
@@ -9818,9 +9826,12 @@ server <- function(input, output, session) {
     # verify_coverage task is the primary, horizon-independent tripwire.
     ungr <- if (!is.na(qs_ran) && !is.na(hz) && hz == 12L) {
       ent <- suppressWarnings(as.Date(dv$entry_of[buys_all]))
-      qs_asof <- if (!is.null(d$qs)) suppressWarnings(
-        setNames(as.Date(d$qs$as_of), toupper(d$qs$ticker))) else NULL
-      aof <- if (!is.null(qs_asof)) qs_asof[toupper(buys_all)] else rep(as.Date(NA), length(buys_all))
+      # graded = ANY recorded verdict, vetoes included (d$qs_any_asof). Using
+      # the non-vetoed d$qs here made freshly VETOED names look ungraded and
+      # false-fired the banner (FTDR 18 / TSM 25, both vetoed mid-Aug, flagged
+      # as a "grading gap" on 2026-09-01). A veto IS a grade for this check.
+      aof <- if (!is.null(d$qs_any_asof)) d$qs_any_asof[toupper(buys_all)]
+             else rep(as.Date(NA), length(buys_all))
       buys_all[!is.na(ent) & ent <= Sys.Date() - 2 &
                (is.na(aof) | aof < Sys.Date() - 90)]
     } else character(0)
@@ -10188,8 +10199,18 @@ server <- function(input, output, session) {
   output$qsCompareLC <- renderPlotly({
     req(app_dataLC())
     d <- app_dataLC(); cmp <- d$qscmp
-    if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
-      return(empty_plot("No qualstream-graded names in range - run qualstream to populate this."))
+    if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct))) {
+      # Jan/May/Sep rollover: on checkpoint day the anchor moves to TODAY, so
+      # the new 4-month window holds zero priced trading days until the next
+      # morning's ingest - an empty chart here is calendar, not a dead grader
+      # (2026-09-01: blamed qualstream while grades and prices were healthy).
+      roll <- !is.null(d$qscmp_anchor) &&
+              isTRUE(Sys.Date() - as.Date(d$qscmp_anchor) < 4)
+      return(empty_plot(if (roll) sprintf(
+        "New 4-month window started %s - the sketch fills in after the next daily price ingest.",
+        format(as.Date(d$qscmp_anchor), "%b %d"))
+        else "No qualstream-graded names in range - run qualstream to populate this."))
+    }
     cmp$d <- as.Date(cmp$d)
     # Cluster narrowing (live on the buy-cluster checkboxes): recompute the graded
     # and passed lines for the selected cluster(s) from the per-ticker detail. SPY is
