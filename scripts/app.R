@@ -1464,7 +1464,7 @@ ORDER BY sp.d;", fixed = TRUE)
 
 # Lifecycle qualstream comparison: equal-weight return of the CURRENT BUYs that
 # qualstream graded (latest non-vetoed scorecard) vs the >= 68 subset vs SPY,
-# from the current 4-month window start (__ANCHOR__). DESCRIPTIVE, not a
+# over a rolling 120-day lookback (__ANCHOR__ = today - 120). DESCRIPTIVE, not a
 # walk-forward test: qualstream's grades are a single as-of snapshot applied
 # across the whole window, and it only covers the curated top-picks (a fraction
 # of the gate's BUYs). Same 68 cut and 150d freshness as the board's orange +.
@@ -9375,12 +9375,14 @@ server <- function(input, output, session) {
         ORDER BY ticker, as_of DESC, graded_at DESC"),
         error = function(e) NULL)
       # descriptive qualstream comparison series (LC_QS_COMPARE_SQL): current
-      # BUYs qualstream graded vs the >= 68 subset vs SPY, equal-weight from the
-      # current 4-month window start = the last Jan/May/Sep checkpoint.
-      ck_all <- as.Date(sprintf("%d-%02d-01",
-                  rep(as.integer(format(Sys.Date(), "%Y")) + c(-1, 0, 1), each = 3),
-                  c(1, 5, 9)))
-      qs_anchor <- max(ck_all[ck_all <= Sys.Date()])
+      # BUYs qualstream graded vs the >= 68 subset vs SPY, equal-weight over a
+      # ROLLING 120-day lookback (2026-09-01): the old anchor snapped to the
+      # last Jan/May/Sep checkpoint, a leftover of the retired 4-monthly
+      # grading calendar - it wiped the sketch to an empty zero-day window
+      # three times a year (blank chart every checkpoint morning). Rolling
+      # keeps a full ~4-month window on screen every day; the lines re-zero
+      # from a day-later start each morning, invisible for a hindsight sketch.
+      qs_anchor <- Sys.Date() - 120L
       qscmp <- tryCatch(coerce_numeric_cols(
         dbGetQuery(con, gsub("__QS_AGE__", QS_MAX_AGE_DAYS,
                         gsub("__ANCHOR__", format(qs_anchor, "%Y-%m-%d"),
@@ -10199,18 +10201,10 @@ server <- function(input, output, session) {
   output$qsCompareLC <- renderPlotly({
     req(app_dataLC())
     d <- app_dataLC(); cmp <- d$qscmp
-    if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct))) {
-      # Jan/May/Sep rollover: on checkpoint day the anchor moves to TODAY, so
-      # the new 4-month window holds zero priced trading days until the next
-      # morning's ingest - an empty chart here is calendar, not a dead grader
-      # (2026-09-01: blamed qualstream while grades and prices were healthy).
-      roll <- !is.null(d$qscmp_anchor) &&
-              isTRUE(Sys.Date() - as.Date(d$qscmp_anchor) < 4)
-      return(empty_plot(if (roll) sprintf(
-        "New 4-month window started %s - the sketch fills in after the next daily price ingest.",
-        format(as.Date(d$qscmp_anchor), "%b %d"))
-        else "No qualstream-graded names in range - run qualstream to populate this."))
-    }
+    # (The Jan/May/Sep checkpoint-rollover empty state is gone with the rolling
+    # 120d anchor - an empty chart now genuinely means no graded names in range.)
+    if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
+      return(empty_plot("No qualstream-graded names in range - run qualstream to populate this."))
     cmp$d <- as.Date(cmp$d)
     # Cluster narrowing (live on the buy-cluster checkboxes): recompute the graded
     # and passed lines for the selected cluster(s) from the per-ticker detail. SPY is
