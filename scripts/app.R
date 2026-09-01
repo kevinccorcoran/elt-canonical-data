@@ -8770,6 +8770,9 @@ server <- function(input, output, session) {
     # cluster-id view filter (match the board + the sketch lines): keep only names
     # in the selected clusters; names with no current cluster (delisted/closed)
     # still show. NULL = filter untouched -> show all; character(0) = deselect-all.
+    # OWNED names are exempt (Kevin 2026-09-01: AXON, cluster 6, vanished from
+    # the sketch under a cluster-8/9 view minutes after being adopted) - the
+    # book's own positions always pin, same rule the master list follows.
     sel_id <- lc_board_ids_sel()
     if (!is.null(sel_id)) {
       idc <- if (!is.null(d$gate$id))
@@ -8780,8 +8783,15 @@ server <- function(input, output, session) {
         ex <- ex[!duplicated(toupper(ex$ticker)), , drop = FALSE]
         if (nrow(ex)) idc <- c(idc, setNames(as.integer(ex$id), toupper(ex$ticker)))
       }
-      if (!length(sel_id)) tks <- tks[FALSE]
-      else { ii <- idc[toupper(tks)]; tks <- tks[is.na(ii) | ii %in% as.integer(sel_id)] }
+      pp_own <- tryCatch(lc_pos(), error = function(e) NULL)
+      owned <- if (!is.null(pp_own) && nrow(pp_own)) {
+        sd <- as.character(pp_own$sold_date)
+        toupper(pp_own$ticker[is.na(sd) | !nzchar(sd)])
+      } else character(0)
+      keep_own <- toupper(tks) %in% owned
+      if (!length(sel_id)) tks <- tks[keep_own]
+      else { ii <- idc[toupper(tks)]
+             tks <- tks[keep_own | is.na(ii) | ii %in% as.integer(sel_id)] }
     }
     # focus mode: while a chip is selected, hide the overview so its single-ticker
     # overlay renders clean (the pre-all-pins behavior). Clear the chip to return.
