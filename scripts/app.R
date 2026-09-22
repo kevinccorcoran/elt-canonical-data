@@ -4035,6 +4035,8 @@ server <- function(input, output, session) {
                ROUND(s.agg_directional_score::numeric, 3) AS dir_score,
                g.buy_votes, g.sell_votes,
                s.coverage_cell_count AS cells,
+               s.net_long_density_long_h,
+               s.horizon_coherence_flag,
                s.evidence_status
         FROM serving.return_cluster_ticker_summary_current s
         LEFT JOIN serving.return_cluster_ticker_global_action_current g
@@ -4042,6 +4044,15 @@ server <- function(input, output, session) {
         WHERE s.id = %s
         ORDER BY s.agg_rank;", idv))
       out$agg_rank <- as.integer(out$agg_rank)
+      # Horizon read (audit 2026-09-22): a BUY whose >=20mo legs would not
+      # clear the 0.3 density floor on their own is timed entirely by the
+      # 1-7mo legs (the pop-chasing signature the horizon A/B tests).
+      lh <- suppressWarnings(as.numeric(out$net_long_density_long_h))
+      fc <- out$horizon_coherence_flag
+      if (is.character(fc)) fc <- fc %in% c("t", "true", "TRUE")
+      out$horizon_flag <- ifelse(out$action == "BUY" & (is.na(lh) | lh < 0.3),
+                                 "SHORT-ONLY",
+                                 ifelse(!is.na(fc) & !fc, "mixed", ""))
       idf_out(out)
 
       # VERDICT: tradeable flag (from serving) + walk-forward IC gate evidence
@@ -4161,6 +4172,7 @@ server <- function(input, output, session) {
         rownames = FALSE, selection = "none", options = list(dom = "t", ordering = FALSE)))
     show <- data.frame(
       Rank = out$agg_rank, Ticker = toupper(out$ticker), Action = out$action,
+      Horizon = if ("horizon_flag" %in% names(out)) out$horizon_flag else "",
       `Dir score` = as.numeric(out$dir_score),
       `Buy votes` = suppressWarnings(as.integer(out$buy_votes)),
       `Sell votes` = suppressWarnings(as.integer(out$sell_votes)),
@@ -4171,7 +4183,10 @@ server <- function(input, output, session) {
       options = list(dom = "tp", pageLength = 25, order = list(list(0, "asc")))) %>%
       DT::formatStyle("Action", fontWeight = "600",
         color = DT::styleEqual(c("BUY","SELL","HOLD"),
-                               c("#4ade80","#f87171","#fbbf24"), default = "#94a3b8"))
+                               c("#4ade80","#f87171","#fbbf24"), default = "#94a3b8")) %>%
+      DT::formatStyle("Horizon", fontWeight = "600",
+        color = DT::styleEqual(c("SHORT-ONLY","mixed"),
+                               c("#f87171","#fbbf24"), default = "#64748b"))
   })
 
   # ── RANK STABILITY: Reactive values ──
