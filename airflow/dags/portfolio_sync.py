@@ -120,7 +120,8 @@ def compute_board(cur):
         ), wfbin AS (
             SELECT m.id AS eid, r.ticker,
                    NTILE(20) OVER (PARTITION BY m.id
-                     ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                     ORDER BY r.ticker_score DESC, r.tiebreak_score DESC NULLS LAST,
+                              r.n_weighted DESC, r.ticker
                    )::int AS wf_bin
             FROM validation.walk_forward_ticker_rank r
             JOIN mx ON mx.cut = r.train_cutoff_date

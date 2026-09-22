@@ -44,7 +44,8 @@ SQL_SL = """
     ), wfbin AS (
         SELECT r.fut_lag, m.id AS eid, r.ticker,
                NTILE(20) OVER (PARTITION BY r.fut_lag, m.id
-                 ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker)::int AS wf_bin
+                 ORDER BY r.ticker_score DESC, r.tiebreak_score DESC NULLS LAST,
+                          r.n_weighted DESC, r.ticker)::int AS wf_bin
         FROM validation.walk_forward_ticker_rank r
         JOIN mx ON mx.fut_lag = r.fut_lag AND mx.cut = r.train_cutoff_date
         JOIN validation.walk_forward_cluster_id_map m
@@ -66,7 +67,8 @@ SQL_COH = """
     WITH wfbin AS (
         SELECT r.train_cutoff_date, m.id AS eid, r.ticker,
                NTILE(20) OVER (PARTITION BY r.train_cutoff_date, m.id
-                 ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker)::int AS wf_bin
+                 ORDER BY r.ticker_score DESC, r.tiebreak_score DESC NULLS LAST,
+                          r.n_weighted DESC, r.ticker)::int AS wf_bin
         FROM validation.walk_forward_ticker_rank r
         JOIN validation.walk_forward_cluster_id_map m
           ON m.train_cutoff_date = r.train_cutoff_date AND m.cluster_id = r.cluster_id
