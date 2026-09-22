@@ -1370,7 +1370,8 @@ qs_proven AS (
     SELECT DISTINCT w.ticker FROM (
         SELECT m.id AS eid, r.ticker,
                NTILE(20) OVER (PARTITION BY m.id
-                 ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                 ORDER BY r.ticker_score DESC, r.tiebreak_score DESC NULLS LAST,
+                          r.n_weighted DESC, r.ticker
                )::int AS wf_bin
         FROM validation.walk_forward_ticker_rank r
         JOIN (SELECT MAX(train_cutoff_date) AS cut
@@ -5893,11 +5894,13 @@ server <- function(input, output, session) {
           -- (measured: only 57 of 361 BUYs matched). Bin AND win-rate both
           -- cite the cluster the ticker actually occupied in the WF build.
           -- ticker_score = 0 rows carry no rank evidence: excluded, so those
-          -- tickers get NULL bin -> 'no evidence' downstream. NTILE tiebreak
-          -- mirrors the rebuilt walk_forward_pctile_summary exactly.
+          -- tickers get NULL bin -> 'no evidence' downstream. NTILE key list
+          -- mirrors walk_forward_pctile_summary: score, tiebreak (F1, NULLS
+          -- LAST -> no-op on pre-F1 generations), n_weighted, ticker.
           SELECT m.id AS eid, r.ticker,
                  NTILE(20) OVER (PARTITION BY m.id
-                   ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                   ORDER BY r.ticker_score DESC, r.tiebreak_score DESC NULLS LAST,
+                            r.n_weighted DESC, r.ticker
                  )::int AS wf_bin
           FROM validation.walk_forward_ticker_rank r
           JOIN validation.walk_forward_cluster_id_map m
@@ -9301,7 +9304,8 @@ server <- function(input, output, session) {
         ), wfbin AS (
             SELECT r.fut_lag, m.id AS eid, r.ticker,
                    NTILE(20) OVER (PARTITION BY r.fut_lag, m.id
-                     ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                     ORDER BY r.ticker_score DESC, r.tiebreak_score DESC NULLS LAST,
+                              r.n_weighted DESC, r.ticker
                    )::int AS wf_bin
             FROM validation.walk_forward_ticker_rank r
             JOIN mx ON mx.fut_lag = r.fut_lag AND mx.cut = r.train_cutoff_date
@@ -9331,7 +9335,8 @@ server <- function(input, output, session) {
         WITH wfbin AS (
             SELECT r.train_cutoff_date, r.fut_lag, m.id AS eid, r.ticker,
                    NTILE(20) OVER (PARTITION BY r.train_cutoff_date, r.fut_lag, m.id
-                     ORDER BY r.ticker_score DESC, r.n_weighted DESC, r.ticker
+                     ORDER BY r.ticker_score DESC, r.tiebreak_score DESC NULLS LAST,
+                              r.n_weighted DESC, r.ticker
                    )::int AS wf_bin
             FROM validation.walk_forward_ticker_rank r
             JOIN validation.walk_forward_cluster_id_map m
