@@ -8776,7 +8776,7 @@ server <- function(input, output, session) {
     # OWNED names are exempt (Kevin 2026-09-01: AXON, cluster 6, vanished from
     # the sketch under a cluster-8/9 view minutes after being adopted) - the
     # book's own positions always pin, same rule the master list follows.
-    sel_id <- lc_board_ids_sel()
+    sel_id <- lc_ids_effective()
     if (!is.null(sel_id)) {
       idc <- if (!is.null(d$gate$id))
                setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker))
@@ -8895,7 +8895,7 @@ server <- function(input, output, session) {
       dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
       !is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN]
     # cluster-id view filter (match the board + the sketch lines + all-pins)
-    sel_id <- lc_board_ids_sel()
+    sel_id <- lc_ids_effective()
     if (!is.null(sel_id)) {
       idc <- if (!is.null(d$gate$id))
                setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker))
@@ -9022,7 +9022,7 @@ server <- function(input, output, session) {
     cmp <- if (!is.null(d)) d$qscmp else NULL
     if (is.null(det) || !nrow(det) || is.null(cmp) || !nrow(cmp)) return(NULL)
     # mirror the sketch's cluster narrowing so the line tracks the visible board
-    sel_raw  <- lc_board_ids_sel()
+    sel_raw  <- lc_ids_effective()
     sel_ids  <- suppressWarnings(as.integer(sel_raw))
     avail_id <- tryCatch(lc_board_filter_ids(), error = function(e) integer(0))
     if (!is.null(sel_raw) && length(sel_ids) > 0 && !setequal(sel_ids, avail_id))
@@ -9722,6 +9722,22 @@ server <- function(input, output, session) {
     sort(unique(stats::na.omit(id_of[buys])))
   })
 
+  # The cluster selection every reader applies. The stored selection can outlive
+  # the filter it came from: after the 2026-10-01 re-mint the board had 0 buys, the
+  # checkboxes vanished, and a stale pick (or a deselect) kept narrowing the board,
+  # sketch and pins to nothing with no visible control left to undo it. Rule: no
+  # filter on screen -> no filter applied; picks that no longer exist -> ignored.
+  # NULL = no narrowing; character(0) = explicit deselect-all; else = narrow to these.
+  lc_ids_effective <- reactive({
+    sel <- lc_board_ids_sel()
+    if (is.null(sel)) return(NULL)
+    avail <- as.character(tryCatch(lc_board_filter_ids(), error = function(e) integer(0)))
+    if (!length(avail)) return(NULL)
+    if (!length(sel)) return(character(0))
+    kept <- intersect(sel, avail)
+    if (!length(kept)) NULL else kept
+  })
+
   output$idFilterLC <- renderUI({
     ids <- lc_board_filter_ids()
     if (!length(ids)) return(div(
@@ -9801,7 +9817,7 @@ server <- function(input, output, session) {
     }
     # NULL = filter never touched -> show all; character(0) = deselect-all ->
     # empty board; else narrow. The stored val survives refetch re-renders.
-    sel_id <- lc_board_ids_sel()
+    sel_id <- lc_ids_effective()
     keep_id <- function(v) {
       if (is.null(sel_id)) return(v)
       if (!length(sel_id)) return(v[FALSE])
@@ -10226,7 +10242,7 @@ server <- function(input, output, session) {
     # cluster-independent and always stays. Rules honour the "UNCHECK TO NARROW"
     # label: NULL (untouched) or all-available checked = full basket; a strict subset
     # = that cluster only; empty = nothing.
-    sel_raw  <- lc_board_ids_sel()
+    sel_raw  <- lc_ids_effective()
     sel_ids  <- suppressWarnings(as.integer(sel_raw))
     avail_id <- tryCatch(lc_board_filter_ids(), error = function(e) integer(0))
     det      <- d$qscmp_detail
@@ -10646,7 +10662,18 @@ server <- function(input, output, session) {
         span(style = "color:#34d399;", "buy"), " / ",
         span(style = "color:#f59e0b;", "hold"), " / ",
         span(style = "color:#f87171;", "sell"),
-        "; label = ticker, dot at its own return, no lines. Hover a dot for its move.")
+        "; label = ticker, dot at its own return, no lines. Hover a dot for its move.",
+        # never fail silently: say when nothing drew and the usual reason why
+        local({
+          clk <- lc_hist_tk()
+          ap_n <- tryCatch(lc_all_pins(), error = function(e) NULL)
+          n_pins <- if (!is.null(ap_n)) nrow(ap_n) else 0L
+          if (n_pins > 0) NULL
+          else span(style = "color:#fb923c;",
+            if (!is.null(clk) && nzchar(clk))
+              paste0(" Pins hidden while ", clk, " is selected - click it again (or 'clear') to show all.")
+            else " 0 pins drawn - no graded (>= 68) board name has a buy/hold/sell event in this window.")
+        }))
       else NULL
     pl_note <- if (isTRUE(input$lcAllPickLines))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
