@@ -478,7 +478,42 @@ lc_state_trail <- function(M, dates, tk) {
 # now_state is the chip's state today: the final open day is pinned to it so
 # trail and chip agree.
 lc_board_trail <- function(M, dates, tk, led, epoch, prov, now_state,
-                           hz = 12L, dl_d = as.Date(NA)) {
+                           hz = 12L, dl_d = as.Date(NA), rec = NULL) {
+  out <- lc_board_trail_replay(M, dates, tk, led, epoch, prov, now_state, hz, dl_d)
+  lc_merge_recorded(out, rec, tk, hz)
+}
+
+# Overlay the RECORDED board states (portfolio.state_history, captured daily
+# since 2026-08-07) on the replayed trail. The replay decides buy vs hold with
+# `prov` = proven under TODAY's evidence, so after the 2026-10-01 re-mint
+# de-gated id 9 every past BUY of its names replayed as HOLD (24 names, all
+# one HOLD pin each). Recorded days show what the board actually said then;
+# days before the first capture keep the replay. No rows -> replay unchanged.
+lc_merge_recorded <- function(trail, rec, tk, hz) {
+  if (is.null(rec) || !nrow(rec)) return(trail)
+  r <- rec[toupper(rec$ticker) == toupper(tk) & rec$hz == hz &
+           rec$state %in% c("buy", "hold", "sell"), , drop = FALSE]
+  if (!nrow(r)) return(trail)
+  r <- r[order(r$as_of), , drop = FALSE]
+  r0 <- as.Date(r$as_of[1])
+  pre <- if (!is.null(trail) && nrow(trail))
+           trail[as.Date(trail$date) < r0, c("date", "state"), drop = FALSE] else NULL
+  chg <- c(TRUE, r$state[-1] != r$state[-nrow(r)])
+  post <- data.frame(date = as.character(r$as_of[chg]), state = r$state[chg],
+                     stringsAsFactors = FALSE)
+  # after the last capture, keep any later replayed change (e.g. today's chip)
+  last_r <- as.Date(r$as_of[nrow(r)])
+  tail_t <- if (!is.null(trail) && nrow(trail))
+              trail[as.Date(trail$date) > last_r, c("date", "state"), drop = FALSE] else NULL
+  out <- rbind(pre, post, tail_t)
+  if (nrow(out) > 1)
+    out <- out[c(TRUE, out$state[-1] != out$state[-nrow(out)]), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
+lc_board_trail_replay <- function(M, dates, tk, led, epoch, prov, now_state,
+                                  hz = 12L, dl_d = as.Date(NA)) {
   if (is.null(M) || is.null(dates) || !(tk %in% rownames(M))) return(NULL)
   row <- M[tk, ]; dd <- as.Date(dates)
   run_d <- sort(unique(as.Date(led$d)))
@@ -8009,7 +8044,7 @@ server <- function(input, output, session) {
                suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == tk][1]))
              else as.Date(NA)
     trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
-                                     prov_tk, now_state, dv$hz, dl_tk), error = function(e) NULL)
+                                     prov_tk, now_state, dv$hz, dl_tk, rec = d$rec_states), error = function(e) NULL)
     pp <- tryCatch(lc_pos(), error = function(e) NULL)
     sold_over <- if (!is.null(pp) && nrow(pp)) {
       sd <- suppressWarnings(as.Date(as.character(pp$sold_date[toupper(pp$ticker) == tk])))
@@ -8109,7 +8144,7 @@ server <- function(input, output, session) {
       ns   <- if (tk %in% names(dv$state_now)) dv$state_now[[tk]] else NA_character_
       dl   <- if (!is.null(meta_dl) && tk %in% names(meta_dl)) meta_dl[[tk]] else as.Date(NA)
       trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
-                                       prov, ns, dv$hz, dl), error = function(e) NULL)
+                                       prov, ns, dv$hz, dl, rec = d$rec_states), error = function(e) NULL)
       so  <- if (!is.null(sold_map) && tk %in% names(sold_map)) sold_map[[tk]] else as.Date(NA)
       eps <- lc_trade_episodes(trail, so, last_d)
       eps <- Filter(function(e) !is.na(e$entry) && e$entry >= epoch, eps)
@@ -8637,7 +8672,7 @@ server <- function(input, output, session) {
              else as.Date(NA)
     # chip-rule replay, NOT the raw walk - pins must tell the board's story
     trail <- lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
-                            prov_tk, now_state, dv$hz, dl_tk)  # data.frame(date,state) | NULL
+                            prov_tk, now_state, dv$hz, dl_tk, rec = d$rec_states)  # data.frame(date,state) | NULL
     ev <- data.frame(date = character(0), kind = character(0), state = character(0),
                      stringsAsFactors = FALSE)
     if (!is.null(trail) && nrow(trail))
@@ -8764,12 +8799,21 @@ server <- function(input, output, session) {
     d <- app_dataLC()
     anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(anchor)) return(NULL)
-    # qs-pass board names: grade >= QS_MIN AND on the board in a live state
+    # Same name set as the master list: every name graded >= QS_MIN, plus every
+    # open position, in a live state. NOT gated on board_ok: after the 2026-10-01
+    # re-mint de-gated id 9, every held name fell off the gate's board, so the
+    # old board_ok rule left 0 pin candidates while the master list still showed
+    # all 25 holds (17 board_ok names, 23 graded, overlap 0).
     grade_u <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+    pp_univ <- tryCatch(lc_pos(), error = function(e) NULL)
+    owned_univ <- if (!is.null(pp_univ) && nrow(pp_univ)) {
+      sdu <- as.character(pp_univ$sold_date)
+      toupper(pp_univ$ticker[is.na(sdu) | !nzchar(sdu)])
+    } else character(0)
     tks <- dv$tickers[
-      dv$board_ok[dv$tickers] %in% TRUE &
       dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
-      !is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN]
+      ((!is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN) |
+       toupper(dv$tickers) %in% owned_univ)]
     # cluster-id view filter (match the board + the sketch lines): keep only names
     # in the selected clusters; names with no current cluster (delisted/closed)
     # still show. NULL = filter untouched -> show all; character(0) = deselect-all.
@@ -8849,7 +8893,7 @@ server <- function(input, output, session) {
                  suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == toupper(tk)][1]))
                else as.Date(NA)
       trail <- lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
-                              prov_tk, now_state, dv$hz, dl_tk)
+                              prov_tk, now_state, dv$hz, dl_tk, rec = d$rec_states)
       if (is.null(trail) || !nrow(trail)) next
       ev <- data.frame(date = as.Date(trail$date), state = trail$state,
                        stringsAsFactors = FALSE)
@@ -8888,12 +8932,21 @@ server <- function(input, output, session) {
     d <- app_dataLC()
     anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(anchor)) return(NULL)
-    # qs-pass board names: grade >= QS_MIN AND on the board in a live state
+    # Same name set as the master list: every name graded >= QS_MIN, plus every
+    # open position, in a live state. NOT gated on board_ok: after the 2026-10-01
+    # re-mint de-gated id 9, every held name fell off the gate's board, so the
+    # old board_ok rule left 0 pin candidates while the master list still showed
+    # all 25 holds (17 board_ok names, 23 graded, overlap 0).
     grade_u <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+    pp_univ <- tryCatch(lc_pos(), error = function(e) NULL)
+    owned_univ <- if (!is.null(pp_univ) && nrow(pp_univ)) {
+      sdu <- as.character(pp_univ$sold_date)
+      toupper(pp_univ$ticker[is.na(sdu) | !nzchar(sdu)])
+    } else character(0)
     tks <- dv$tickers[
-      dv$board_ok[dv$tickers] %in% TRUE &
       dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
-      !is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN]
+      ((!is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN) |
+       toupper(dv$tickers) %in% owned_univ)]
     # cluster-id view filter (match the board + the sketch lines + all-pins)
     sel_id <- lc_ids_effective()
     if (!is.null(sel_id)) {
@@ -8987,7 +9040,7 @@ server <- function(input, output, session) {
                    suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == tk][1]))
                  else as.Date(NA)
         trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
-                                         prov_tk, now_state, dv$hz, dl_tk), error = function(e) NULL)
+                                         prov_tk, now_state, dv$hz, dl_tk, rec = d$rec_states), error = function(e) NULL)
         if (!is.null(trail) && nrow(trail)) {
           td <- as.Date(trail$date); keep <- td >= anchor      # only in-window pins
           if (any(keep)) {
@@ -9067,7 +9120,7 @@ server <- function(input, output, session) {
                    suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == toupper(tk)][1]))
                  else as.Date(NA)
         trail <- tryCatch(lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
-                            prov_tk, now_state, dv$hz, dl_tk), error = function(e) NULL)
+                            prov_tk, now_state, dv$hz, dl_tk, rec = d$rec_states), error = function(e) NULL)
         if (is.null(trail) || !nrow(trail)) next
         allbuys <- as.Date(trail$date[trail$state == "buy"])
         allbuys <- allbuys[!is.na(allbuys)]
@@ -9444,9 +9497,19 @@ server <- function(input, output, session) {
                                    WHERE fut_lag = 12)
         GROUP BY ticker"),
         error = function(e) NULL)
+      # What the board ACTUALLY said each day (daily capture since 2026-08-07),
+      # last capture per (ticker, day, horizon). lc_board_trail prefers these over
+      # its replay, which re-derives "proven" from TODAY's evidence and so repaints
+      # a de-gated cluster's past BUYs as HOLD after every re-mint. NULL where the
+      # portfolio schema is absent (dev) -> replay only, as before.
+      rec_states <- tryCatch(dbGetQuery(con, "
+        SELECT DISTINCT ON (ticker, as_of, hz) ticker, as_of::text AS as_of, hz, state
+        FROM portfolio.state_history
+        ORDER BY ticker, as_of, hz, captured_at DESC"),
+        error = function(e) NULL)
       dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
                   qs = qs, qscmp = qscmp, qscmp_detail = qscmp_detail, qscmp_anchor = qs_anchor,
-                  shadow = shadow, breadth = breadth,
+                  shadow = shadow, breadth = breadth, rec_states = rec_states,
                   qs_veto = if (!is.null(qsv) && nrow(qsv) > 0)
                               toupper(qsv$ticker[qsv$veto %in% TRUE])
                             else character(0),
@@ -10658,7 +10721,7 @@ server <- function(input, output, session) {
     ap_note <- if (isTRUE(input$lcAllPins))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;", "All qualstream pins on"),
-        " - every graded (>= 68) board name's entries, ",
+        " - every name in the master list (graded >= 68, plus your open positions): entries ",
         span(style = "color:#34d399;", "buy"), " / ",
         span(style = "color:#f59e0b;", "hold"), " / ",
         span(style = "color:#f87171;", "sell"),
@@ -10672,7 +10735,7 @@ server <- function(input, output, session) {
           else span(style = "color:#fb923c;",
             if (!is.null(clk) && nzchar(clk))
               paste0(" Pins hidden while ", clk, " is selected - click it again (or 'clear') to show all.")
-            else " 0 pins drawn - no graded (>= 68) board name has a buy/hold/sell event in this window.")
+            else " 0 pins drawn - no master-list name has a buy/hold/sell event in this window.")
         }))
       else NULL
     pl_note <- if (isTRUE(input$lcAllPickLines))
