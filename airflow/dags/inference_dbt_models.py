@@ -449,6 +449,25 @@ with DAG(
         execution_timeout=timedelta(minutes=30),
     )
 
+    # --- nested-dwell shadow (decisive BUY/HOLD line, pre-registered 2026-10-12) ---
+    # Second shadow next to the sticky one: enter at share >= 0.60 held N run-days
+    # (N latched 5/7/10 from entry weight and prior share), exit the same day the
+    # share falls to <= 0.40, 21-day cooldown, proven latched at entry. Writes
+    # monitoring.nested_board_shadow (+ a per-run proven-set log). Live rule
+    # untouched; read at the 2027-02-13 checkpoint. Non-blocking leaf.
+    nested_shadow = BashOperator(
+        task_id="nested_board_shadow_daily",
+        bash_command=(
+            "set -euo pipefail && "
+            "cd /opt/elt-inference-models && "
+            "python scripts/nested_board_shadow.py --daily"
+        ),
+        env={"ENV": runtime_env},
+        append_env=True,
+        do_xcom_push=False,
+        execution_timeout=timedelta(minutes=30),
+    )
+
     # --- trigger inference_backtest_dbt_models after prod refresh completes ---
     trigger_inference_backtest = TriggerDagRunOperator(
         task_id="trigger_inference_backtest_dbt_models",
@@ -480,3 +499,4 @@ with DAG(
     [dbt_run_ticker_pair_current, dbt_run_cell_credibility] >> dbt_run_ticker_summary_current >> dbt_run_ticker_global_action_current >> trigger_inference_backtest
     dbt_run_ticker_global_action_current >> dbt_run_prediction_ledger >> dbt_run_prediction_ledger_scored >> trigger_qual_entry
     dbt_run_prediction_ledger_scored >> sticky_shadow
+    dbt_run_prediction_ledger_scored >> nested_shadow
