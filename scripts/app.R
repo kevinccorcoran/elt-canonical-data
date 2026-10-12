@@ -410,9 +410,9 @@ gated_expand_schedule <- function(positions, led = NULL, today = Sys.Date(),
     if (is.null(led) || !nrow(led)) {
       skipped <- unique(toupper(trimws(as.character(mod$ticker))))
     } else {
-      run_dates <- sort(unique(as.Date(led$d)))
-      buy_keys  <- paste(toupper(led$ticker),
-                         format(as.Date(led$d)))[led$global_action == "BUY"]
+      ldd <- if (!is.null(led$dd)) led$dd else as.Date(led$d)   # pre-parsed by Generate
+      run_dates <- sort(unique(ldd))
+      buy_keys  <- paste(toupper(led$ticker), format(ldd))[led$global_action == "BUY"]
       parts <- list()
       for (i in seq_len(nrow(mod))) {
         r <- mod[i, , drop = FALSE]
@@ -480,6 +480,29 @@ lc_state_trail <- function(M, dates, tk) {
 lc_board_trail <- function(M, dates, tk, led, epoch, prov, now_state,
                            hz = 12L, dl_d = as.Date(NA), rec = NULL) {
   out <- lc_board_trail_replay(M, dates, tk, led, epoch, prov, now_state, hz, dl_d)
+  # Seam fix (2026-10-06): the replay judges buy vs hold with TODAY's proven
+  # flag. A name the board recorded as BUY on the very first capture day
+  # (2026-08-07) was proven then, so replay its pre-capture days as proven.
+  # Without this its July entry pinned as HOLD and all 16 such names "flipped"
+  # to BUY together on 2026-08-07 - a tower of pins for a change that never
+  # happened (prod: every name on the first capture day was BUY, held since July).
+  if (!isTRUE(prov) && !is.null(rec) && nrow(rec)) {
+    rh <- rec[rec$hz == hz, , drop = FALSE]
+    r  <- rh[toupper(rh$ticker) == toupper(tk), , drop = FALSE]
+    if (nrow(r)) {
+      cap0 <- min(as.Date(rh$as_of))
+      r <- r[order(r$as_of), , drop = FALSE]
+      if (as.Date(r$as_of[1]) == cap0 && identical(r$state[1], "buy")) {
+        alt <- lc_board_trail_replay(M, dates, tk, led, epoch, TRUE, now_state, hz, dl_d)
+        if (!is.null(alt) && nrow(alt)) {
+          pre  <- alt[as.Date(alt$date) < cap0, c("date", "state"), drop = FALSE]
+          rest <- if (!is.null(out) && nrow(out))
+                    out[as.Date(out$date) >= cap0, c("date", "state"), drop = FALSE] else NULL
+          out <- rbind(pre, rest)
+        }
+      }
+    }
+  }
   lc_merge_recorded(out, rec, tk, hz)
 }
 
@@ -516,8 +539,9 @@ lc_board_trail_replay <- function(M, dates, tk, led, epoch, prov, now_state,
                                   hz = 12L, dl_d = as.Date(NA)) {
   if (is.null(M) || is.null(dates) || !(tk %in% rownames(M))) return(NULL)
   row <- M[tk, ]; dd <- as.Date(dates)
-  run_d <- sort(unique(as.Date(led$d)))
-  tkb <- sort(as.Date(led$d[led$ticker == tk & led$global_action == "BUY"]))
+  ldd <- if (!is.null(led$dd)) led$dd else as.Date(led$d)   # pre-parsed by Generate
+  run_d <- sort(unique(ldd))
+  tkb <- sort(ldd[led$ticker == tk & led$global_action == "BUY"])
   open_j <- which(row %in% c("buy", "hold") & dd >= as.Date(epoch))
   for (j in open_j) {
     D <- dd[j]
@@ -2791,8 +2815,11 @@ ui <- navbarPage(
         # + win% at 4/7/12mo, so a bet is chosen by the hold length it leads at.
         uiOutput("bestBetsLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1.1rem;"),
+        # Realized track record (trades / avg return / vs SPY / win rate + buy
+        # windows vs SPY) sits directly above the sketch it summarizes.
+        uiOutput("lcTrackStripLC"),
         # Benchmark comparison (+ click a board chip to overlay that ticker here).
-        plotlyOutput("qsCompareLC", height = "640px"),
+        plotlyOutput("qsCompareLC", height = "760px"),
         uiOutput("qsCompareNoteLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1rem;"),
         # --- My portfolio: strategy follower (model-linked DCA + ladder sells) ---
@@ -8109,6 +8136,14 @@ server <- function(input, output, session) {
     all_nm <- names(dv$state_now)
     ok <- if (!is.null(dv$board_ok)) dv$board_ok[all_nm] else rep(TRUE, length(all_nm))
     universe <- toupper(all_nm[!is.na(ok) & ok])
+    # + every name the board RECORDED as a BUY (portfolio.state_history, daily
+    # since 2026-08-07). board_ok is judged on TODAY's proven evidence, so the
+    # 2026-10-01 re-mint (id 9 de-gated) dropped every traded name: board_ok 17,
+    # qs-passed 23, overlap 0 -> empty universe -> the strip read "No board trades
+    # priced yet" and the portfolio's Model % column went blank (2026-10-06).
+    rec_buy <- if (!is.null(d$rec_states) && nrow(d$rec_states))
+                 unique(toupper(d$rec_states$ticker[d$rec_states$state == "buy"])) else character(0)
+    universe <- unique(c(universe, intersect(rec_buy, toupper(all_nm))))
     # "only the qs are trades" (Kevin 2026-08-18): follow the board's qualstream+picks
     # filter. On (default) -> count only qualstream-passed names (grade >= QS_MIN, the
     # orange +), matching the columns; untick it to count every proven board trade.
@@ -8814,32 +8849,11 @@ server <- function(input, output, session) {
       dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
       ((!is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN) |
        toupper(dv$tickers) %in% owned_univ)]
-    # cluster-id view filter (match the board + the sketch lines): keep only names
-    # in the selected clusters; names with no current cluster (delisted/closed)
-    # still show. NULL = filter untouched -> show all; character(0) = deselect-all.
-    # OWNED names are exempt (Kevin 2026-09-01: AXON, cluster 6, vanished from
-    # the sketch under a cluster-8/9 view minutes after being adopted) - the
-    # book's own positions always pin, same rule the master list follows.
-    sel_id <- lc_ids_effective()
-    if (!is.null(sel_id)) {
-      idc <- if (!is.null(d$gate$id))
-               setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker))
-             else setNames(integer(0), character(0))
-      if (!is.null(d$coh) && nrow(d$coh) > 0) {
-        ex <- d$coh[!(toupper(d$coh$ticker) %in% names(idc)), c("ticker", "id")]
-        ex <- ex[!duplicated(toupper(ex$ticker)), , drop = FALSE]
-        if (nrow(ex)) idc <- c(idc, setNames(as.integer(ex$id), toupper(ex$ticker)))
-      }
-      pp_own <- tryCatch(lc_pos(), error = function(e) NULL)
-      owned <- if (!is.null(pp_own) && nrow(pp_own)) {
-        sd <- as.character(pp_own$sold_date)
-        toupper(pp_own$ticker[is.na(sd) | !nzchar(sd)])
-      } else character(0)
-      keep_own <- toupper(tks) %in% owned
-      if (!length(sel_id)) tks <- tks[keep_own]
-      else { ii <- idc[toupper(tks)]
-             tks <- tks[keep_own | is.na(ii) | ii %in% as.integer(sel_id)] }
-    }
+    # cluster-id view filter: only names in the ticked clusters (by live id), owned
+    # or not (Kevin 2026-10-07, replacing the 2026-09-01 owned-names exemption -
+    # every master-list cluster now has its own box, so an adopted name's cluster
+    # can always be ticked). Untouched / all ticked = everything.
+    tks <- tks[lc_in_sel(tks)]
     # focus mode: while a chip is selected, hide the overview so its single-ticker
     # overlay renders clean (the pre-all-pins behavior). Clear the chip to return.
     clk <- lc_hist_tk()
@@ -8897,14 +8911,23 @@ server <- function(input, output, session) {
       if (is.null(trail) || !nrow(trail)) next
       ev <- data.frame(date = as.Date(trail$date), state = trail$state,
                        stringsAsFactors = FALSE)
-      ev <- ev[ev$date >= anchor & ev$state %in% c("buy", "hold", "sell"), , drop = FALSE]
       # hand-sold override: drop model events on/after the sell date and pin a
       # sell there, so the sketch matches the board's sell column for this name.
       sold_d <- if (toupper(tk) %in% names(pos_sold)) pos_sold[[toupper(tk)]] else as.Date(NA)
       if (!is.na(sold_d) && sold_d >= anchor)
         ev <- rbind(ev[ev$date < sold_d, , drop = FALSE],
                     data.frame(date = sold_d, state = "sell", stringsAsFactors = FALSE))
+      # previous state (from the FULL trail, so a window's first pin still knows
+      # whether it was an entry or a flip) - shown in the pin hover
+      ev$prev <- c(NA_character_, head(ev$state, -1))
+      ev <- ev[ev$date >= anchor & ev$state %in% c("buy", "hold", "sell"), , drop = FALSE]
       if (!nrow(ev)) next
+      # recorded = the board's own daily capture holds this (name, day);
+      # otherwise the state is replayed from the ledger (pre-capture days)
+      rec_d <- if (!is.null(d$rec_states) && nrow(d$rec_states))
+                 as.Date(d$rec_states$as_of[toupper(d$rec_states$ticker) == toupper(tk) &
+                                             d$rec_states$hz == dv$hz]) else as.Date(character(0))
+      ev$recorded <- ev$date %in% rec_d
       ev$own <- vapply(ev$date, function(dd) { p <- asof(tkr, dd)
         if (is.na(p)) NA_real_ else (p / base_tk - 1) * 100 }, numeric(1))
       ev <- ev[!is.na(ev$own), , drop = FALSE]; if (!nrow(ev)) next
@@ -8947,20 +8970,8 @@ server <- function(input, output, session) {
       dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
       ((!is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN) |
        toupper(dv$tickers) %in% owned_univ)]
-    # cluster-id view filter (match the board + the sketch lines + all-pins)
-    sel_id <- lc_ids_effective()
-    if (!is.null(sel_id)) {
-      idc <- if (!is.null(d$gate$id))
-               setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker))
-             else setNames(integer(0), character(0))
-      if (!is.null(d$coh) && nrow(d$coh) > 0) {
-        ex <- d$coh[!(toupper(d$coh$ticker) %in% names(idc)), c("ticker", "id")]
-        ex <- ex[!duplicated(toupper(ex$ticker)), , drop = FALSE]
-        if (nrow(ex)) idc <- c(idc, setNames(as.integer(ex$id), toupper(ex$ticker)))
-      }
-      if (!length(sel_id)) tks <- tks[FALSE]
-      else { ii <- idc[toupper(tks)]; tks <- tks[is.na(ii) | ii %in% as.integer(sel_id)] }
-    }
+    # cluster-id view filter (same rule as the pins and the master list)
+    tks <- tks[lc_in_sel(tks)]
     if (!length(tks)) return(NULL)
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
@@ -8994,9 +9005,11 @@ server <- function(input, output, session) {
   # Driven by the master-list row checkboxes (lc_sketch_ticks). Each checked name
   # is priced from cdm.ingest_combined and rebased to 0% at the SAME anchor as the
   # benchmark lines, so a name's line is directly comparable to SPY / the baskets.
-  # Independent of the qualstream/cluster filters: if you checked it, it draws.
+  # Independent of the qualstream filter; follows the cluster boxes like the rest
+  # of the sketch (a checked name outside the ticked clusters is hidden with its row).
   lc_checked_lines <- reactive({
     tks <- toupper(lc_sketch_ticks()); tks <- tks[nzchar(tks)]
+    tks <- tks[lc_in_sel(tks)]
     if (!length(tks)) return(NULL)
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     d <- app_dataLC()
@@ -9331,6 +9344,10 @@ server <- function(input, output, session) {
         WHERE prediction_date >= '__EPOCH__'
         ORDER BY ticker, prediction_date", fixed = TRUE))
       if (nrow(led) == 0) { status_msgLC("No recorded snapshots yet."); return() }
+      # parsed ONCE here: every trail / schedule reader used to re-parse the
+      # ~40k date strings per name (profiled 2026-10-12: a big share of the
+      # 60s+ first page load). Readers fall back to as.Date(led$d) if absent.
+      led$dd <- as.Date(led$d)
       gate <- dbGetQuery(con, "
         SELECT ticker, global_action AS gate_today, id
         FROM serving.return_cluster_ticker_global_action_current")
@@ -9554,12 +9571,28 @@ server <- function(input, output, session) {
     if (length(tickers) == 0) return(NULL)
     # ledger actions first; cohort picks add a BUY at their cutoff date unless
     # the ledger already recorded that (ticker, date) - the recorded call wins.
-    act <- setNames(led$global_action, paste(led$ticker, led$d))
+    # Integer-indexed (name x day) matrix, not a named-vector lookup: the old
+    # act[paste(t, D)] re-matched ~40k names on every one of ~100k (name, day)
+    # steps - most of a 60s+ first page load (profiled 2026-10-12). Same
+    # actions, same walk below.
+    nd <- length(dates)
+    A  <- matrix(NA_character_, nrow = length(tickers), ncol = nd)
+    ai <- match(led$ticker, tickers); aj <- match(led$d, dates)
+    ok <- rev(which(!is.na(ai) & !is.na(aj)))     # first row per key wins, as act[] did
+    A[cbind(ai[ok], aj[ok])] <- led$global_action[ok]
     if (!is.null(ch) && nrow(ch) > 0) {
-      ck <- paste(ch$ticker, ch$d)
-      ck <- ck[!(ck %in% names(act))]
-      if (length(ck)) act <- c(act, setNames(rep("BUY", length(ck)), ck))
+      ci <- match(ch$ticker, tickers); cj <- match(ch$d, dates)
+      cidx <- cbind(ci, cj)[!is.na(ci) & !is.na(cj), , drop = FALSE]
+      fill <- is.na(A[cidx])
+      if (any(fill)) A[cidx[fill, , drop = FALSE]] <- "BUY"
     }
+    dd_all <- as.Date(dates)
+    dn_all <- as.numeric(dd_all)      # day numbers: a Date compare per step dispatched S3 ~200k times
+    is_coh <- dates %in% coh_dates
+    # maturity per calendar day, computed once instead of per (name, day)
+    mat_by_day <- do.call(c, lapply(dd_all, function(x)
+      seq(x, by = paste(hz, "months"), length.out = 2)[2]))
+    mat_n_by_day <- as.numeric(mat_by_day)
     dl   <- if (!is.null(d$meta) && nrow(d$meta) > 0)
               setNames(suppressWarnings(as.Date(d$meta$delisted_date)), d$meta$ticker)
             else setNames(as.Date(character(0)), character(0))
@@ -9587,44 +9620,46 @@ server <- function(input, output, session) {
     reason_of <- setNames(rep("", length(tickers)), tickers)
     src_of  <- setNames(rep(NA_character_, length(tickers)), tickers)
     mat_of  <- setNames(rep(as.Date(NA), length(tickers)), tickers)
-    for (t in tickers) {
+    for (ti in seq_along(tickers)) {
+      t <- tickers[ti]
       open <- FALSE; sold <- FALSE; entry_d <- NA_character_; mat_d <- as.Date(NA)
       dl_d <- if (t %in% names(dl)) dl[[t]] else as.Date(NA)
-      for (j in seq_along(dates)) {
-        D <- dates[j]; a <- act[paste(t, D)]
+      has_dl <- !is.na(dl_d); dl_n <- as.numeric(dl_d); mat_n <- NA_real_
+      for (j in seq_len(nd)) {
+        D <- dates[j]; Dn <- dn_all[j]; a <- A[ti, j]
         if (!open && !sold) {                       # flat: wait for an entry
           if (!is.na(a) && a == "BUY") {
             open <- TRUE; entry_d <- D
-            mat_d <- seq(as.Date(D), by = paste(hz, "months"), length.out = 2)[2]
-            M[t, j] <- "buy"; reason_of[[t]] <- "new signal"
-            src_of[[t]] <- if (D %in% coh_dates) "cohort" else "ledger"
+            mat_d <- mat_by_day[j]; mat_n <- mat_n_by_day[j]
+            M[ti, j] <- "buy"; reason_of[ti] <- "new signal"
+            src_of[ti] <- if (is_coh[j]) "cohort" else "ledger"
           }
         } else if (open && !sold) {                 # held: check exit triggers
           if (!is.na(a) && a == "SELL") {
-            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
-            reason_of[[t]] <- "gate flipped"; exit_of[[t]] <- D
-          } else if ((!is.na(dl_d) && dl_d <= as.Date(D)) || as.Date(D) >= mat_d) {
+            sold <- TRUE; open <- FALSE; M[ti, j] <- "sell"
+            reason_of[ti] <- "gate flipped"; exit_of[ti] <- D
+          } else if ((has_dl && dl_n <= Dn) || Dn >= mat_n) {
             # both can have elapsed between sparse snapshots: earlier event wins
-            sold <- TRUE; open <- FALSE; M[t, j] <- "sell"
-            reason_of[[t]] <- if (!is.na(dl_d) && dl_d <= as.Date(D) && dl_d <= mat_d)
+            sold <- TRUE; open <- FALSE; M[ti, j] <- "sell"
+            reason_of[ti] <- if (has_dl && dl_n <= Dn && dl_n <= mat_n)
               "delisted" else "matured"
-            exit_of[[t]] <- D
+            exit_of[ti] <- D
           } else if (!is.na(a) && a == "BUY") {
-            M[t, j] <- "buy"; reason_of[[t]] <- "signal continuing"   # gate still says BUY
+            M[ti, j] <- "buy"; reason_of[ti] <- "signal continuing"   # gate still says BUY
           } else {
-            M[t, j] <- "hold"; reason_of[[t]] <- "maturing"          # washed to SKIP, still held
+            M[ti, j] <- "hold"; reason_of[ti] <- "maturing"          # washed to SKIP, still held
           }
         } else {                                    # sold: sticky until re-entry
           if (!is.na(a) && a == "BUY") {
             open <- TRUE; sold <- FALSE; entry_d <- D
-            mat_d <- seq(as.Date(D), by = paste(hz, "months"), length.out = 2)[2]
-            M[t, j] <- "buy"; reason_of[[t]] <- "re-entry"; exit_of[[t]] <- NA_character_
-            src_of[[t]] <- if (D %in% coh_dates) "cohort" else "ledger"
-          } else M[t, j] <- "sell"
+            mat_d <- mat_by_day[j]; mat_n <- mat_n_by_day[j]
+            M[ti, j] <- "buy"; reason_of[ti] <- "re-entry"; exit_of[ti] <- NA_character_
+            src_of[ti] <- if (is_coh[j]) "cohort" else "ledger"
+          } else M[ti, j] <- "sell"
         }
       }
-      entry_of[[t]] <- entry_d
-      mat_of[[t]]   <- mat_d
+      entry_of[ti] <- entry_d
+      mat_of[ti]   <- mat_d
     }
     # current-decision bucket (the board's truth), 4 states as of TODAY:
     #   sell   - action item: matured/delisted/gate-flipped within ~a month
@@ -9634,7 +9669,7 @@ server <- function(input, output, session) {
     #   hold   - open position below the monthly majority
     #   closed - the exit is > 30 days old; history, not an action item
     today <- Sys.Date()
-    led_dd <- as.Date(led$d)
+    led_dd <- if (!is.null(led$dd)) led$dd else as.Date(led$d)
     d30 <- sort(unique(led_dd[led_dd >= today - 30]))
     b30 <- led[led_dd >= today - 30 & led$global_action == "BUY", , drop = FALSE]
     share_of <- if (nrow(b30) > 0) {
@@ -9704,7 +9739,7 @@ server <- function(input, output, session) {
     # the live gate has not bought them once (0/24), and genuinely durable names
     # were held down (ICHR 88% -> 100%, PENG 83% -> 96%).
     win_lo <- max(today - 122, as.Date(LEDGER_EPOCH))
-    in_win <- as.Date(led$d) >= win_lo
+    in_win <- led_dd >= win_lo
     runs_tot <- length(unique(led$d[in_win]))
     pb <- led[in_win & led$global_action == "BUY", ]
     runs_of <- table(factor(pb$ticker, levels = tickers))
@@ -9777,12 +9812,27 @@ server <- function(input, output, session) {
       return(integer(0))
     buys <- toupper(dv$tickers[dv$board_ok[dv$tickers] %in% TRUE &
                                dv$state_now[dv$tickers] %in% "buy"])
-    if (isTRUE(input$lcBuyQSonly) && length(dv$qs_grade)) {
-      g <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+    g <- if (length(dv$qs_grade))
+           setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+         else setNames(numeric(0), character(0))
+    if (isTRUE(input$lcBuyQSonly) && length(g))
       buys <- buys[!is.na(g[buys]) & g[buys] >= QS_MIN]
-    }
+    # + the clusters of every master-list name (graded >= QS_MIN or an open
+    # position, in a live state), so the boxes survive a day with no BUYs. After
+    # the 2026-10-01 re-mint the board had 0 buys and the whole filter vanished
+    # (Kevin 2026-10-07: "what happened to the boxes where i could select and
+    # view each cluster"). Ids are the LIVE gate id - the same id the sketch
+    # lines, pins and track strip narrow by.
+    pp <- tryCatch(lc_pos(), error = function(e) NULL)
+    owned <- if (!is.null(pp) && nrow(pp)) {
+      sd <- as.character(pp$sold_date)
+      toupper(pp$ticker[is.na(sd) | !nzchar(sd)])
+    } else character(0)
+    tk <- toupper(dv$tickers)
+    live <- dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed")
+    ml <- tk[live & ((!is.na(g[tk]) & g[tk] >= QS_MIN) | tk %in% owned)]
     id_of <- setNames(suppressWarnings(as.integer(d$gate$id)), toupper(d$gate$ticker))
-    sort(unique(stats::na.omit(id_of[buys])))
+    sort(unique(stats::na.omit(id_of[unique(c(buys, ml))])))
   })
 
   # The cluster selection every reader applies. The stored selection can outlive
@@ -9798,8 +9848,39 @@ server <- function(input, output, session) {
     if (!length(avail)) return(NULL)
     if (!length(sel)) return(character(0))
     kept <- intersect(sel, avail)
-    if (!length(kept)) NULL else kept
+    if (!length(kept)) return(NULL)
+    # every box ticked = nothing narrowed (same as untouched), so a "narrowed"
+    # reader below never has to special-case the full set
+    if (setequal(kept, avail)) NULL else kept
   })
+
+  # ticker -> LIVE gate cluster id (serving.return_cluster_ticker_global_action_current
+  # .id): the one numbering the cluster boxes, sketch lines, pins, track strip and
+  # master list all share. Smallest id per ticker, matching the DISTINCT ON in
+  # LC_QS_COMPARE_DETAIL_SQL that feeds the per-cluster sketch lines.
+  lc_live_ids <- reactive({
+    d <- app_dataLC()
+    if (is.null(d) || is.null(d$gate) || !nrow(d$gate) || is.null(d$gate$id))
+      return(setNames(integer(0), character(0)))
+    g <- data.frame(tk = toupper(d$gate$ticker),
+                    id = suppressWarnings(as.integer(d$gate$id)), stringsAsFactors = FALSE)
+    g <- g[!is.na(g$id), , drop = FALSE]
+    g <- g[order(g$tk, g$id), , drop = FALSE]
+    g <- g[!duplicated(g$tk), , drop = FALSE]
+    setNames(g$id, g$tk)
+  })
+
+  # TRUE for tickers inside the ticked clusters (all TRUE when nothing is narrowed).
+  # Strictly by live id: when a cluster is ticked, names you own in OTHER clusters
+  # and names with no live id drop out too. Kevin 2026-10-07: "when a cluster is
+  # selected only the specific tickers to that cluster should be showed on graph and
+  # table" - this replaces the 2026-09-01 owned-names exemption on the pins.
+  lc_in_sel <- function(tks, sel = lc_ids_effective()) {
+    if (is.null(sel)) return(rep(TRUE, length(tks)))
+    if (!length(sel)) return(rep(FALSE, length(tks)))
+    ids <- lc_live_ids()[toupper(tks)]
+    !is.na(ids) & ids %in% as.integer(sel)
+  }
 
   output$idFilterLC <- renderUI({
     ids <- lc_board_filter_ids()
@@ -9814,7 +9895,7 @@ server <- function(input, output, session) {
     sel_use <- if (is.null(sel_now)) as.character(ids)
                else intersect(sel_now, as.character(ids))
     div(style = "margin-bottom:0.6rem;",
-      tags$label("Cluster id filter (buy clusters; uncheck to narrow)",
+      tags$label("Cluster id filter (uncheck to narrow)",
                  style = paste0("color:#94a3b8; font-size:0.72rem; font-weight:600;",
                                 " display:block; margin-bottom:0.3rem;")),
       checkboxGroupInput("idsLC", NULL, choices = ids, selected = sel_use, inline = TRUE),
@@ -9983,18 +10064,28 @@ server <- function(input, output, session) {
     closed_foot <- div(style = "color:#64748b; font-weight:600; font-size:0.85rem; margin:0.4rem 0 0.5rem;",
           sprintf("closed - exited over a month ago (%d) · detail in the table below",
                   length(closed)))
-    # Realized track-record strip (Kevin 2026-08-18): at-a-glance stats for every
-    # name the board has TRADED since the ledger epoch - a trade = one buy->sell
-    # episode (buy<->hold flips are held-through, NOT closes). Sold trades banked,
-    # open marked to today; pre-epoch walk-forward cohort picks excluded (this is the
-    # LIVE following record, not the backtest). Numbers come from lc_track_record(),
-    # the same per-ticker episode logic as the flip-history modal, so a clicked chip
-    # reconciles with the aggregate. Duration-fair by design: vs SPY spans each
-    # trade's own window and win rate is one vote per trade - no per-day/annualising.
-    # Universe follows the qualstream+picks filter (default on = qs-passed names only,
-    # "only the qs are trades") AND, in the strip, the board's cluster-id view filter
-    # (re-aggregated downstream) so the numbers match the columns/sketch you are
-    # viewing. The compounded "how much money" view is the portfolio panel below.
+    # The kanban columns were retired 2026-08-26; the realized track-record strip
+    # moved to its own output (output$lcTrackStripLC) right ABOVE the sketch
+    # (Kevin 2026-10-06: "should be above graph, the aggregate of all").
+    tagList(notes, closed_foot)
+  })
+
+  # Realized track-record strip (Kevin 2026-08-18): at-a-glance stats for every
+  # name the board has TRADED since the ledger epoch - a trade = one buy->sell
+  # episode (buy<->hold flips are held-through, NOT closes). Sold trades banked,
+  # open marked to today; pre-epoch walk-forward cohort picks excluded (this is the
+  # LIVE following record, not the backtest). Numbers come from lc_track_record(),
+  # the same per-ticker episode logic as the flip-history modal, so a clicked chip
+  # reconciles with the aggregate. Duration-fair by design: vs SPY spans each
+  # trade's own window and win rate is one vote per trade - no per-day/annualising.
+  # Universe follows the qualstream+picks filter (default on = qs-passed names only,
+  # "only the qs are trades") AND, in the strip, the board's cluster-id view filter
+  # (re-aggregated downstream) so the numbers match the master list / sketch you are
+  # viewing. The compounded "how much money" view is the portfolio panel below.
+  output$lcTrackStripLC <- renderUI({
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    d  <- tryCatch(app_dataLC(), error = function(e) NULL)
+    if (is.null(dv) || is.null(d)) return(NULL)
     track_strip <- local({
       tr <- tryCatch(lc_track_record(), error = function(e) NULL)
       signcol <- function(v) if (is.na(v)) "#94a3b8" else if (v >= 0) "#10b981" else "#dc2626"
@@ -10003,15 +10094,11 @@ server <- function(input, output, session) {
       if (is.null(tr))
         return(div(style = "color:#64748b; font-size:0.72rem; margin:0.2rem 0 0.7rem;",
                    "No board trades priced yet since the epoch - Generate, or wait for the first close."))
-      # Cluster-aware: apply the board's SAME cluster-id view filter (id_of/sel_id)
-      # to the whole-board record's episode tables, then re-aggregate, so the strip
-      # matches the columns/sketch. Filtering here (not in lc_track_record) keeps the
-      # price query cached across cluster toggles. Names with no cluster id show.
-      idu <- setNames(as.integer(id_of), toupper(names(id_of)))
-      insel <- function(tk) { tk <- toupper(tk)
-        if (is.null(sel_id)) return(rep(TRUE, length(tk)))
-        if (!length(sel_id)) return(rep(FALSE, length(tk)))
-        ii <- idu[tk]; unname(is.na(ii) | ii %in% as.integer(sel_id)) }
+      # Cluster-aware: the same cluster boxes as the sketch and master list
+      # (lc_in_sel, by live id), applied to the whole-board record's episode tables
+      # and re-aggregated. Filtering here (not in lc_track_record) keeps the price
+      # query cached across cluster toggles.
+      insel <- function(tk) unname(lc_in_sel(tk))
       A <- tr$table; B <- tr$wtable
       if (!is.null(A) && nrow(A)) A <- A[insel(A$ticker), , drop = FALSE]
       if (!is.null(B) && nrow(B)) B <- B[insel(B$ticker), , drop = FALSE]
@@ -10078,11 +10165,11 @@ server <- function(input, output, session) {
     })
     # The buy/hold/sell kanban columns were retired 2026-08-26: they derived state
     # at the selected Hold-length (a 7mo lifecycle view) and were qualstream-hidden,
-    # so their counts disagreed with the live-gate master list below AND the
-    # portfolio table (Kevin: "why column and table not same counts"). The master
-    # list is now the single name board; this strip keeps only the honesty notes,
-    # the realized-trade metrics, and the closed-count footer.
-    tagList(notes, track_strip, closed_foot)
+    # so their counts disagreed with the live-gate master list AND the portfolio
+    # table (Kevin: "why column and table not same counts"). The master list is
+    # now the single name board; the board keeps the honesty notes + closed-count
+    # footer, and this strip the realized-trade metrics.
+    track_strip
   })
 
   # ── State view helper (engine rule vs raw gate) ──────────────────────────
@@ -10150,6 +10237,14 @@ server <- function(input, output, session) {
     owned_ticks <- names(own_cnt)
     cand <- sort(unique(c(cand, owned_ticks)))
     if (!length(cand)) return(NULL)
+    # cluster boxes narrow the master list too, same rule as the sketch
+    # (Kevin 2026-10-07: "only the specific tickers to that cluster ... on graph
+    # and table") - owned names in other clusters included
+    cand <- cand[lc_in_sel(cand)]
+    if (!length(cand))
+      return(div(style = "color:#64748b; font-size:0.8rem; margin:0.4rem 0 0.8rem;",
+                 "No cluster ticked - tick a cluster box in the sidebar to list its names."))
+    live <- lc_live_ids()
     HZS <- c(4L, 7L, 12L)
     cell_for <- function(tku, fl) {
       r <- sl[toupper(sl$ticker) == tku & sl$fut_lag == fl, , drop = FALSE]
@@ -10183,7 +10278,7 @@ server <- function(input, output, session) {
       add_d <- if (!is.na(add_num) && is.finite(add_num)) as.Date(add_num, origin = "1970-01-01") else as.Date(NA)
       hold_mo <- if (!is.na(best)) as.numeric(best) else 7
       left_mo <- if (owned && !is.na(add_d)) hold_mo - as.numeric(Sys.Date() - add_d) / 30.44 else NA_real_
-      list(tk = tku, grade = gr, eid = eid, cells = cells, best = best,
+      list(tk = tku, grade = gr, eid = eid, lid = unname(live[tku]), cells = cells, best = best,
            state = state, ntop = ntop, win7 = if (is.na(win7)) -1 else win7,
            owned = owned, n_ent = n_ent, add_d = add_d, left_mo = left_mo)
     })
@@ -10240,8 +10335,10 @@ server <- function(input, output, session) {
       state_td(r$state),
       hold_td(r),
       best_td(r$best),
+      # live gate id = the number on the cluster boxes (was the walk-forward eid,
+      # a different numbering: CASY showed 10 here while sitting in box 8)
       tags$td(style = "text-align:center;color:#94a3b8;",
-              if (is.na(r$eid)) "—" else as.character(r$eid)),
+              if (is.null(r$lid) || is.na(r$lid)) "—" else as.character(r$lid)),
       tags$td(style = "text-align:center;color:#94a3b8;",
               if (is.na(r$grade)) "—" else as.character(round(r$grade))),
       fmt_cell(r$cells[["4"]]), fmt_cell(r$cells[["7"]]), fmt_cell(r$cells[["12"]])
@@ -10567,77 +10664,156 @@ server <- function(input, output, session) {
       }
       ov_suffix <- sprintf(" · %s overlaid", ov$tk)
     }
-    # all-pins mode: every qs-pass ticker's buy/hold/sell entries as colored,
-    # ticker-labelled dots (NO lines). Appends to ann so labels join the packer.
+    # all-pins mode (rebuilt 2026-10-06, Kevin: "need better way to represent").
+    # ONE pin per (day, state), not one per name: a big symbol on the green line
+    # (triangle-up buy, circle hold, triangle-down sell, white ring so it reads
+    # on any line) plus ONE chip naming every ticker that changed that day, 4 to
+    # a row. The old one-chip-per-name packer stacked 16-25 chips on busy days,
+    # and the headroom reserved for those towers stretched the y-axis to 50%+
+    # and squashed the lines into the bottom quarter. Chips are packed in pixel
+    # space against an assumed plot area (PW x PH, on the small side) with the
+    # lines and pins as obstacles, so no chip hides a line or another pin; the
+    # y-range then grows only as much as the tallest real stack needs.
     ap_suffix <- ""
     ap <- tryCatch(lc_all_pins(), error = function(e) NULL)
     if (!is.null(ap) && nrow(ap)) {
-      apcol <- c(buy = "#34d399", hold = "#f59e0b", sell = "#f87171")
-      # dots ride the green passed-qualstream line (y set in lc_all_pins), colored
-      # by state; hover carries the name's OWN return. Ticker labels are packed
-      # into stack levels with short stems - the same flag style as the
-      # single-ticker overlay, readable now that every dot sits in the line's band.
-      for (s in c("buy", "hold", "sell")) {
-        sub <- ap[ap$state == s, , drop = FALSE]; if (!nrow(sub)) next
-        fig <- add_markers(fig, x = sub$date, y = sub$ret, showlegend = FALSE,
-          marker = list(color = apcol[[s]], size = 6, symbol = "circle",
-                        line = list(color = "#0b1220", width = 1)),
-          text = sprintf("%s %s %s · %+.1f%% own", sub$ticker, toupper(s),
-                         format(sub$date), sub$own),
-          hovertemplate = "%{text}<extra></extra>")
-      }
-      ap <- ap[order(ap$date), , drop = FALSE]
-      xs <- as.numeric(ap$date)
+      apcol <- c(buy = "#34d399", hold = "#fbbf24", sell = "#f87171")
+      apsym <- c(buy = "triangle-up", hold = "circle", sell = "triangle-down")
+      apnam <- c(buy = "Buy", hold = "Hold", sell = "Sell")
+      if (is.null(ap$prev)) ap$prev <- NA_character_
+      if (is.null(ap$recorded)) ap$recorded <- FALSE
+      ap <- ap[order(ap$date, match(ap$state, c("buy", "hold", "sell")), ap$ticker), , drop = FALSE]
+      key <- paste(format(ap$date), ap$state)
+      PER <- 4L                                       # tickers per chip row
+      G <- do.call(rbind, lapply(unique(key), function(k) {
+        s <- ap[key == k, , drop = FALSE]
+        rows <- vapply(split(s$ticker, ceiling(seq_len(nrow(s)) / PER)),
+                       paste, character(1), collapse = " ")
+        how <- ifelse(is.na(s$prev) | !(s$prev %in% c("buy", "hold", "sell")), "new",
+               ifelse(s$prev == "sell", "re-entered", paste("from", s$prev)))
+        hov <- paste0(
+          sprintf("<b>%s · %s</b> · %d name%s", toupper(s$state[1]),
+                  format(s$date[1], "%b %d"), nrow(s), if (nrow(s) == 1) "" else "s"),
+          if (!any(s$recorded %in% TRUE))
+            "<br><i>replayed from the ledger (daily recording began later)</i>" else "",
+          "<br>", paste(sprintf("%s · %s · %s own", s$ticker, how,
+                                ifelse(is.na(s$own), "-", sprintf("%+.1f%%", s$own))),
+                        collapse = "<br>"))
+        data.frame(date = s$date[1], state = s$state[1], ret = s$ret[1], n = nrow(s),
+                   txt = paste(rows, collapse = "<br>"), nl = length(rows),
+                   nc = max(nchar(rows)), hov = hov, stringsAsFactors = FALSE)
+      }))
+      # pixel layout. Sizes match font 10 / borderpad 3 / border 1.5 below; the
+      # plot area measured 1020 x 625 px in the 760px-tall widget at a ~1200px
+      # card (headless Chrome, 2026-10-06) - assume a bit less so a narrower
+      # window still clears.
       xlo <- as.numeric(min(cmp$d)); xhi <- as.numeric(max(cmp$d))
       span <- max(xhi - xlo, 1)
-      # TIDY VERTICAL COLUMN (2026-08-26): angling the labels turned dense
-      # clusters into a crossing mess. The legible layout for many tickers on one
-      # date is a straight stacked column of small HORIZONTAL chips, one per line
-      # above the dot. Key fix: MAXLVL is high so a big cluster keeps climbing
-      # into its own column instead of piling excess labels onto the top row
-      # (the original overlap cause). The dots stay hoverable for the numbers.
-      labw <- vapply(seq_len(nrow(ap)), function(i)
-        (nchar(ap$ticker[i]) * 6 + 12) * span / 760, numeric(1))
-      lvl <- integer(nrow(ap)); MAXLVL <- 24L
-      for (i in seq_len(nrow(ap))) {
-        L <- 0L
-        while (L < MAXLVL) {
-          prev <- which(seq_len(nrow(ap)) < i & lvl == L)
-          if (!any(abs(xs[i] - xs[prev]) < (labw[i] + labw[prev]) / 2)) break
-          L <- L + 1L
-        }
-        lvl[i] <- L
+      PW <- 960; PH <- 600; CW <- 7.2; LH <- 14; PADW <- 14; PADH <- 9
+      GAP <- 3; STEM <- 14; MD <- 15                  # MD = min px between pins
+      # Pins closer than MD hid each other (Aug 12-14 held four within three
+      # days; a BUY and a HOLD on one day sat on the same spot). Spread them the
+      # least possible with order kept - an isotonic fit of x - k*MD, so each
+      # moves under ~2 days - then sit each pin back ON the displayed green line
+      # at its drawn x. The hover keeps the true date.
+      p0 <- (as.numeric(G$date) - xlo) / span * PW
+      k  <- seq_len(nrow(G)) - 1
+      xp <- if (nrow(G) > 1) isoreg(p0 - k * MD)$yf + k * MD else p0
+      if (nrow(G) > 1) {                              # keep the spread inside the axis
+        xp[nrow(G)] <- min(xp[nrow(G)], PW)
+        for (j in (nrow(G) - 1):1) xp[j] <- min(xp[j], xp[j + 1] - MD)
+        xp[1] <- max(xp[1], 0)
+        for (j in 2:nrow(G)) xp[j] <- max(xp[j], xp[j - 1] + MD)
       }
-      apann <- lapply(seq_len(nrow(ap)), function(i) {
-        cc <- apcol[[ap$state[i]]]
-        list(x = format(ap$date[i]), y = ap$ret[i], xref = "x", yref = "y",
-             text = ap$ticker[i],
-             xanchor = if ((xhi - xs[i]) / span < 0.05) "right" else "center",
-             yanchor = "bottom",
-             showarrow = TRUE, arrowhead = 0, arrowwidth = 1, arrowcolor = cc,
-             ax = 0, ay = -9 - 15 * lvl[i], font = list(color = cc, size = 9),
-             # OPAQUE bg: the bright green basket line the dots ride bleeds through
-             # and washes the label to a pale box (Kevin, recurring). A plain hex
-             # should be opaque, but pin opacity=1 explicitly to rule out any
-             # inherited annotation alpha, use solid black, and a 2px border so a
-             # live redraw is unmistakable vs a stale cached figure.
-             opacity = 1, bgcolor = "#000000", bordercolor = cc, borderwidth = 2,
-             borderpad = 1)
-      })
-      ann <- c(ann, apann)
-      # headroom so the upward label stack never clips against the plot top
-      # (tuned to the tighter 13px-per-level stack + size-9 labels above)
+      G$xnum <- xlo + xp / PW * span
+      G$xs <- format(as.POSIXct(G$xnum * 86400, origin = "1970-01-01", tz = "UTC"),
+                     "%Y-%m-%d %H:%M:%S", tz = "UTC")
+      lineY <- if (any(!is.na(cmp$passed_pct))) cmp$passed_pct else cmp$graded_pct
+      okl <- !is.na(lineY)
+      G$y <- if (sum(okl) >= 2)
+               approx(as.numeric(cmp$d)[okl], lineY[okl], xout = G$xnum, rule = 2)$y
+             else G$ret
+      for (s in c("buy", "hold", "sell")) {
+        sub <- G[G$state == s, , drop = FALSE]; if (!nrow(sub)) next
+        # POSIXct, not the text form the chips use: a text x next to the Date
+        # lines made plotly warn "both discrete & non-discrete data" per render
+        fig <- add_markers(fig, x = as.POSIXct(sub$xnum * 86400, origin = "1970-01-01", tz = "UTC"),
+          y = sub$y, name = apnam[[s]],
+          legendgroup = paste0("pin_", s), showlegend = TRUE,
+          marker = list(color = apcol[[s]], size = 13, symbol = apsym[[s]],
+                        line = list(color = "#f8fafc", width = 1.5)),
+          text = sub$hov, hovertemplate = "%{text}<extra></extra>")
+      }
+      # y-range from every drawn line (checked / pick / top-performer lines too,
+      # so a name that dips below 0 or spikes high never clips)
       tpret <- if (!is.null(tp) && !is.null(tp$line)) tp$line$ret else numeric(0)
       plret <- if (!is.null(pl) && length(pl$lines))
                  unlist(lapply(pl$lines, function(x) x$ret), use.names = FALSE) else numeric(0)
-      # include the checked master-list lines so the axis always fits them - a name
-      # that dips below 0 or spikes high must not clip against the fixed pin range.
       ckret <- if (!is.null(ckl) && length(ckl))
                  unlist(lapply(ckl, function(x) x$line$ret), use.names = FALSE) else numeric(0)
-      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret, ckret), na.rm = TRUE)
-      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, ap$ret, tpret, plret, ckret, 0), na.rm = TRUE)
+      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, G$y, tpret, plret, ckret), na.rm = TRUE)
+      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, G$y, tpret, plret, ckret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
-      ap_yrange <- c(ylo - yspan * 0.05, yhi + yspan * (0.09 + 0.11 * max(lvl)))
+      ylo2 <- ylo - yspan * 0.05
+      yhi2 <- yhi + yspan * 0.06
+      # chip packer (pixel space, chips above their pin)
+      wp <- G$nc * CW + PADW
+      hp <- G$nl * LH + PADH
+      xa <- ifelse((PW - xp) / PW < 0.06, "right", ifelse(xp / PW < 0.04, "left", "center"))
+      cx <- ifelse(xa == "right", xp - wp / 2 + 3, ifelse(xa == "left", xp + wp / 2 - 3, xp))
+      # obstacles: the three basket lines (a thin box per day) + every pin
+      lpts <- do.call(rbind, lapply(c("spy_pct", "graded_pct", "passed_pct"), function(cn)
+        if (cn %in% names(cmp)) data.frame(x = as.numeric(cmp$d), y = cmp[[cn]]) else NULL))
+      lpts <- lpts[!is.na(lpts$y), , drop = FALSE]
+      lw <- 2 * PW / max(nrow(cmp), 1)
+      off <- rep(STEM, nrow(G))
+      for (it in 1:8) {
+        R  <- yhi2 - ylo2
+        yp <- (G$y - ylo2) / R * PH                     # pin height above plot bottom, px
+        bx  <- c((lpts$x - xlo) / span * PW, xp)
+        bw  <- c(rep(lw, nrow(lpts)), rep(14, nrow(G)))
+        ly  <- (lpts$y - ylo2) / R * PH
+        blo <- c(ly - 2, yp - 7); bhi <- c(ly + 2, yp + 7)
+        for (i in seq_len(nrow(G))) {
+          o <- STEM
+          # the +0.5 px keeps a chip from re-clashing with the box it just
+          # cleared on floating-point rounding (that looped forever); the cap
+          # is a second guard
+          for (step in 1:400) {
+            lo <- yp[i] + o; hi <- lo + hp[i]
+            hit <- which(abs(cx[i] - bx) < (wp[i] + bw) / 2 + GAP &
+                         lo < bhi + GAP & hi > blo - GAP)
+            if (!length(hit)) break
+            o <- max(o + 1, max(bhi[hit]) + GAP + 0.5 - yp[i])
+          }
+          off[i] <- o
+          bx <- c(bx, cx[i]); bw <- c(bw, wp[i])
+          blo <- c(blo, yp[i] + o); bhi <- c(bhi, yp[i] + o + hp[i])
+        }
+        if (max(yp + off + hp) <= PH - 4) break
+        # grow the top just enough for the tallest stack: a chip at data y whose
+        # top sits h px above it needs (y - ylo2)/R*PH + h <= PH
+        need <- max((G$y - ylo2) * PH / pmax(PH - off - hp - 4, PH * 0.25))
+        yhi2 <- ylo2 + max(R * 1.02, need)
+      }
+      apann <- lapply(seq_len(nrow(G)), function(i) {
+        cc <- apcol[[G$state[i]]]
+        list(x = G$xs[i], y = G$y[i], xref = "x", yref = "y",
+             text = G$txt[i], xanchor = xa[i], yanchor = "bottom", align = "left",
+             showarrow = TRUE, arrowhead = 0, arrowwidth = 1.4, arrowcolor = cc,
+             standoff = 7, ax = 0, ay = -off[i],
+             font = list(color = cc, size = 10),
+             # OPAQUE bg: the bright basket lines bleed through a translucent box
+             opacity = 1, bgcolor = "#0b1220", bordercolor = cc, borderwidth = 1.5,
+             borderpad = 3, hovertext = G$hov[i],
+             hoverlabel = list(bgcolor = "rgba(2,6,23,0.95)", bordercolor = cc,
+                               font = list(color = "#e2e8f0", size = 11)))
+      })
+      # draw the highest chips first: plotly paints annotations in order, so a
+      # lower chip's opaque box then covers the stems of chips stacked above it
+      # instead of those stems striking through its tickers
+      ann <- c(ann, apann[order(-off)])
+      ap_yrange <- c(ylo2, yhi2)
       ap_suffix <- " · all qualstream pins"
     }
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
@@ -10652,11 +10828,14 @@ server <- function(input, output, session) {
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
       yaxis = yax,
-      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.35),
+      # legend tucked just under the date labels (was y = -0.35: ~120px of dead
+      # space that the plot can use for the pins instead)
+      legend = list(font = list(color = "#e2e8f0"), orientation = "h", x = 0, y = -0.08,
+                    yanchor = "top"),
       hovermode = "closest",
       hoverlabel = list(bgcolor = "rgba(2,6,23,0.92)", bordercolor = "#475569",
                         font = list(color = "#e2e8f0", size = 11)),
-      margin = list(l = 60, r = 120, t = 44, b = 70),
+      margin = list(l = 60, r = 120, t = 44, b = 40),
       annotations = c(endlabels, ann))
   })
 
@@ -10721,11 +10900,20 @@ server <- function(input, output, session) {
     ap_note <- if (isTRUE(input$lcAllPins))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;", "All qualstream pins on"),
-        " - every name in the master list (graded >= 68, plus your open positions): entries ",
-        span(style = "color:#34d399;", "buy"), " / ",
-        span(style = "color:#f59e0b;", "hold"), " / ",
-        span(style = "color:#f87171;", "sell"),
-        "; label = ticker, dot at its own return, no lines. Hover a dot for its move.",
+        " - every name in the master list (graded >= 68, plus your open positions). ",
+        "One marker per day on the green line, ",
+        span(style = "color:#34d399;", "▲ buy"), " / ",
+        span(style = "color:#fbbf24;", "● hold"), " / ",
+        span(style = "color:#f87171;", "▼ sell"),
+        ", and its chip lists every name that moved to that state that day. ",
+        "Hover a marker or chip for each name's move.",
+        local({
+          r0 <- if (!is.null(d$rec_states) && nrow(d$rec_states))
+                  suppressWarnings(min(as.Date(d$rec_states$as_of), na.rm = TRUE)) else as.Date(NA)
+          if (is.na(r0)) NULL
+          else paste0(" Before ", format(r0, "%b %d"),
+                      ", when daily recording began, states are replayed from the ledger.")
+        }),
         # never fail silently: say when nothing drew and the usual reason why
         local({
           clk <- lc_hist_tk()
