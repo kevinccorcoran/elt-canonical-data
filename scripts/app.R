@@ -2802,11 +2802,13 @@ ui <- navbarPage(
         div(style = "color:#cbd5e1;font-size:0.72rem;font-weight:600;margin-bottom:0.3rem;",
             "STATE"),
         radioButtons("lcStateView", NULL,
-          choices = c("Engine (money rule)" = "engine", "Raw gate" = "raw"),
+          choices = c("Engine (money rule)" = "engine", "Raw gate" = "raw",
+                      "Nested shadow (decisive)" = "nested"),
           selected = "engine", inline = FALSE),
         div(style = "color:#64748b;font-size:0.66rem;margin-top:-0.4rem;",
-            paste("Changes the STATE column only. Queue ✓, sketch pins and",
-                  "pick lines always follow the engine - the rule the money uses."))
+            paste("Changes the STATE column. Under Nested shadow the sketch pins follow",
+                  "the shadow's decisive line too (▲ entry, ▼ exit, no hold circles).",
+                  "Queue ✓ and pick lines always follow the engine - the rule the money uses."))
       )),
       mainPanel(div(class = "main-card",
         # Decision board leads the panel: the at-a-glance buy/hold/sell surface is
@@ -8923,11 +8925,38 @@ server <- function(input, output, session) {
       dl_tk <- if (!is.null(d$meta) && nrow(d$meta) > 0 && any(toupper(d$meta$ticker) == toupper(tk)))
                  suppressWarnings(as.Date(d$meta$delisted_date[toupper(d$meta$ticker) == toupper(tk)][1]))
                else as.Date(NA)
-      trail <- lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
-                              prov_tk, now_state, dv$hz, dl_tk, rec = d$rec_states)
-      if (is.null(trail) || !nrow(trail)) next
-      ev <- data.frame(date = as.Date(trail$date), state = trail$state,
-                       stringsAsFactors = FALSE)
+      # STATE radio = Nested shadow: the pins are the shadow's own entries (buy)
+      # and exits (sell), nothing in between - its decisive line. Otherwise the
+      # engine trail as before. Backfilled shadow rows count as not recorded.
+      view <- if (!is.null(input$lcStateView)) input$lcStateView else "engine"
+      nested_rec <- NULL
+      if (identical(view, "nested")) {
+        nz <- if (!is.null(d$nested) && nrow(d$nested))
+                d$nested[toupper(d$nested$ticker) == toupper(tk), , drop = FALSE] else NULL
+        if (is.null(nz) || !nrow(nz)) next
+        nz <- nz[(nz$state == "BUY" & nz$run_date == nz$entered_at) | nz$state == "EXIT", , drop = FALSE]
+        if (!nrow(nz)) next
+        ev <- data.frame(date = as.Date(nz$run_date),
+                         state = ifelse(nz$state == "EXIT", "sell", "buy"),
+                         stringsAsFactors = FALSE)
+        ev <- ev[order(ev$date), , drop = FALSE]
+        # the shadow's ledger starts 2026-06-16, the board's at the epoch: like the
+        # engine trail, show nothing before the epoch and pin a name the shadow
+        # already held on the epoch day there (hover keeps it marked backfilled)
+        ep  <- as.Date(LEDGER_EPOCH)
+        pre <- ev[ev$date < ep, , drop = FALSE]
+        ev  <- ev[ev$date >= ep, , drop = FALSE]
+        if (nrow(pre) && identical(pre$state[nrow(pre)], "buy"))
+          ev <- rbind(data.frame(date = ep, state = "buy", stringsAsFactors = FALSE), ev)
+        if (!nrow(ev)) next
+        nested_rec <- as.Date(nz$run_date[nz$proven_src %in% "resolver"])
+      } else {
+        trail <- lc_board_trail(dv$M, dv$dates, tk, d$led, LEDGER_EPOCH,
+                                prov_tk, now_state, dv$hz, dl_tk, rec = d$rec_states)
+        if (is.null(trail) || !nrow(trail)) next
+        ev <- data.frame(date = as.Date(trail$date), state = trail$state,
+                         stringsAsFactors = FALSE)
+      }
       # hand-sold override: drop model events on/after the sell date and pin a
       # sell there, so the sketch matches the board's sell column for this name.
       sold_d <- if (toupper(tk) %in% names(pos_sold)) pos_sold[[toupper(tk)]] else as.Date(NA)
@@ -8944,7 +8973,8 @@ server <- function(input, output, session) {
       rec_d <- if (!is.null(d$rec_states) && nrow(d$rec_states))
                  as.Date(d$rec_states$as_of[toupper(d$rec_states$ticker) == toupper(tk) &
                                              d$rec_states$hz == dv$hz]) else as.Date(character(0))
-      ev$recorded <- ev$date %in% rec_d
+      ev$recorded <- if (!is.null(nested_rec)) ev$date %in% nested_rec else ev$date %in% rec_d
+      ev$src <- if (!is.null(nested_rec)) "nested" else "engine"
       ev$own <- vapply(ev$date, function(dd) { p <- asof(tkr, dd)
         if (is.na(p)) NA_real_ else (p / base_tk - 1) * 100 }, numeric(1))
       ev <- ev[!is.na(ev$own), , drop = FALSE]; if (!nrow(ev)) next
@@ -9517,6 +9547,20 @@ server <- function(input, output, session) {
           AND state = 'BUY'
         ORDER BY entered_at, ticker"),
         error = function(e) NULL)
+      # Nested-dwell SHADOW (decisive line, pre-registered 2026-10-12; written
+      # daily by scripts/nested_board_shadow.py in elt-inference-models). Only
+      # its entries, exits and the latest run's rows are read: the STATE radio's
+      # "Nested shadow" option shows its state and draws these as the sketch
+      # pins. Rows with proven_src 'backfill' are context, not live evidence.
+      # NULL until the table exists; the engine view is untouched either way.
+      nested <- tryCatch(dbGetQuery(con, "
+        SELECT ticker, run_date::text AS run_date, state, entered_at::text AS entered_at,
+               exit_reason, proven_src
+        FROM monitoring.nested_board_shadow
+        WHERE state = 'EXIT' OR (state = 'BUY' AND run_date = entered_at)
+           OR run_date = (SELECT MAX(run_date) FROM monitoring.nested_board_shadow_runs)
+        ORDER BY ticker, run_date"),
+        error = function(e) NULL)
       # Evidence breadth (gap review 2026-08-15): n_weighted = the ticker's
       # count of credibility-weighted 12-month cells at the LATEST walk-forward
       # cutoff. Measured on prod: inside the two clusters holding most buys,
@@ -9543,7 +9587,7 @@ server <- function(input, output, session) {
         error = function(e) NULL)
       dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
                   qs = qs, qscmp = qscmp, qscmp_detail = qscmp_detail, qscmp_anchor = qs_anchor,
-                  shadow = shadow, breadth = breadth, rec_states = rec_states,
+                  shadow = shadow, nested = nested, breadth = breadth, rec_states = rec_states,
                   qs_veto = if (!is.null(qsv) && nrow(qsv) > 0)
                               toupper(qsv$ticker[qsv$veto %in% TRUE])
                             else character(0),
@@ -10196,6 +10240,29 @@ server <- function(input, output, session) {
       if (!is.null(dv) && !is.null(dv$state_now))
         setNames(as.character(dv$state_now), names(dv$state_now))
       else setNames(character(0), character(0))
+    } else if (view == "nested") {
+      # Nested shadow's decisive state (monitoring.nested_board_shadow): BUY
+      # while it holds the name, SELL for 30 days after its exit, otherwise the
+      # engine state with an unconfirmed engine BUY shown as HOLD. The shadow
+      # never adopts or sells anything; the book's own overrides still win below.
+      eng <- if (!is.null(dv) && !is.null(dv$state_now))
+        setNames(as.character(dv$state_now), names(dv$state_now))
+        else setNames(character(0), character(0))
+      nz <- if (!is.null(d) && !is.null(d$nested) && nrow(d$nested)) d$nested else NULL
+      if (is.null(nz)) eng else {
+        last_run <- suppressWarnings(max(as.Date(nz$run_date), na.rm = TRUE))
+        open_now <- toupper(nz$ticker[nz$state == "BUY" & as.Date(nz$run_date) == last_run])
+        ex <- nz[nz$state == "EXIT", , drop = FALSE]
+        recent_exit <- setdiff(toupper(ex$ticker[as.Date(ex$run_date) >= last_run - 30]), open_now)
+        out <- eng
+        for (u in names(out)) {
+          out[[u]] <- if (toupper(u) %in% open_now) "buy"
+                      else if (toupper(u) %in% recent_exit) "sell"
+                      else if (identical(out[[u]], "buy")) "hold"
+                      else out[[u]]
+        }
+        out
+      }
     } else {
       gate_now <- if (!is.null(d) && !is.null(d$gate) && nrow(d$gate) &&
                       all(c("ticker", "gate_today") %in% names(d$gate)))
@@ -10699,6 +10766,7 @@ server <- function(input, output, session) {
       apnam <- c(buy = "Buy", hold = "Hold", sell = "Sell")
       if (is.null(ap$prev)) ap$prev <- NA_character_
       if (is.null(ap$recorded)) ap$recorded <- FALSE
+      if (is.null(ap$src)) ap$src <- "engine"
       ap <- ap[order(ap$date, match(ap$state, c("buy", "hold", "sell")), ap$ticker), , drop = FALSE]
       key <- paste(format(ap$date), ap$state)
       PER <- 4L                                       # tickers per chip row
@@ -10712,7 +10780,9 @@ server <- function(input, output, session) {
           sprintf("<b>%s · %s</b> · %d name%s", toupper(s$state[1]),
                   format(s$date[1], "%b %d"), nrow(s), if (nrow(s) == 1) "" else "s"),
           if (!any(s$recorded %in% TRUE))
-            "<br><i>replayed from the ledger (daily recording began later)</i>" else "",
+            (if (any(s$src %in% "nested"))
+               "<br><i>backfilled by the shadow (context, not live evidence)</i>"
+             else "<br><i>replayed from the ledger (daily recording began later)</i>") else "",
           "<br>", paste(sprintf("%s · %s · %s own", s$ticker, how,
                                 ifelse(is.na(s$own), "-", sprintf("%+.1f%%", s$own))),
                         collapse = "<br>"))
@@ -10924,6 +10994,11 @@ server <- function(input, output, session) {
         span(style = "color:#f87171;", "▼ sell"),
         ", and its chip lists every name that moved to that state that day. ",
         "Hover a marker or chip for each name's move.",
+        if (identical(input$lcStateView, "nested"))
+          span(style = "color:#f8fafc;",
+               " STATE = Nested shadow: the pins are the shadow's entries (▲) and exits (▼),",
+               " nothing in between; pins before Oct 12 2026 are backfilled context.")
+        else NULL,
         local({
           r0 <- if (!is.null(d$rec_states) && nrow(d$rec_states))
                   suppressWarnings(min(as.Date(d$rec_states$as_of), na.rm = TRUE)) else as.Date(NA)
