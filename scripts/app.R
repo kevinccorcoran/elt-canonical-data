@@ -9082,7 +9082,12 @@ server <- function(input, output, session) {
   # focused name stands out of the pack (both are unset here in focus mode? no -
   # unlike all-pins we do NOT hide in focus, the overlay just rides brighter).
   lc_pick_lines <- reactive({
-    if (!isTRUE(input$lcAllPickLines)) return(NULL)
+    # on by the checkbox, or automatically (light grey, with end labels) while
+    # exactly one cluster is ticked, so the status of each name in that cluster
+    # can be read against its own path and not only the green average
+    one_cl <- lc_single_cluster()
+    auto <- !isTRUE(input$lcAllPickLines) && !is.na(one_cl)
+    if (!isTRUE(input$lcAllPickLines) && !auto) return(NULL)
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     if (is.null(dv) || is.null(dv$M)) return(NULL)
@@ -9132,7 +9137,7 @@ server <- function(input, output, session) {
       out[[toupper(tk)]] <- lo
     }
     if (!length(out)) return(NULL)
-    list(lines = out, n = length(out))
+    list(lines = out, n = length(out), auto = auto, cluster = one_cl)
   })
 
   # ── Checked master-list names -> their own return lines ───────────────────
@@ -10029,6 +10034,13 @@ server <- function(input, output, session) {
     ids <- lc_live_ids()[toupper(tks)]
     !is.na(ids) & ids %in% as.integer(sel)
   }
+  # Exactly one cluster ticked (Kevin 2026-10-12: "light grey lines for each
+  # ticker when and only when a specific cluster id is selected"): the sketch then
+  # draws every name of that cluster as its own line without the pick-lines box.
+  lc_single_cluster <- reactive({
+    sel <- lc_ids_effective()
+    if (!is.null(sel) && length(sel) == 1) as.integer(sel) else NA_integer_
+  })
 
   output$idFilterLC <- renderUI({
     ids <- lc_board_filter_ids()
@@ -10685,17 +10697,31 @@ server <- function(input, output, session) {
     pl_suffix <- ""
     if (!is.null(pl) && length(pl$lines)) {
       first <- TRUE
+      # single-cluster view: light grey lines with a ticker end label per name;
+      # checkbox view (all clusters): the faint white bundle as before
+      pl_auto <- isTRUE(pl$auto)
+      pl_col  <- if (pl_auto) "rgba(148,163,184,0.55)" else "rgba(248,250,252,0.30)"
+      pl_name <- if (pl_auto) sprintf("Cluster %d names (%d)", pl$cluster, pl$n)
+                 else sprintf("Qualstream pick lines (%d)", pl$n)
       for (nm in names(pl$lines)) {
         ln <- pl$lines[[nm]]
         fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
-          name = sprintf("Qualstream pick lines (%d)", pl$n),
+          name = pl_name,
           legendgroup = "picklines", showlegend = first,
-          line = list(color = "rgba(248,250,252,0.30)", width = 1),
+          line = list(color = pl_col, width = 1),
           hovertext = nm,
           hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
+        if (pl_auto && nrow(ln) > 0) {
+          last_i <- nrow(ln)
+          endlabels[[length(endlabels) + 1]] <- list(
+            x = ln$d[last_i], y = ln$ret[last_i], text = nm,
+            textfont = list(color = "#94a3b8", size = 8), showarrow = FALSE,
+            xanchor = "left", yanchor = "middle", xshift = 5)
+        }
         first <- FALSE
       }
-      pl_suffix <- sprintf(" · %d pick lines", pl$n)
+      pl_suffix <- if (pl_auto) sprintf(" · cluster %d lines", pl$cluster)
+                   else sprintf(" · %d pick lines", pl$n)
     }
     # Checked master-list names: each ticked row draws its own rebased return line
     # in a distinct color, with a legend entry, so you can compare a handful of
@@ -11139,6 +11165,15 @@ server <- function(input, output, session) {
         "The ", span(style = "color:#10b981;", "green line"),
         " is their average - these are the paths behind it. Click a chip to brighten ",
         "one out of the pack.")
+      else if (!is.na(lc_single_cluster()))
+      div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+        span(style = "color:#f8fafc; font-weight:700;",
+             sprintf("Cluster %d selected", lc_single_cluster())),
+        " - each of its master-list names is drawn as its own ",
+        span(style = "color:#f8fafc;", "light grey line"),
+        " with its ticker at the end, rebased to 0% at the anchor, so a pin can be read ",
+        "against the name's own path. The ", span(style = "color:#10b981;", "green line"),
+        " is their average. Hover a line for its ticker and return; tick a row to draw it bright.")
       else NULL
     tagList(ov_note, ap_note, pl_note,
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
