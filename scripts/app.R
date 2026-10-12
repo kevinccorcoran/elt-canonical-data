@@ -584,6 +584,78 @@ lc_board_trail_replay <- function(M, dates, tk, led, epoch, prov, now_state,
   out
 }
 
+# Settled-state pins (display only, 2026-10-12). The board re-decides daily and a
+# single-vote name on the 0.50 share line flips every time one vote lands or
+# lapses (AXON: six pins in 15 days). The sketch therefore pins a state change
+# only once the board kept that state for PIN_DWELL_RUNDAYS ledger run-days
+# (the Prometheus "for" / integrating-debounce pattern): entries and sells always
+# pin (money moved), a kept pin that repeats the last pinned state merges into it
+# (that merge, not the constant, is what folds AXON's Sep 6 BUY), every dropped
+# flip is listed in the next pin's hover, and the open run is flagged unsettled
+# (drawn hollow) until it has lasted the dwell. The model, the trail, the table
+# and the STATE column are untouched; this only chooses which flips get a marker.
+# Measured 2026-10-12 on the recorded board (92 runs): 27 runs of 1 to 4 days are
+# all single-vote crossings or one-day re-mint blips; k = 4 leaks a 4-day wobble,
+# k = 5 to 7 give the same pins, k = 10 leaves 12 names unsettled. Re-check k
+# after another quarter of capture. Comparison is dwell >= PIN_DWELL_RUNDAYS.
+PIN_DWELL_RUNDAYS <- 5L
+lc_pin_reason <- function(why) {
+  w <- tolower(ifelse(is.na(why), "", why))
+  ifelse(grepl("unproven", w), "de-proved at re-mint, votes unchanged",
+  ifelse(grepl("washed|flicker", w), "washed out, share below 0.50", ""))
+}
+lc_pin_debounce <- function(ev, run_d, last_d, min_days = PIN_DWELL_RUNDAYS,
+                            every = FALSE, why_of = NULL) {
+  if (is.null(ev) || !nrow(ev)) return(ev)
+  ev <- ev[order(as.Date(ev$date)), , drop = FALSE]
+  n  <- nrow(ev); d <- as.Date(ev$date); st <- as.character(ev$state)
+  nxt <- c(d[-1], as.Date(NA))
+  dwell <- vapply(seq_len(n), function(i)
+    if (is.na(nxt[i])) sum(run_d >= d[i] & run_d <= last_d)
+    else sum(run_d >= d[i] & run_d < nxt[i]), numeric(1))
+  # money moved: every sell/closed, and the first BUY of each position (the first
+  # buy after the start or after a sell/closed, even when a replayed hold precedes it)
+  money <- logical(n); seen_buy <- FALSE
+  for (i in seq_len(n)) {
+    if (st[i] %in% c("sell", "closed")) { money[i] <- TRUE; seen_buy <- FALSE }
+    else if (st[i] == "buy" && !seen_buy) { money[i] <- TRUE; seen_buy <- TRUE }
+  }
+  settled <- dwell >= min_days
+  keep <- if (isTRUE(every)) rep(TRUE, n) else (money | settled)
+  keep[n] <- TRUE                                   # the open run always has a pin (hollow if young)
+  surv <- rep(FALSE, n); last_state <- NA_character_
+  for (i in seq_len(n)) {
+    if (!keep[i]) next
+    if (!isTRUE(every) && !is.na(last_state) && identical(st[i], last_state)) next
+    surv[i] <- TRUE; last_state <- st[i]
+  }
+  desc <- function(idx) {
+    why <- if (!is.null(why_of)) unname(why_of[format(d[idx])]) else rep(NA_character_, length(idx))
+    rs  <- lc_pin_reason(why)
+    sprintf("%s %s (%dd%s)", st[idx], format(d[idx], "%b %d"), as.integer(dwell[idx]),
+            ifelse(nzchar(rs), paste0(", ", rs), ""))
+  }
+  hidden <- character(n); n_hidden <- integer(n)
+  if (!isTRUE(every) && any(surv)) {
+    pend <- integer(0)
+    for (i in seq_len(n)) {
+      if (surv[i]) {
+        if (length(pend)) { hidden[i] <- paste(desc(pend), collapse = ", "); n_hidden[i] <- length(pend) }
+        pend <- integer(0)
+      } else pend <- c(pend, i)
+    }
+    if (length(pend)) {                             # trailing dropped rows ride the last pin
+      j <- max(which(surv))
+      hidden[j] <- paste(c(if (nzchar(hidden[j])) hidden[j], desc(pend)), collapse = ", ")
+      n_hidden[j] <- n_hidden[j] + length(pend)
+    }
+  }
+  ev$dwell <- as.integer(dwell)
+  ev$settled <- if (isTRUE(every)) rep(TRUE, n) else (settled | money)   # raw view draws solid
+  ev$hidden <- hidden; ev$n_hidden <- n_hidden
+  ev[surv, , drop = FALSE]
+}
+
 # Pair a per-ticker board trail (lc_board_trail output) into buy->sell episodes =
 # realized trades. An open buy with a hand-sold override (sold_over, from the
 # positions table) closes at that date; otherwise it stays open and is marked to
@@ -2794,6 +2866,7 @@ ui <- navbarPage(
       make_sidebar("LC", "Lifecycle", tagList(
         checkboxInput("lcBuyQSonly", "Qualstream + picks only", value = TRUE),
         checkboxInput("lcAllPins", "All qualstream pins", value = TRUE),
+        checkboxInput("lcEveryFlip", "Show every flip", value = FALSE),
         checkboxInput("lcTopPerf", "Top performers (hindsight, any qs)", value = FALSE),
         checkboxInput("lcAllPickLines", "All qualstream pick lines (white)", value = FALSE),
         checkboxInput("lcAutoRefresh", "Auto-refresh (hourly)", value = TRUE),
@@ -8913,6 +8986,11 @@ server <- function(input, output, session) {
       sdv <- suppressWarnings(as.Date(as.character(pp_sold$sold_date)))
       keep <- !is.na(sdv); setNames(sdv[keep], toupper(pp_sold$ticker)[keep])
     } else setNames(as.Date(character(0)), character(0))
+    # settled-state pins: the dwell clock is the ledger's run-days, not calendar
+    # days; "Show every flip" (lcEveryFlip) restores the raw change sequence
+    run_d <- sort(unique(if (!is.null(d$led$dd)) d$led$dd else as.Date(d$led$d)))
+    last_d <- if (length(run_d)) max(run_d) else Sys.Date()
+    every_flip <- isTRUE(input$lcEveryFlip)
     out <- list()
     for (tk in tks) {
       tkr <- px[toupper(px$ticker) == toupper(tk), , drop = FALSE]
@@ -8963,8 +9041,17 @@ server <- function(input, output, session) {
       if (!is.na(sold_d) && sold_d >= anchor)
         ev <- rbind(ev[ev$date < sold_d, , drop = FALSE],
                     data.frame(date = sold_d, state = "sell", stringsAsFactors = FALSE))
-      # previous state (from the FULL trail, so a window's first pin still knows
-      # whether it was an entry or a flip) - shown in the pin hover
+      # settled-state pins (lc_pin_debounce): keep entries, sells and states the
+      # board then held for PIN_DWELL_RUNDAYS; fold the rest into the next pin's
+      # hover with the recorded reason. Nested rows are entries/exits, so none fold.
+      why_of <- if (!is.null(d$rec_states) && nrow(d$rec_states) && "why" %in% names(d$rec_states)) {
+        rw <- d$rec_states[toupper(d$rec_states$ticker) == toupper(tk) & d$rec_states$hz == dv$hz, , drop = FALSE]
+        setNames(as.character(rw$why), as.character(rw$as_of))
+      } else NULL
+      ev <- lc_pin_debounce(ev, run_d, last_d, PIN_DWELL_RUNDAYS, every_flip, why_of)
+      if (is.null(ev) || !nrow(ev)) next
+      # previous state (from the FULL kept sequence, so a window's first pin still
+      # knows whether it was an entry or a flip) - shown in the pin hover
       ev$prev <- c(NA_character_, head(ev$state, -1))
       ev <- ev[ev$date >= anchor & ev$state %in% c("buy", "hold", "sell"), , drop = FALSE]
       if (!nrow(ev)) next
@@ -9581,7 +9668,7 @@ server <- function(input, output, session) {
       # a de-gated cluster's past BUYs as HOLD after every re-mint. NULL where the
       # portfolio schema is absent (dev) -> replay only, as before.
       rec_states <- tryCatch(dbGetQuery(con, "
-        SELECT DISTINCT ON (ticker, as_of, hz) ticker, as_of::text AS as_of, hz, state
+        SELECT DISTINCT ON (ticker, as_of, hz) ticker, as_of::text AS as_of, hz, state, why
         FROM portfolio.state_history
         ORDER BY ticker, as_of, hz, captured_at DESC"),
         error = function(e) NULL)
@@ -10767,8 +10854,13 @@ server <- function(input, output, session) {
       if (is.null(ap$prev)) ap$prev <- NA_character_
       if (is.null(ap$recorded)) ap$recorded <- FALSE
       if (is.null(ap$src)) ap$src <- "engine"
+      if (is.null(ap$settled)) ap$settled <- TRUE
+      if (is.null(ap$hidden)) ap$hidden <- ""
+      if (is.null(ap$n_hidden)) ap$n_hidden <- 0L
+      ap$settled <- ap$settled %in% TRUE
       ap <- ap[order(ap$date, match(ap$state, c("buy", "hold", "sell")), ap$ticker), , drop = FALSE]
-      key <- paste(format(ap$date), ap$state)
+      # an unsettled (hollow) pin never shares a chip with a settled one that day
+      key <- paste(format(ap$date), ap$state, ap$settled)
       PER <- 4L                                       # tickers per chip row
       G <- do.call(rbind, lapply(unique(key), function(k) {
         s <- ap[key == k, , drop = FALSE]
@@ -10776,17 +10868,23 @@ server <- function(input, output, session) {
                        paste, character(1), collapse = " ")
         how <- ifelse(is.na(s$prev) | !(s$prev %in% c("buy", "hold", "sell")), "new",
                ifelse(s$prev == "sell", "re-entered", paste("from", s$prev)))
+        fold <- ifelse(s$n_hidden > 0,
+                       sprintf(" · %d quick flip%s hidden: %s", s$n_hidden,
+                               ifelse(s$n_hidden == 1, "", "s"), s$hidden), "")
         hov <- paste0(
           sprintf("<b>%s · %s</b> · %d name%s", toupper(s$state[1]),
                   format(s$date[1], "%b %d"), nrow(s), if (nrow(s) == 1) "" else "s"),
+          if (!isTRUE(s$settled[1]))
+            sprintf("<br><i>current state, younger than %d run-days: not settled</i>", PIN_DWELL_RUNDAYS) else "",
           if (!any(s$recorded %in% TRUE))
             (if (any(s$src %in% "nested"))
                "<br><i>backfilled by the shadow (context, not live evidence)</i>"
              else "<br><i>replayed from the ledger (daily recording began later)</i>") else "",
-          "<br>", paste(sprintf("%s · %s · %s own", s$ticker, how,
-                                ifelse(is.na(s$own), "-", sprintf("%+.1f%%", s$own))),
+          "<br>", paste(sprintf("%s · %s · %s own%s", s$ticker, how,
+                                ifelse(is.na(s$own), "-", sprintf("%+.1f%%", s$own)), fold),
                         collapse = "<br>"))
         data.frame(date = s$date[1], state = s$state[1], ret = s$ret[1], n = nrow(s),
+                   settled = isTRUE(s$settled[1]),
                    txt = paste(rows, collapse = "<br>"), nl = length(rows),
                    nc = max(nchar(rows)), hov = hov, stringsAsFactors = FALSE)
       }))
@@ -10820,15 +10918,20 @@ server <- function(input, output, session) {
       G$y <- if (sum(okl) >= 2)
                approx(as.numeric(cmp$d)[okl], lineY[okl], xout = G$xnum, rule = 2)$y
              else G$ret
-      for (s in c("buy", "hold", "sell")) {
-        sub <- G[G$state == s, , drop = FALSE]; if (!nrow(sub)) next
+      for (s in c("buy", "hold", "sell")) for (stl in c(TRUE, FALSE)) {
+        sub <- G[G$state == s & G$settled == stl, , drop = FALSE]; if (!nrow(sub)) next
         # POSIXct, not the text form the chips use: a text x next to the Date
-        # lines made plotly warn "both discrete & non-discrete data" per render
+        # lines made plotly warn "both discrete & non-discrete data" per render.
+        # Unsettled = the open run, younger than the dwell: same glyph, hollow.
         fig <- add_markers(fig, x = as.POSIXct(sub$xnum * 86400, origin = "1970-01-01", tz = "UTC"),
-          y = sub$y, name = apnam[[s]],
-          legendgroup = paste0("pin_", s), showlegend = TRUE,
-          marker = list(color = apcol[[s]], size = 13, symbol = apsym[[s]],
-                        line = list(color = "#f8fafc", width = 1.5)),
+          y = sub$y, name = if (stl) apnam[[s]] else paste(apnam[[s]], "(new)"),
+          legendgroup = paste0("pin_", s, if (stl) "" else "_new"), showlegend = TRUE,
+          marker = if (stl)
+            list(color = apcol[[s]], size = 13, symbol = apsym[[s]],
+                 line = list(color = "#f8fafc", width = 1.5))
+          else
+            list(color = apcol[[s]], size = 13, symbol = paste0(apsym[[s]], "-open"),
+                 line = list(color = apcol[[s]], width = 2)),
           text = sub$hov, hovertemplate = "%{text}<extra></extra>")
       }
       # y-range from every drawn line (checked / pick / top-performer lines too,
@@ -10994,6 +11097,15 @@ server <- function(input, output, session) {
         span(style = "color:#f87171;", "▼ sell"),
         ", and its chip lists every name that moved to that state that day. ",
         "Hover a marker or chip for each name's move.",
+        if (isTRUE(input$lcEveryFlip))
+          span(style = "color:#f8fafc;", " Every recorded flip is drawn.")
+        else
+          span(style = "color:#f8fafc;",
+               sprintf(" A pin is a state the board then held for %d+ run-days; entries and sells always pin.",
+                       PIN_DWELL_RUNDAYS),
+               " Shorter flips are folded into the next pin's hover. A hollow marker is the current state,",
+               sprintf(" younger than %d run-days, and may be withdrawn. Run-days are ledger run-days.", PIN_DWELL_RUNDAYS),
+               " The table and the flip history still show every flip; tick Show every flip for the raw sequence."),
         if (identical(input$lcStateView, "nested"))
           span(style = "color:#f8fafc;",
                " STATE = Nested shadow: the pins are the shadow's entries (▲) and exits (▼),",
