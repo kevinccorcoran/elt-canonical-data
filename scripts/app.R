@@ -480,24 +480,26 @@ lc_state_trail <- function(M, dates, tk) {
 lc_board_trail <- function(M, dates, tk, led, epoch, prov, now_state,
                            hz = 12L, dl_d = as.Date(NA), rec = NULL) {
   out <- lc_board_trail_replay(M, dates, tk, led, epoch, prov, now_state, hz, dl_d)
-  # Seam fix (2026-10-06): the replay judges buy vs hold with TODAY's proven
-  # flag. A name the board recorded as BUY on the very first capture day
-  # (2026-08-07) was proven then, so replay its pre-capture days as proven.
-  # Without this its July entry pinned as HOLD and all 16 such names "flipped"
-  # to BUY together on 2026-08-07 - a tower of pins for a change that never
-  # happened (prod: every name on the first capture day was BUY, held since July).
+  # Seam fix (2026-10-06, widened 2026-10-12): the replay judges buy vs hold
+  # with TODAY's proven flag. A name whose FIRST daily record is BUY was proven
+  # when the board first looked at it (the record says "held since <entry>"),
+  # so replay the days before its own first record as proven. Without this a
+  # name unproven today pinned HOLD at entry and "flipped" to BUY on the day its
+  # recording began (its adoption day), a change that never happened: 16 names
+  # on 2026-08-07 and 21 adopted later (ENVA/PTGX Aug 14, Kevin 2026-10-12).
+  # Days from the first record on come from the records (lc_merge_recorded).
   if (!isTRUE(prov) && !is.null(rec) && nrow(rec)) {
-    rh <- rec[rec$hz == hz, , drop = FALSE]
-    r  <- rh[toupper(rh$ticker) == toupper(tk), , drop = FALSE]
+    r <- rec[toupper(rec$ticker) == toupper(tk) & rec$hz == hz &
+             rec$state %in% c("buy", "hold", "sell"), , drop = FALSE]
     if (nrow(r)) {
-      cap0 <- min(as.Date(rh$as_of))
-      r <- r[order(r$as_of), , drop = FALSE]
-      if (as.Date(r$as_of[1]) == cap0 && identical(r$state[1], "buy")) {
+      r  <- r[order(r$as_of), , drop = FALSE]
+      r0 <- as.Date(r$as_of[1])                     # this name's own first record
+      if (identical(r$state[1], "buy")) {
         alt <- lc_board_trail_replay(M, dates, tk, led, epoch, TRUE, now_state, hz, dl_d)
         if (!is.null(alt) && nrow(alt)) {
-          pre  <- alt[as.Date(alt$date) < cap0, c("date", "state"), drop = FALSE]
+          pre  <- alt[as.Date(alt$date) < r0, c("date", "state"), drop = FALSE]
           rest <- if (!is.null(out) && nrow(out))
-                    out[as.Date(out$date) >= cap0, c("date", "state"), drop = FALSE] else NULL
+                    out[as.Date(out$date) >= r0, c("date", "state"), drop = FALSE] else NULL
           out <- rbind(pre, rest)
         }
       }
