@@ -98,7 +98,7 @@ QS_MAX_AGE_DAYS <- 150L
 # shift that is still under way, by CREATING a category or REDEFINING an existing
 # market? DISPLAY-ONLY (Kevin 2026-10-13: a marker next to the ticker and a way to
 # view only those names across every cluster): filled ◆ = a shift in its growth
-# phase, hollow ◇ = a pre-commercial builder with a dated milestone. It never feeds
+# phase in a market forecast at $10B+ a year, hollow ◇ = a pre-commercial builder with a dated milestone. It never feeds
 # a grade, the 68 bar, the seed/adopt queue or any BUY/HOLD rule, and it is never
 # backtestable (the tag comes from the model's own knowledge, so a past-dated tag
 # is hindsight). v1 rows (qual.ticker_category_tags, new_category_v1) are history
@@ -111,7 +111,8 @@ NC_TAG_VERSION  <- "market_shift_v2"
 lc_load_category_tags <- function(con) {
   x <- tryCatch(dbGetQuery(con, sprintf("
     SELECT DISTINCT ON (ticker) ticker, marker, kind, category, parent_market,
-           prior_option, adoption_stage, adoption_evidence, scale_year,
+           prior_option, adoption_stage, adoption_evidence, potential_size,
+           potential_evidence, scale_year,
            first_sale_year, company_rank, is_creator, votes_marked, votes_total,
            milestone, rationale, model, as_of::text AS as_of
     FROM qual.ticker_market_tags
@@ -137,9 +138,16 @@ lc_nc_tip <- function(x) {
   ev <- nz(x$adoption_evidence)
   stage <- paste0(gsub("_", " ", nz(x$adoption_stage)), ifelse(nzchar(ev), paste0(" (", ev, ")"), ""))
   nxt <- ifelse(hollow & nzchar(nz(x$milestone)), paste0(" Next: ", nz(x$milestone), "."), "")
-  sprintf("%s: %s (in %s). Before: %s. Stage: %s; %s%s.%s Votes %s/%s. %s Model knowledge, tagged %s.",
+  # the forecast behind "large growth potential" ($10B+ a year, decided in the tagger)
+  psz  <- if (is.null(x$potential_size)) rep("", nrow(x)) else nz(x$potential_size)
+  pev  <- if (is.null(x$potential_evidence)) rep("", nrow(x)) else nz(x$potential_evidence)
+  plab <- c(under_1b = "under $1B", "1b_to_10b" = "$1B to $10B",
+            "10b_to_100b" = "$10B to $100B", over_100b = "over $100B")[psz]
+  pot  <- ifelse(is.na(plab), "", paste0(" Market potential: ", plab, " a year",
+                                         ifelse(nzchar(pev), paste0(" (", pev, ")"), ""), "."))
+  sprintf("%s: %s (in %s). Before: %s. Stage: %s; %s%s.%s%s Votes %s/%s. %s Model knowledge, tagged %s.",
           kind, nz(x$category), nz(x$parent_market), nz(x$prior_option), stage, when, rank,
-          nxt, nz(x$votes_marked), nz(x$votes_total), nz(x$rationale), nz(x$as_of))
+          pot, nxt, nz(x$votes_marked), nz(x$votes_total), nz(x$rationale), nz(x$as_of))
 }
 
 # Dismissed set: tickers the user explicitly removed, kept so the qualstream
