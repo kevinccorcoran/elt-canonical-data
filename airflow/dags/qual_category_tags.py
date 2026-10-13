@@ -4,7 +4,8 @@ Kevin 2026-10-13: when qualstream grades a name, also check whether the company
 is building a new category; show a marker next to the ticker on the 3838
 master list and a "New-category names only" view filter.
 
-v2 (2026-10-13, qualstream market_shift_v2): "creating or redefining a market",
+v2 (2026-10-13, qualstream market_shift_v2): "creating or redefining a market"
+with large growth potential (a cited $10B+ a year forecast for the category),
 three answers per name voted in code, a filled or hollow marker, and a
 "market creators" view across every cluster. v1 rows (qual.ticker_category_tags)
 stay as history; nothing writes them any more.
