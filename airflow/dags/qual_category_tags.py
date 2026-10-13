@@ -42,13 +42,19 @@ DB error, or when most names fail. execution_timeout bounds a hung API.
 Knobs (Airflow Variables, all optional):
   QUAL_CATEGORY_MAX_NAMES (40)  names per run; the first run backfills the graded
                                 universe (~185) at this rate, master-list names first
-  QUAL_CATEGORY_MAX_COST  (4)   $ ceiling per run: the runner refuses to start when
-                                its estimate is above it ($0.03 per call x 3
-                                answers, so 40 names = $3.60) and stops once actual
-                                spend reaches it (measured ~$0.021 per call, so
-                                ~$0.064 per name, ~$2.60 for 40). A set Variable
-                                overrides this.
-  QUAL_CATEGORY_RETAG_DAYS (180) re-tag a name after this many days
+  QUAL_CATEGORY_MAX_COST  (4)   $ ceiling per run, not the daily spend: the runner
+                                refuses to start when its estimate is above it
+                                ($0.03 per call x 3 answers, so 40 names = $3.60)
+                                and stops once actual spend reaches it (measured
+                                ~$0.021 per call, so ~$0.064 per name, ~$2.60 for
+                                40). A set Variable overrides this.
+
+A name is tagged once (Kevin 2026-10-13): a day with no newly graded name makes
+no model call, and a new name costs ~$0.064 (about 1 a week in Aug to Sep 2026).
+The cap is a safety stop sized for a full 40-name run (the one-time backfill).
+The same model asked again later would give the same facts, so there is no
+re-tag timer; a refresh after a model change is a manual run with --retag-after.
+
 Deploy: same as qual_scorecards_on_entry.py (needs QUALSTREAM_ROOT, DATABASE_URL
 and ANTHROPIC_API_KEY in the container env).
 """
@@ -87,7 +93,6 @@ def _knob(name: str, default: str, pattern: str) -> str:
 
 MAX_NAMES = _knob("QUAL_CATEGORY_MAX_NAMES", "40", r"[0-9]+")
 MAX_COST = _knob("QUAL_CATEGORY_MAX_COST", "4", r"[0-9]+(\.[0-9]+)?")
-RETAG_DAYS = _knob("QUAL_CATEGORY_RETAG_DAYS", "180", r"[0-9]+")
 
 default_args = {
     "owner": "airflow",
@@ -120,7 +125,7 @@ with DAG(
             f'export PYTHONPATH="{QUALSTREAM_ROOT}/src" && '
             f'python -m qualstream.category '
             f'--as-of {{{{ data_interval_end | ds }}}} '
-            f'--retag-after {RETAG_DAYS} --limit {MAX_NAMES} --max-cost {MAX_COST}'
+            f'--limit {MAX_NAMES} --max-cost {MAX_COST}'
         ),
         # ~40 names x 3 answers x ~4 s is ~8 to 13 min; a hung API (120 s
         # timeout x SDK retries) must not hold a worker slot for hours
