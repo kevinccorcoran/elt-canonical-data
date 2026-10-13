@@ -96,7 +96,9 @@ QS_MAX_AGE_DAYS <- 150L
 # Market-shift tags (qualstream category.py -> qual.ticker_market_tags, v2): three
 # model answers per graded name, voted in code: does the company lead a market
 # shift that is still under way, by CREATING a category or REDEFINING an existing
-# market? DISPLAY-ONLY (Kevin 2026-10-13: a marker next to the ticker and a way to
+# market (the disruptor ◆), and, separately, is it an ENABLER (⚙: it sells a
+# hard-to-replace input to someone else's large, fast-growing market; Kevin
+# 2026-10-14 "i want to know the disruptors and enabler")? DISPLAY-ONLY (Kevin 2026-10-13: a marker next to the ticker and a way to
 # view only those names across every cluster): filled ◆ = a shift in its growth
 # phase in a market forecast at $10B+ a year, hollow ◇ = a pre-commercial builder with a dated milestone. It never feeds
 # a grade, the 68 bar, the seed/adopt queue or any BUY/HOLD rule, and it is never
@@ -114,20 +116,43 @@ lc_load_category_tags <- function(con) {
            prior_option, adoption_stage, adoption_evidence, potential_size,
            potential_evidence, scale_year,
            first_sale_year, company_rank, is_creator, votes_marked, votes_total,
-           milestone, rationale, model, as_of::text AS as_of
+           milestone, enabler, enabler_votes, supplies_to, supply_evidence,
+           supplied_stage, supply_role, supply_share, supplied_size,
+           rationale, model, as_of::text AS as_of
     FROM qual.ticker_market_tags
     WHERE tag_version = '%s'
     ORDER BY ticker, as_of DESC, tagged_at DESC", NC_TAG_VERSION)),
     error = function(e) NULL)
   if (is.null(x) || !nrow(x)) return(NULL)
   x$ticker <- toupper(x$ticker)
-  x$marked <- x$marker %in% c("filled", "hollow")
+  x$disruptor <- x$marker %in% c("filled", "hollow")
+  x$enabler   <- x$enabler %in% TRUE
+  x$marked    <- x$disruptor | x$enabler     # in the view: a disruptor or an enabler
   x
+}
+# The glyph(s) after a ticker: ◆ disruptor (◇ not selling yet), ⚙ enabler, both
+# when both apply. U+FE0E keeps the gear a text glyph, never an emoji.
+NC_GEAR <- "\u2699\ufe0e"
+lc_nc_glyph <- function(marker, enabler) {
+  d <- ifelse(marker %in% "hollow", "\u25c7", ifelse(marker %in% "filled", "\u25c6", ""))
+  paste0(d, ifelse(enabler %in% TRUE, NC_GEAR, ""))
 }
 # Hover text for marked rows: kind, category, what buyers used before, adoption
 # stage with its dated figure, timing, rank, the vote and the knowledge date.
 lc_nc_tip <- function(x) {
   nz <- function(v) { v <- as.character(v); v[is.na(v)] <- ""; v }
+  col <- function(f) if (is.null(x[[f]])) rep("", nrow(x)) else nz(x[[f]])
+  # enabler part (⚙): what it supplies, how replaceable, how much of the company
+  en  <- if (is.null(x$enabler)) rep(FALSE, nrow(x)) else x$enabler %in% TRUE
+  sev <- col("supply_evidence")
+  en_txt <- ifelse(en, sprintf("Enabler: a %s supplier to %s (%s)%s, %s to the company%s.",
+                               ifelse(col("supply_role") == "bottleneck", "hard-to-replace", "leading"),
+                               col("supplies_to"), gsub("_", " ", col("supplied_stage")),
+                               ifelse(nzchar(sev) & sev != "no figure known", paste0("; ", sev), ""),
+                               col("supply_share"),
+                               ifelse(nzchar(col("enabler_votes")), sprintf(", votes %s/%s",
+                                      col("enabler_votes"), col("votes_total")), "")), "")
+  dis <- x$marker %in% c("filled", "hollow")
   hollow <- x$marker %in% "hollow"
   kind <- ifelse(hollow, "Building a new market (not selling yet)",
                  ifelse(x$kind %in% "REDEFINE", "Redefining a market", "Creating a category"))
@@ -145,9 +170,11 @@ lc_nc_tip <- function(x) {
             "10b_to_100b" = "$10B to $100B", over_100b = "over $100B")[psz]
   pot  <- ifelse(is.na(plab), "", paste0(" Market potential: ", plab, " a year",
                                          ifelse(nzchar(pev), paste0(" (", pev, ")"), ""), "."))
-  sprintf("%s: %s (in %s). Before: %s. Stage: %s; %s%s.%s%s Votes %s/%s. %s Model knowledge, tagged %s.",
+  dis_txt <- sprintf("%s: %s (in %s). Before: %s. Stage: %s; %s%s.%s%s Votes %s/%s. %s",
           kind, nz(x$category), nz(x$parent_market), nz(x$prior_option), stage, when, rank,
-          pot, nxt, nz(x$votes_marked), nz(x$votes_total), nz(x$rationale), nz(x$as_of))
+          pot, nxt, nz(x$votes_marked), nz(x$votes_total), nz(x$rationale))
+  trimws(paste0(ifelse(dis, paste0(dis_txt, " "), ""), ifelse(en, paste0(en_txt, " "), ""),
+                sprintf("Model knowledge, tagged %s.", nz(x$as_of))))
 }
 
 # Dismissed set: tickers the user explicitly removed, kept so the qualstream
@@ -9164,10 +9191,12 @@ server <- function(input, output, session) {
       if (!length(lines)) return(NULL)
       tg <- lc_nc_tags()
       mk <- setNames(tg$marker, tg$ticker)
+      en <- setNames(tg$enabler %in% TRUE, tg$ticker)
       off <- setdiff(names(lines), ml)
       why <- setNames(lc_offlist_why(off), off)
       return(list(lines = lines, n = length(lines), auto = TRUE, cluster = NA_integer_,
-                  mode = "nc", offlist = off, why = why, marker = mk[names(lines)]))
+                  mode = "nc", offlist = off, why = why, marker = mk[names(lines)],
+                  enabler = en[names(lines)]))
     }
     # Same name set as the master list: every name graded >= QS_MIN, plus every
     # open position, in a live state. NOT gated on board_ok: after the 2026-10-01
@@ -10175,15 +10204,17 @@ server <- function(input, output, session) {
     ml <- lc_ml_names()
     mk <- d$nc[d$nc$marked %in% TRUE, , drop = FALSE]
     n_hollow <- sum(mk$marker == "hollow")
+    n_gear <- sum(mk$enabler %in% TRUE)
     n_untagged <- sum(!(ml %in% d$nc$ticker))
     div(style = "margin-bottom:0.9rem;",
       # isolate: keep the box's state across the hourly data refresh re-render
-      checkboxInput("lcNewCatOnly", "\u25c6 Market creators only (every cluster)",
+      checkboxInput("lcNewCatOnly", paste0("\u25c6 Disruptors + ", NC_GEAR, " enablers only (every cluster)"),
                     value = isTRUE(isolate(input$lcNewCatOnly))),
       div(style = "color:#64748b; font-size:0.68rem; margin-top:-0.55rem;",
-          sprintf("%d \u25c6%s (%d on the master list%s); hover a mark for why. Display only.",
+          sprintf("%d \u25c6%s%s (%d on the master list%s); hover a mark for why. Display only.",
                   sum(mk$marker == "filled"),
                   if (n_hollow > 0) sprintf(" + %d \u25c7", n_hollow) else "",
+                  sprintf(" + %d %s", n_gear, NC_GEAR),
                   sum(mk$ticker %in% ml),
                   if (n_untagged > 0) sprintf("; %d master-list names not tagged yet", n_untagged)
                   else "")))
@@ -10192,7 +10223,7 @@ server <- function(input, output, session) {
   output$lcNcPausedUI <- renderUI({
     if (is.null(lc_nc_only())) return(NULL)
     div(style = "color:#c084fc; font-size:0.68rem; margin:-0.3rem 0 0.8rem;",
-        "Clusters paused: the \u25c6 view shows every cluster.")
+        paste0("Clusters paused: the \u25c6 ", NC_GEAR, " view shows every cluster."))
   })
 
   # TRUE for tickers inside the ticked clusters (all TRUE when nothing is narrowed).
@@ -10406,7 +10437,7 @@ server <- function(input, output, session) {
           nc_set <- lc_nc_only()
           qs_top_v <- if (!is.null(nc_set)) qs_top[toupper(qs_top) %in% nc_set] else qs_top
           sprintf(" passed qualstream%s: %s.",
-            if (!is.null(nc_set)) " (\u25c6 market creators only)" else "",
+            if (!is.null(nc_set)) paste0(" (\u25c6 disruptors + ", NC_GEAR, " enablers only)") else "",
             if (!length(qs_top_v)) "none"
             else paste(sprintf("%s %d", qs_top_v,
                                as.integer(round(qs_grade[qs_top_v]))), collapse = ", "))
@@ -10468,7 +10499,7 @@ server <- function(input, output, session) {
                    if (tp_on)
                      "No board-traded names among the top performers (they may be pre-window holds or names never on the board)."
                    else if (!is.null(lc_nc_only()))
-                     "No board trades among the \u25c6 market creators (every cluster)."
+                     paste0("No board trades among the \u25c6 disruptors and ", NC_GEAR, " enablers (every cluster).")
                    else "No board trades in the selected clusters - adjust the cluster-id filter."))
       pill <- function(lab, big, sub, accent, valcol = "#e2e8f0")
         div(style = paste0("flex:1 1 0; min-width:120px; background:rgba(148,163,184,0.04);",
@@ -10487,7 +10518,7 @@ server <- function(input, output, session) {
         # and that the tag is today's model-knowledge label laid over past trades
         if (!is.null(lc_nc_only())) div(style = paste0("color:#c084fc; font-size:0.66rem;",
               " font-weight:600; margin-bottom:0.35rem;"),
-          "\u21b3 \u25c6 market creators, every cluster \u00b7 today's model-knowledge tag laid over past trades, descriptive, not a test of the tag"),
+          paste0("\u21b3 \u25c6 disruptors + ", NC_GEAR, " enablers, every cluster \u00b7 today's model-knowledge tag laid over past trades, descriptive, not a test of the tag")),
         # PRIMARY: the full buy->sell round-trip record (one economic position each)
         div(style = "display:flex; gap:0.5rem; flex-wrap:wrap; align-items:stretch;",
           pill("trades", as.character(tr$n),
@@ -10519,7 +10550,7 @@ server <- function(input, output, session) {
             " number). Compounded $ view: the portfolio panel below."),
             if (isTRUE(input$lcBuyQSonly)) "qualstream+ name" else "board name",
             if (is.null(lc_nc_only())) "in the selected clusters"
-            else "among the \u25c6 market creators (every cluster)",
+            else paste0("among the \u25c6 disruptors and ", NC_GEAR, " enablers (every cluster)"),
             format(as.Date(LEDGER_EPOCH), "%b %d"))))
     })
     # The buy/hold/sell kanban columns were retired 2026-08-26: they derived state
@@ -10628,15 +10659,15 @@ server <- function(input, output, session) {
     off_list <- if (!is.null(nc_now)) sort(setdiff(nc_now, toupper(cand))) else character(0)
     off_note <- if (length(off_list)) tags$div(
       style = "color:#94a3b8;font-size:0.72rem;margin:0.4rem 0 0.2rem;",
-      tags$span("\u25c6", style = "color:#c084fc;"),
+      tags$span(paste0("\u25c6", NC_GEAR), style = "color:#c084fc;"),
       paste0(" off the master list (chart only): ",
              paste(sprintf("%s (%s)", off_list, lc_offlist_why(off_list)), collapse = "; "), "."))
     cand <- cand[lc_in_sel(cand)]
     if (!length(cand))
       return(tagList(div(style = "color:#64748b; font-size:0.8rem; margin:0.4rem 0 0.8rem;",
                  if (!is.null(nc_now))
-                   paste("No \u25c6 market creators on the master list. Untick",
-                         "\"Market creators only\" to list every name.")
+                   paste0("No \u25c6 disruptors or ", NC_GEAR, " enablers on the master list. ",
+                          "Untick \"Disruptors + enablers only\" to list every name.")
                  else "No cluster ticked - tick a cluster box in the sidebar to list its names."),
                  off_note))
     live <- lc_live_ids()
@@ -10646,6 +10677,8 @@ server <- function(input, output, session) {
               else character(0)
     nc_mark <- if (!is.null(nc_tags) && nrow(nc_tags)) setNames(nc_tags$marker, nc_tags$ticker)
                else character(0)
+    nc_gear <- if (!is.null(nc_tags) && nrow(nc_tags)) setNames(nc_tags$enabler %in% TRUE, nc_tags$ticker)
+               else logical(0)
     HZS <- c(4L, 7L, 12L)
     cell_for <- function(tku, fl) {
       r <- sl[toupper(sl$ticker) == tku & sl$fut_lag == fl, , drop = FALSE]
@@ -10738,10 +10771,13 @@ server <- function(input, output, session) {
                              if (r$tk %in% names(nc_tip)) "white-space:nowrap;" else ""),
               r$tk,
               if (r$tk %in% names(nc_tip)) {
-                pre <- identical(nc_mark[[r$tk]], "hollow")
-                tags$span(if (pre) "\u25c7" else "\u25c6", title = nc_tip[[r$tk]],
-                          `aria-label` = if (pre) "building a new market, not selling yet"
-                                         else "creating or redefining a market",
+                mk1 <- nc_mark[[r$tk]]; gear <- isTRUE(nc_gear[[r$tk]])
+                tags$span(lc_nc_glyph(mk1, gear), title = nc_tip[[r$tk]],
+                          `aria-label` = paste(c(
+                            if (identical(mk1, "hollow")) "building a new market, not selling yet",
+                            if (identical(mk1, "filled")) "creating or redefining a market",
+                            if (gear) "enabler: a key supplier to a large, fast-growing market"),
+                            collapse = "; "),
                           style = "color:#c084fc;margin-left:4px;font-size:0.82rem;cursor:help;")
               }),
       state_td(r$state),
@@ -10784,10 +10820,13 @@ server <- function(input, output, session) {
       if (!is.null(d$nc) && nrow(d$nc)) tags$div(
         style = "color:#64748b;font-size:0.72rem;margin:-0.2rem 0 0.4rem;",
         tags$span("\u25c6", style = "color:#c084fc;"),
-        " = leads a market shift still under way (creating a category or redefining a market); ",
+        " = disruptor: leads a market shift still under way (creating a category or redefining a market); ",
         tags$span("\u25c7", style = "color:#c084fc;"),
-        paste(" = building one, not selling yet. A model-knowledge tag, display only (it never",
-              "feeds the grade or any rule). Hover a mark for the category and why.")),
+        " = building one, not selling yet; ",
+        tags$span(NC_GEAR, style = "color:#c084fc;"),
+        paste(" = enabler: a key supplier to someone else's large, fast-growing market. A",
+              "model-knowledge tag, display only (it never feeds the grade or any rule).",
+              "Hover a mark for the market and why.")),
       tags$div(style = "overflow-x:auto;",
         tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
           tags$thead(tags$tr(th("Plot"), th("Ticker", "left"), th("State"), th("Holding"), th("Best"),
@@ -10853,7 +10892,7 @@ server <- function(input, output, session) {
       n_over    <- c(g = length(unique(dsel$ticker)), p = length(unique(dpas$ticker)))
       # literal middle dot: plotly titles don't decode HTML entities (a raw
       # '&middot;' rendered verbatim), unlike Shiny HTML() blocks
-      cl_suffix <- if (nc_view) " · \u25c6 market creators"
+      cl_suffix <- if (nc_view) paste0(" · \u25c6 disruptors + ", NC_GEAR, " enablers")
                    else sprintf(" · cluster %s", paste(sort(sel_ids), collapse = ", "))
     }
     qs_g <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
@@ -10894,12 +10933,12 @@ server <- function(input, output, session) {
       hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     if (has_graded)
       fig <- add_trace(fig, x = cmp$d, y = cmp$graded_pct, type = "scatter", mode = "lines",
-        name = sprintf("%s graded names (%d)", if (nc_view) "\u25c6" else "All", n_g),
+        name = sprintf("%s graded names (%d)", if (nc_view) paste0("\u25c6", NC_GEAR) else "All", n_g),
         line = list(color = "#f59e0b", width = 3),
         hovertemplate = "All graded names<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     if (has_pass) {
       fig <- add_trace(fig, x = cmp$d, y = cmp$passed_pct, type = "scatter", mode = "lines",
-        name = sprintf("%sassed qualstream ≥ 68 (%d)", if (nc_view) "\u25c6 p" else "P", n_p),
+        name = sprintf("%sassed qualstream ≥ 68 (%d)", if (nc_view) paste0("\u25c6", NC_GEAR, " p") else "P", n_p),
         line = list(color = "#10b981", width = 3),
         hovertemplate = "Passed ≥68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     }
@@ -10952,10 +10991,10 @@ server <- function(input, output, session) {
       for (nm in names(pl$lines)) {
         ln <- pl$lines[[nm]]
         off <- nm %in% pl$offlist
-        glyph <- if (identical(unname(pl$marker[nm]), "hollow")) "\u25c7" else "\u25c6"
+        glyph <- lc_nc_glyph(unname(pl$marker[nm]), isTRUE(unname(pl$enabler[nm])))
         fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
-          name = if (off) sprintf("\u25c6 off the master list (%d)", length(pl$offlist))
-                 else sprintf("\u25c6 market creators (%d)", pl$n - length(pl$offlist)),
+          name = if (off) sprintf("%s off the master list (%d)", paste0("\u25c6", NC_GEAR), length(pl$offlist))
+                 else sprintf("%s disruptors + enablers (%d)", paste0("\u25c6", NC_GEAR), pl$n - length(pl$offlist)),
           legendgroup = if (off) "nclines_off" else "nclines",
           showlegend = if (off) first_off else first_on,
           line = list(color = if (off) "rgba(192,132,252,0.45)" else "rgba(192,132,252,0.75)",
@@ -10972,7 +11011,7 @@ server <- function(input, output, session) {
             xanchor = "left", yanchor = "middle", xshift = 5)
         }
       }
-      pl_suffix <- " · \u25c6 lines"
+      pl_suffix <- paste0(" · \u25c6", NC_GEAR, " lines")
     } else if (!is.null(pl) && length(pl$lines)) {
       first <- TRUE
       # single-cluster view: light grey lines with a ticker end label per name;
@@ -11399,7 +11438,7 @@ server <- function(input, output, session) {
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;", "All qualstream pins on"),
         if (!is.null(lc_nc_only()))
-          " - every \u25c6 market creator on the master list, from every cluster. "
+          paste0(" - every \u25c6 disruptor and ", NC_GEAR, " enabler on the master list, from every cluster. ")
         else " - every name in the master list (graded >= 68, plus your open positions). ",
         "One marker per day on the green line, ",
         span(style = "color:#34d399;", "▲ buy"), " / ",
@@ -11438,7 +11477,7 @@ server <- function(input, output, session) {
             if (!is.null(clk) && nzchar(clk))
               paste0(" Pins hidden while ", clk, " is selected - click it again (or 'clear') to show all.")
             else if (!is.null(lc_nc_only()))
-              " 0 pins drawn - no \u25c6 market creator on the master list has a buy/hold/sell event in this window."
+              paste0(" 0 pins drawn - no \u25c6 disruptor or ", NC_GEAR, " enabler on the master list has a buy/hold/sell event in this window.")
             else " 0 pins drawn - no master-list name has a buy/hold/sell event in this window.")
         }))
       else NULL
@@ -11451,7 +11490,7 @@ server <- function(input, output, session) {
       tp_gone <- isTRUE(input$lcTopPerf) &&
                  is.null(tryCatch(lc_top_perf(), error = function(e) NULL))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
-        span(style = "color:#f8fafc; font-weight:700;", "\u25c6 Market creators view"),
+        span(style = "color:#f8fafc; font-weight:700;", paste0("\u25c6 Disruptors + ", NC_GEAR, " enablers view")),
         if (is.null(pl_now)) " - no marked name has prices in this window."
         else tagList(
           " - every marked name, from every cluster, is drawn as its own ",
