@@ -1,11 +1,19 @@
-"""Daily new-category tagger -> qual.ticker_category_tags (DISPLAY-ONLY).
+"""Daily market-shift tagger -> qual.ticker_market_tags (DISPLAY-ONLY).
 
 Kevin 2026-10-13: when qualstream grades a name, also check whether the company
 is building a new category; show a marker next to the ticker on the 3838
 master list and a "New-category names only" view filter.
 
-Runs `python -m qualstream.category`: its own model call per name, its own
-table. Nothing in the grade, the 68 bar, the veto, the adopt queue or any
+v2 (2026-10-13, qualstream market_shift_v2): "creating or redefining a market"
+with large growth potential (a cited $10B+ a year forecast for the category), plus a
+separate ENABLER mark (Kevin 2026-10-14: a key supplier to someone else's large,
+fast-growing category),
+three answers per name voted in code, a filled or hollow marker, and a
+"market creators" view across every cluster. v1 rows (qual.ticker_category_tags)
+stay as history; nothing writes them any more.
+
+Runs `python -m qualstream.category`: its own model calls (3 answers per name),
+its own table. Nothing in the grade, the 68 bar, the veto, the adopt queue or any
 BUY/HOLD rule reads that table. The buy_decision_v1 rubric is pre-registered and
 frozen until 2027-02-13; this DAG does not touch it.
 
@@ -20,24 +28,36 @@ qual_scorecards_on_entry (2026-10-13 review):
   * a bad display-only Variable must not be able to break the grading DAG's
     import (that would stop grading and the book). Here a malformed knob falls
     back to its default instead of raising;
-  * created PAUSED: nothing runs until it is unpaused after the qualstream code
-    is deployed and sql/006_category_tags.sql is applied (deploy order).
+  * created PAUSED (2026-10-13), unpaused once v1 was deployed. Deploy order
+    for v2: apply qualstream sql/007_market_tags.sql on prod FIRST, then pull
+    qualstream and this repo. The tagger also checks the table's columns
+    before any paid call and stops if 007 is missing.
 
 Schedule 10:00 UTC, after the ~08:00 UTC chain (cdm -> metrics -> inference ->
 qual_scorecards_on_entry) has graded the day's entrants, so a name graded today
 is normally tagged today; on a late-chain day it is tagged the next morning (a
 display marker, not a rule).
 
-The failure policy lives in category.py: a per-name answer problem (refusal,
-placeholder) is skipped and retried next run; the task fails only on an API or
+The failure policy lives in category.py: a per-name answer problem (refusals,
+placeholders, fewer than 2 usable answers of 3) is skipped and retried next run; the task fails only on an API or
 DB error, or when most names fail. execution_timeout bounds a hung API.
 
 Knobs (Airflow Variables, all optional):
   QUAL_CATEGORY_MAX_NAMES (40)  names per run; the first run backfills the graded
                                 universe (~185) at this rate, master-list names first
-  QUAL_CATEGORY_MAX_COST  (2)   $ ceiling per run (the runner's guard; measured
-                                ~$0.012 per name on claude-opus-5-5, 2026-10-13)
-  QUAL_CATEGORY_RETAG_DAYS (180) re-tag a name after this many days
+  QUAL_CATEGORY_MAX_COST  (4)   $ ceiling per run, not the daily spend: the runner
+                                refuses to start when its estimate is above it
+                                ($0.03 per call x 3 answers, so 40 names = $3.60)
+                                and stops once actual spend reaches it (measured
+                                r4 ~$0.028 per call, so ~$0.084 per name, ~$3.40
+                                for 40). A set Variable overrides this.
+
+A name is tagged once (Kevin 2026-10-13): a day with no newly graded name makes
+no model call, and a new name costs ~$0.084 (about 1 a week in Aug to Sep 2026).
+The cap is a safety stop sized for a full 40-name run (the one-time backfill).
+The same model asked again later would give the same facts, so there is no
+re-tag timer; a refresh after a model change is a manual run with --retag-after.
+
 Deploy: same as qual_scorecards_on_entry.py (needs QUALSTREAM_ROOT, DATABASE_URL
 and ANTHROPIC_API_KEY in the container env).
 """
@@ -75,8 +95,7 @@ def _knob(name: str, default: str, pattern: str) -> str:
 
 
 MAX_NAMES = _knob("QUAL_CATEGORY_MAX_NAMES", "40", r"[0-9]+")
-MAX_COST = _knob("QUAL_CATEGORY_MAX_COST", "2", r"[0-9]+(\.[0-9]+)?")
-RETAG_DAYS = _knob("QUAL_CATEGORY_RETAG_DAYS", "180", r"[0-9]+")
+MAX_COST = _knob("QUAL_CATEGORY_MAX_COST", "4", r"[0-9]+(\.[0-9]+)?")
 
 default_args = {
     "owner": "airflow",
@@ -90,7 +109,7 @@ default_args = {
 
 with DAG(
     dag_id="qual_category_tags",
-    description="Daily display-only new-category tagger (qual.ticker_category_tags); never feeds the grade.",
+    description="Daily display-only market-shift tagger (qual.ticker_market_tags); never feeds the grade.",
     schedule="0 10 * * *",
     start_date=pendulum.datetime(2026, 10, 1, tz="UTC"),
     catchup=False,
@@ -109,10 +128,10 @@ with DAG(
             f'export PYTHONPATH="{QUALSTREAM_ROOT}/src" && '
             f'python -m qualstream.category '
             f'--as-of {{{{ data_interval_end | ds }}}} '
-            f'--retag-after {RETAG_DAYS} --limit {MAX_NAMES} --max-cost {MAX_COST}'
+            f'--limit {MAX_NAMES} --max-cost {MAX_COST}'
         ),
-        # ~40 names x ~6 s is ~4 min; a hung API (120 s timeout x SDK retries)
-        # must not hold a worker slot for hours
+        # ~40 names x 3 answers x ~4 s is ~8 to 13 min; a hung API (120 s
+        # timeout x SDK retries) must not hold a worker slot for hours
         execution_timeout=timedelta(minutes=30),
         append_env=True,
     )
