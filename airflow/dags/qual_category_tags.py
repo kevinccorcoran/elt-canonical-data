@@ -45,8 +45,9 @@ Knobs (Airflow Variables, all optional):
   QUAL_CATEGORY_MAX_COST  (4)   $ ceiling per run: the runner refuses to start when
                                 its estimate is above it ($0.03 per call x 3
                                 answers, so 40 names = $3.60) and stops once actual
-                                spend reaches it (measured ~$0.014 per call, so
-                                ~$0.04 per name). A set Variable overrides this.
+                                spend reaches it (measured ~$0.021 per call, so
+                                ~$0.064 per name, ~$2.60 for 40). A set Variable
+                                overrides this.
   QUAL_CATEGORY_RETAG_DAYS (180) re-tag a name after this many days
 Deploy: same as qual_scorecards_on_entry.py (needs QUALSTREAM_ROOT, DATABASE_URL
 and ANTHROPIC_API_KEY in the container env).
