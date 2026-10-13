@@ -93,31 +93,53 @@ QS_CLUSTER_CAP <- 5L
 # grading runs monthly/incrementally - the caption warns as it approaches.
 QS_MAX_AGE_DAYS <- 150L
 
-# New-category tags (qualstream category.py -> qual.ticker_category_tags): one
-# model call per graded name asking whether the company is building a new
-# category. DISPLAY-ONLY (Kevin 2026-10-13: a marker next to the ticker and a way
-# to view only those names): the diamond on the master list and the
-# "New-category names only" view filter. It never feeds a grade, the 68 bar, the
-# seed/adopt queue or any BUY/HOLD rule, and it is never backtestable (the tag
-# comes from the model's own knowledge, so a past-dated tag is hindsight).
-# Latest tag per ticker within NC_MAX_AGE_DAYS (the tagger refreshes at 180d, so
-# a mark expires if it dies). NULL when the table is absent or empty (dev,
-# staging, or before the tagger is deployed): no marker, no checkbox, no narrowing.
-NC_TAG_VERSION  <- "new_category_v1"
+# Market-shift tags (qualstream category.py -> qual.ticker_market_tags, v2): three
+# model answers per graded name, voted in code: does the company lead a market
+# shift that is still under way, by CREATING a category or REDEFINING an existing
+# market? DISPLAY-ONLY (Kevin 2026-10-13: a marker next to the ticker and a way to
+# view only those names across every cluster): filled ◆ = a shift in its growth
+# phase, hollow ◇ = a pre-commercial builder with a dated milestone. It never feeds
+# a grade, the 68 bar, the seed/adopt queue or any BUY/HOLD rule, and it is never
+# backtestable (the tag comes from the model's own knowledge, so a past-dated tag
+# is hindsight). v1 rows (qual.ticker_category_tags, new_category_v1) are history
+# and no longer read. Latest tag per ticker within NC_MAX_AGE_DAYS (the tagger
+# refreshes at 180d, so a mark expires if it dies). NULL when the table is absent
+# or empty (dev, staging, or before the tagger is deployed): no marker, no
+# checkbox, no narrowing.
+NC_TAG_VERSION  <- "market_shift_v2"
 NC_MAX_AGE_DAYS <- 365L
 lc_load_category_tags <- function(con) {
   x <- tryCatch(dbGetQuery(con, sprintf("
-    SELECT DISTINCT ON (ticker) ticker, new_category, category, prior_option,
-           commercial_status, commercial_since_year, role, business_share,
-           confidence, rationale, as_of::text AS as_of
-    FROM qual.ticker_category_tags
+    SELECT DISTINCT ON (ticker) ticker, marker, kind, category, parent_market,
+           prior_option, adoption_stage, adoption_evidence, scale_year,
+           first_sale_year, company_rank, is_creator, votes_marked, votes_total,
+           milestone, rationale, model, as_of::text AS as_of
+    FROM qual.ticker_market_tags
     WHERE tag_version = '%s' AND as_of >= CURRENT_DATE - %d
     ORDER BY ticker, as_of DESC, tagged_at DESC", NC_TAG_VERSION, NC_MAX_AGE_DAYS)),
     error = function(e) NULL)
   if (is.null(x) || !nrow(x)) return(NULL)
   x$ticker <- toupper(x$ticker)
-  x$new_category <- as.logical(x$new_category)
+  x$marked <- x$marker %in% c("filled", "hollow")
   x
+}
+# Hover text for marked rows: kind, category, what buyers used before, adoption
+# stage with its dated figure, timing, rank, the vote and the knowledge date.
+lc_nc_tip <- function(x) {
+  nz <- function(v) { v <- as.character(v); v[is.na(v)] <- ""; v }
+  hollow <- x$marker %in% "hollow"
+  kind <- ifelse(hollow, "Building a new market (not selling yet)",
+                 ifelse(x$kind %in% "REDEFINE", "Redefining a market", "Creating a category"))
+  sy <- suppressWarnings(as.integer(x$scale_year)); fy <- suppressWarnings(as.integer(x$first_sale_year))
+  when <- ifelse(!is.na(sy) & sy > 0, paste("at scale since", sy),
+                 ifelse(!is.na(fy) & fy > 0, paste("first sold", fy), "no sales yet"))
+  rank <- ifelse(x$company_rank %in% c("1", "2"), paste0(", rank #", x$company_rank), "")
+  ev <- nz(x$adoption_evidence)
+  stage <- paste0(gsub("_", " ", nz(x$adoption_stage)), ifelse(nzchar(ev), paste0(" (", ev, ")"), ""))
+  nxt <- ifelse(hollow & nzchar(nz(x$milestone)), paste0(" Next: ", nz(x$milestone), "."), "")
+  sprintf("%s: %s (in %s). Before: %s. Stage: %s; %s%s.%s Votes %s/%s. %s Model knowledge, tagged %s.",
+          kind, nz(x$category), nz(x$parent_market), nz(x$prior_option), stage, when, rank,
+          nxt, nz(x$votes_marked), nz(x$votes_total), nz(x$rationale), nz(x$as_of))
 }
 
 # Dismissed set: tickers the user explicitly removed, kept so the qualstream
@@ -2898,7 +2920,8 @@ ui <- navbarPage(
         checkboxInput("lcAllPickLines", "All qualstream pick lines (white)", value = FALSE),
         checkboxInput("lcAutoRefresh", "Auto-refresh (hourly)", value = TRUE),
         uiOutput("lcNewCatUI"),
-        uiOutput("idFilterLC")
+        uiOutput("idFilterLC"),
+        uiOutput("lcNcPausedUI")
       ), tagList(
         div(style = "color:#cbd5e1;font-size:0.72rem;font-weight:600;margin-bottom:0.3rem;",
             "STATE"),
@@ -9112,16 +9135,32 @@ server <- function(input, output, session) {
   lc_pick_lines <- reactive({
     # on by the checkbox, or automatically (light grey, with end labels) while
     # exactly one cluster is ticked, so the status of each name in that cluster
-    # can be read against its own path and not only the green average
+    # can be read against its own path and not only the green average. The
+    # market-creators view always draws its own lines (mode "nc", below).
+    nc_set <- lc_nc_only()
     one_cl <- lc_single_cluster()
     auto <- !isTRUE(input$lcAllPickLines) && !is.na(one_cl)
-    if (!isTRUE(input$lcAllPickLines) && !auto) return(NULL)
+    if (is.null(nc_set) && !isTRUE(input$lcAllPickLines) && !auto) return(NULL)
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     if (is.null(dv) || is.null(dv$M)) return(NULL)
     d <- app_dataLC()
     anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(anchor)) return(NULL)
+    if (!is.null(nc_set)) {
+      # every marked name from the tags (not dv$tickers): master-list names solid,
+      # the rest dashed and drawn on the chart only (Kevin 2026-10-13)
+      if (!length(nc_set)) return(NULL)
+      ml <- lc_ml_names()
+      lines <- lc_price_lines(nc_set, anchor)
+      if (!length(lines)) return(NULL)
+      tg <- lc_nc_tags()
+      mk <- setNames(tg$marker, tg$ticker)
+      off <- setdiff(names(lines), ml)
+      why <- setNames(lc_offlist_why(off), off)
+      return(list(lines = lines, n = length(lines), auto = TRUE, cluster = NA_integer_,
+                  mode = "nc", offlist = off, why = why, marker = mk[names(lines)]))
+    }
     # Same name set as the master list: every name graded >= QS_MIN, plus every
     # open position, in a live state. NOT gated on board_ok: after the 2026-10-01
     # re-mint de-gated id 9, every held name fell off the gate's board, so the
@@ -9140,7 +9179,15 @@ server <- function(input, output, session) {
     # cluster-id view filter (same rule as the pins and the master list)
     tks <- tks[lc_in_sel(tks)]
     if (!length(tks)) return(NULL)
-    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
+    out <- lc_price_lines(tks, anchor)
+    if (!length(out)) return(NULL)
+    list(lines = out, n = length(out), auto = auto, cluster = one_cl)
+  })
+  # Each ticker's own return line from the anchor (rebased to 0% there), from the
+  # cdm price table up to SPY's last date. Named list of data.frame(d, ret);
+  # tickers without prices are dropped.
+  lc_price_lines <- function(tks, anchor) {
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(list())
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
     inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
     px <- tryCatch(dbGetQuery(con, sprintf(
@@ -9148,7 +9195,7 @@ server <- function(input, output, session) {
        WHERE ticker IN (%s) AND date >= '%s'
          AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
        ORDER BY ticker, date", inlist, format(anchor))), error = function(e) NULL)
-    if (is.null(px) || !nrow(px)) return(NULL)
+    if (is.null(px) || !nrow(px)) return(list())
     px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
     asof <- function(df, dd) { s <- df[df$d <= dd, , drop = FALSE]
       if (!nrow(s)) NA_real_ else s$px[nrow(s)] }
@@ -9164,9 +9211,8 @@ server <- function(input, output, session) {
       if (!nrow(lo)) next
       out[[toupper(tk)]] <- lo
     }
-    if (!length(out)) return(NULL)
-    list(lines = out, n = length(out), auto = auto, cluster = one_cl)
-  })
+    out
+  }
 
   # ── Checked master-list names -> their own return lines ───────────────────
   # Driven by the master-list row checkboxes (lc_sketch_ticks). Each checked name
@@ -9254,15 +9300,18 @@ server <- function(input, output, session) {
     det <- if (!is.null(d)) d$qscmp_detail else NULL
     cmp <- if (!is.null(d)) d$qscmp else NULL
     if (is.null(det) || !nrow(det) || is.null(cmp) || !nrow(cmp)) return(NULL)
-    # mirror the sketch's cluster narrowing so the line tracks the visible board
-    sel_raw  <- lc_ids_effective()
-    sel_ids  <- suppressWarnings(as.integer(sel_raw))
-    avail_id <- tryCatch(lc_board_filter_ids(), error = function(e) integer(0))
-    if (!is.null(sel_raw) && length(sel_ids) > 0 && !setequal(sel_ids, avail_id))
-      det <- det[!is.na(det$id) & det$id %in% sel_ids, , drop = FALSE]
-    # and the "New-category names only" box (no ticker outside it is named)
+    # mirror the sketch's narrowing so the line tracks the visible board: the
+    # market-creators view (its names, every cluster) or else the cluster boxes
     nc_set <- lc_nc_only()
-    if (!is.null(nc_set)) det <- det[toupper(det$ticker) %in% nc_set, , drop = FALSE]
+    if (!is.null(nc_set)) {
+      det <- det[toupper(det$ticker) %in% nc_set, , drop = FALSE]
+    } else {
+      sel_raw  <- lc_ids_effective()
+      sel_ids  <- suppressWarnings(as.integer(sel_raw))
+      avail_id <- tryCatch(lc_board_filter_ids(), error = function(e) integer(0))
+      if (!is.null(sel_raw) && length(sel_ids) > 0 && !setequal(sel_ids, avail_id))
+        det <- det[!is.na(det$id) & det$id %in% sel_ids, , drop = FALSE]
+    }
     if (!nrow(det)) return(NULL)
     # final realized return per ticker = its last non-NA ret in the window
     det <- det[order(det$ticker, det$d), , drop = FALSE]
@@ -9708,7 +9757,7 @@ server <- function(input, output, session) {
         FROM portfolio.state_history
         ORDER BY ticker, as_of, hz, captured_at DESC"),
         error = function(e) NULL)
-      # new-category tags: display-only marker + view filter (see NC_TAG_VERSION)
+      # market-shift tags: display-only marker + market-creators view (see NC_TAG_VERSION)
       nc <- lc_load_category_tags(con)
       dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
                   qs = qs, qscmp = qscmp, qscmp_detail = qscmp_detail, qscmp_anchor = qs_anchor,
@@ -10057,33 +10106,28 @@ server <- function(input, output, session) {
     setNames(g$id, g$tk)
   })
 
-  # TRUE for tickers inside the ticked clusters (all TRUE when nothing is narrowed).
-  # Strictly by live id: when a cluster is ticked, names you own in OTHER clusters
-  # and names with no live id drop out too. Kevin 2026-10-07: "when a cluster is
-  # selected only the specific tickers to that cluster should be showed on graph and
-  # table" - this replaces the 2026-09-01 owned-names exemption on the pins.
-  # New-category tags (display-only, see NC_TAG_VERSION): rows with
-  # new_category = TRUE, upper-case tickers. NULL = no tags loaded at all.
+  # Market-shift tags (display-only, see NC_TAG_VERSION): the marked rows (filled
+  # ◆ or hollow ◇), upper-case tickers. NULL = no tags loaded at all.
   lc_nc_tags <- reactive({
     d <- app_dataLC()
     x <- if (!is.null(d)) d$nc else NULL
     if (is.null(x) || !nrow(x)) return(NULL)
-    x[x$new_category %in% TRUE, , drop = FALSE]
+    x[x$marked %in% TRUE, , drop = FALSE]
   })
-  # The view filter's ticker set; NULL = no narrowing (box off, or no tags loaded:
-  # a missing table must never blank the board). character(0) = tags loaded but
-  # no name is building a new category, so the filtered view is honestly empty.
+  # The market-creators view's ticker set; NULL = no narrowing (box off, or no
+  # tags loaded: a missing table must never blank the board). character(0) = tags
+  # loaded but no name is marked, so the view is honestly empty. While it is
+  # non-NULL the view shows these names from EVERY cluster (Kevin 2026-10-13:
+  # "select all regardless of their cluster"): lc_in_sel ignores the boxes.
   lc_nc_only <- reactive({
     if (!isTRUE(input$lcNewCatOnly)) return(NULL)
     x <- lc_nc_tags()
     if (is.null(x)) NULL else x$ticker
   })
-  output$lcNewCatUI <- renderUI({
-    d <- app_dataLC()
-    if (is.null(d) || is.null(d$nc) || !nrow(d$nc)) return(NULL)
-    # count inside the master-list universe the box narrows (latest non-vetoed
-    # grade >= QS_MIN, or owned) - the tagger also tags vetoed / sub-68 names,
-    # which no reader under the box can show
+  # The master-list universe (latest non-vetoed grade >= QS_MIN, or an open
+  # position), the same set bestBetsLC lists: marked names outside it are drawn on
+  # the chart only.
+  lc_ml_names <- reactive({
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     g <- if (!is.null(dv) && length(dv$qs_grade))
            setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
@@ -10093,39 +10137,81 @@ server <- function(input, output, session) {
       sdv <- as.character(pp$sold_date)
       toupper(pp$ticker[is.na(sdv) | !nzchar(sdv)])
     } else character(0)
-    ml <- unique(c(names(g)[!is.na(g) & g >= QS_MIN], owned))
-    n_nc <- sum(ml %in% d$nc$ticker[d$nc$new_category %in% TRUE])
+    unique(c(names(g)[!is.na(g) & g >= QS_MIN], owned))
+  })
+  # Why a marked name is not on the master list (chart hover, note under the
+  # table): vetoed, graded under QS_MIN, or no grade inside QS_MAX_AGE_DAYS.
+  lc_offlist_why <- function(tks) {
+    d <- app_dataLC()
+    qs <- if (!is.null(d)) d$qs else NULL
+    g  <- if (!is.null(qs) && nrow(qs)) setNames(suppressWarnings(as.numeric(qs$grade)), toupper(qs$ticker))
+          else setNames(numeric(0), character(0))
+    gd <- if (!is.null(qs) && nrow(qs)) setNames(as.Date(qs$as_of), toupper(qs$ticker)) else NULL
+    anyd <- if (!is.null(d)) d$qs_any_asof else NULL
+    veto <- if (!is.null(d) && length(d$qs_veto)) d$qs_veto else character(0)
+    on <- function(v, tk) {
+      x <- if (!is.null(v) && tk %in% names(v)) v[[tk]] else NA
+      if (is.na(x)) "" else paste0(", ", format(as.Date(x), "%b %d"))
+    }
+    vapply(toupper(tks), function(tk) {
+      if (tk %in% veto) return(paste0("vetoed by qualstream", on(anyd, tk)))
+      if (tk %in% names(g) && !is.na(g[[tk]]))
+        return(sprintf("graded %d, under %d%s", as.integer(round(g[[tk]])), QS_MIN, on(gd, tk)))
+      if (!is.null(anyd) && tk %in% names(anyd)) return(paste0("grade expired, last graded", on(anyd, tk)))
+      "no grade in the last 150 days"
+    }, character(1), USE.NAMES = FALSE)
+  }
+  output$lcNewCatUI <- renderUI({
+    d <- app_dataLC()
+    if (is.null(d) || is.null(d$nc) || !nrow(d$nc)) return(NULL)
+    ml <- lc_ml_names()
+    mk <- d$nc[d$nc$marked %in% TRUE, , drop = FALSE]
+    n_hollow <- sum(mk$marker == "hollow")
     n_untagged <- sum(!(ml %in% d$nc$ticker))
     div(style = "margin-bottom:0.9rem;",
       # isolate: keep the box's state across the hourly data refresh re-render
-      checkboxInput("lcNewCatOnly", "\u25c6 New-category names only",
+      checkboxInput("lcNewCatOnly", "\u25c6 Market creators only (every cluster)",
                     value = isTRUE(isolate(input$lcNewCatOnly))),
       div(style = "color:#64748b; font-size:0.68rem; margin-top:-0.55rem;",
-          sprintf("%d of %d master-list names%s; hover a \u25c6 for why. Display only.",
-                  n_nc, length(ml),
-                  if (n_untagged > 0) sprintf(" (%d not tagged yet)", n_untagged) else "")))
+          sprintf("%d \u25c6%s (%d on the master list%s); hover a mark for why. Display only.",
+                  sum(mk$marker == "filled"),
+                  if (n_hollow > 0) sprintf(" + %d \u25c7", n_hollow) else "",
+                  sum(mk$ticker %in% ml),
+                  if (n_untagged > 0) sprintf("; %d master-list names not tagged yet", n_untagged)
+                  else "")))
+  })
+  # Under the cluster boxes while the market-creators view is on: they are ignored.
+  output$lcNcPausedUI <- renderUI({
+    if (is.null(lc_nc_only())) return(NULL)
+    div(style = "color:#c084fc; font-size:0.68rem; margin:-0.3rem 0 0.8rem;",
+        "Clusters paused: the \u25c6 view shows every cluster.")
   })
 
+  # TRUE for tickers inside the ticked clusters (all TRUE when nothing is narrowed).
+  # Strictly by live id: when a cluster is ticked, names you own in OTHER clusters
+  # and names with no live id drop out too. Kevin 2026-10-07: "when a cluster is
+  # selected only the specific tickers to that cluster should be showed on graph and
+  # table" - this replaces the 2026-09-01 owned-names exemption on the pins.
+  # While the market-creators view is on, the boxes are ignored and only marked
+  # names pass, from every cluster (Kevin 2026-10-13). That covers the master
+  # list, pins, pick and checked lines and the track strip; lc_top_perf, boardLC
+  # and qsCompareLC read lc_nc_only() directly.
   lc_in_sel <- function(tks, sel = lc_ids_effective()) {
-    keep <- if (is.null(sel)) rep(TRUE, length(tks))
-            else if (!length(sel)) rep(FALSE, length(tks))
-            else {
-              ids <- lc_live_ids()[toupper(tks)]
-              !is.na(ids) & ids %in% as.integer(sel)
-            }
-    # "New-category names only" (Kevin 2026-10-13) narrows every reader that names
-    # tickers: master list, pins, pick and checked lines, track strip (here), plus
-    # the top-performers line and the board's passed-qualstream list (lc_nc_only
-    # applied directly there). The green/orange/SPY basket lines stay whole as the
-    # benchmark, and the grading-gap tripwire is never narrowed by it.
     nc <- lc_nc_only()
-    if (!is.null(nc)) keep <- keep & toupper(tks) %in% nc
-    keep
+    if (!is.null(nc)) return(toupper(tks) %in% nc)
+    if (is.null(sel)) rep(TRUE, length(tks))
+    else if (!length(sel)) rep(FALSE, length(tks))
+    else {
+      ids <- lc_live_ids()[toupper(tks)]
+      !is.na(ids) & ids %in% as.integer(sel)
+    }
   }
   # Exactly one cluster ticked (Kevin 2026-10-12: "light grey lines for each
   # ticker when and only when a specific cluster id is selected"): the sketch then
   # draws every name of that cluster as its own line without the pick-lines box.
+  # Off while the market-creators view is on: that view draws its own lines.
   lc_single_cluster <- reactive({
+    if (!is.null(lc_nc_only())) return(NA_integer_)
     sel <- lc_ids_effective()
     if (!is.null(sel) && length(sel) == 1) as.integer(sel) else NA_integer_
   })
@@ -10209,7 +10295,9 @@ server <- function(input, output, session) {
     }
     # NULL = filter never touched -> show all; character(0) = deselect-all ->
     # empty board; else narrow. The stored val survives refetch re-renders.
-    sel_id <- lc_ids_effective()
+    # The market-creators view ignores the boxes (every cluster), so the board
+    # and the grading-gap tripwire stay whole; its passed list is narrowed below.
+    sel_id <- if (is.null(lc_nc_only())) lc_ids_effective() else NULL
     keep_id <- function(v) {
       if (is.null(sel_id)) return(v)
       if (!length(sel_id)) return(v[FALSE])
@@ -10310,7 +10398,7 @@ server <- function(input, output, session) {
           nc_set <- lc_nc_only()
           qs_top_v <- if (!is.null(nc_set)) qs_top[toupper(qs_top) %in% nc_set] else qs_top
           sprintf(" passed qualstream%s: %s.",
-            if (!is.null(nc_set)) " (\u25c6 names only)" else "",
+            if (!is.null(nc_set)) " (\u25c6 market creators only)" else "",
             if (!length(qs_top_v)) "none"
             else paste(sprintf("%s %d", qs_top_v,
                                as.integer(round(qs_grade[qs_top_v]))), collapse = ", "))
@@ -10372,7 +10460,7 @@ server <- function(input, output, session) {
                    if (tp_on)
                      "No board-traded names among the top performers (they may be pre-window holds or names never on the board)."
                    else if (!is.null(lc_nc_only()))
-                     "No board trades among the \u25c6 new-category names in this view."
+                     "No board trades among the \u25c6 market creators (every cluster)."
                    else "No board trades in the selected clusters - adjust the cluster-id filter."))
       pill <- function(lab, big, sub, accent, valcol = "#e2e8f0")
         div(style = paste0("flex:1 1 0; min-width:120px; background:rgba(148,163,184,0.04);",
@@ -10387,11 +10475,11 @@ server <- function(input, output, session) {
         if (tp_on) div(style = paste0("color:#e879f9; font-size:0.66rem; font-weight:600;",
               " margin-bottom:0.35rem;"),
           sprintf("↳ top performers (%d traded) · hindsight-selected winners, descriptive", tr$n)),
-        # the box narrows the record to tagged names: say so, and that the tag is
-        # today's model-knowledge label laid over past trades (not a test of it)
+        # the view narrows the record to marked names from every cluster: say so,
+        # and that the tag is today's model-knowledge label laid over past trades
         if (!is.null(lc_nc_only())) div(style = paste0("color:#c084fc; font-size:0.66rem;",
               " font-weight:600; margin-bottom:0.35rem;"),
-          "\u21b3 \u25c6 new-category names only \u00b7 today's model-knowledge tag laid over past trades, descriptive, not a test of the tag"),
+          "\u21b3 \u25c6 market creators, every cluster \u00b7 today's model-knowledge tag laid over past trades, descriptive, not a test of the tag"),
         # PRIMARY: the full buy->sell round-trip record (one economic position each)
         div(style = "display:flex; gap:0.5rem; flex-wrap:wrap; align-items:stretch;",
           pill("trades", as.character(tr$n),
@@ -10415,13 +10503,15 @@ server <- function(input, output, session) {
           pill("still buying", fmtpp(tr$vs_now),
                sprintf("%d windows · %d names", tr$n_now, tr$nm_now), "#3b82f6", signcol(tr$vs_now))),
         div(style = "color:#64748b; font-size:0.66rem; margin-top:0.35rem;",
-          sprintf(paste0("every %s in the selected clusters since the %s epoch - small sample, read as directional not proof.",
+          sprintf(paste0("every %s %s since the %s epoch - small sample, read as directional not proof.",
             " Top row = full buy->sell round trips (one vote per position, holds held through). Bottom =",
             " each active-buy RUN vs SPY over its own dates, DURATION-WEIGHTED so a brief buy<->hold flip",
             " barely counts; a re-buy opens a new run, and 'windows vs names' shows the flip churn. buy->hold",
             " ends at the downgrade; to-sell is a direct buy->sell (a sell from a hold sits in the round-trip",
             " number). Compounded $ view: the portfolio panel below."),
             if (isTRUE(input$lcBuyQSonly)) "qualstream+ name" else "board name",
+            if (is.null(lc_nc_only())) "in the selected clusters"
+            else "among the \u25c6 market creators (every cluster)",
             format(as.Date(LEDGER_EPOCH), "%b %d"))))
     })
     # The buy/hold/sell kanban columns were retired 2026-08-26: they derived state
@@ -10524,26 +10614,30 @@ server <- function(input, output, session) {
     # cluster boxes narrow the master list too, same rule as the sketch
     # (Kevin 2026-10-07: "only the specific tickers to that cluster ... on graph
     # and table") - owned names in other clusters included
+    # market-creators view: marked names that are not master-list names go on
+    # the chart only; list them under the table (and in the empty state)
+    nc_now <- lc_nc_only()
+    off_list <- if (!is.null(nc_now)) sort(setdiff(nc_now, toupper(cand))) else character(0)
+    off_note <- if (length(off_list)) tags$div(
+      style = "color:#94a3b8;font-size:0.72rem;margin:0.4rem 0 0.2rem;",
+      tags$span("\u25c6", style = "color:#c084fc;"),
+      paste0(" off the master list (chart only): ",
+             paste(sprintf("%s (%s)", off_list, lc_offlist_why(off_list)), collapse = "; "), "."))
     cand <- cand[lc_in_sel(cand)]
     if (!length(cand))
-      return(div(style = "color:#64748b; font-size:0.8rem; margin:0.4rem 0 0.8rem;",
-                 if (!is.null(lc_nc_only()) && !identical(lc_ids_effective(), character(0)))
-                   paste("No \u25c6 new-category names in this view - untick",
-                         "\"New-category names only\" to list every name.")
-                 else "No cluster ticked - tick a cluster box in the sidebar to list its names."))
+      return(tagList(div(style = "color:#64748b; font-size:0.8rem; margin:0.4rem 0 0.8rem;",
+                 if (!is.null(nc_now))
+                   paste("No \u25c6 market creators on the master list. Untick",
+                         "\"Market creators only\" to list every name.")
+                 else "No cluster ticked - tick a cluster box in the sidebar to list its names."),
+                 off_note))
     live <- lc_live_ids()
-    # new-category marker: tooltip = category, role, age, confidence, why
+    # market-shift marker: hover = kind, category, before, stage, rank, vote
     nc_tags <- lc_nc_tags()
-    nc_tip <- if (!is.null(nc_tags) && nrow(nc_tags))
-                setNames(sprintf("New category: %s (%s, %s, confidence %d). Before it: %s. %s",
-                                 nc_tags$category, gsub("_", " ", nc_tags$role),
-                                 ifelse(nc_tags$commercial_status %in% "not_yet_commercial",
-                                        "not yet commercial",
-                                        paste("selling at scale since", nc_tags$commercial_since_year)),
-                                 as.integer(nc_tags$confidence), nc_tags$prior_option,
-                                 nc_tags$rationale),
-                         nc_tags$ticker)
+    nc_tip <- if (!is.null(nc_tags) && nrow(nc_tags)) setNames(lc_nc_tip(nc_tags), nc_tags$ticker)
               else character(0)
+    nc_mark <- if (!is.null(nc_tags) && nrow(nc_tags)) setNames(nc_tags$marker, nc_tags$ticker)
+               else character(0)
     HZS <- c(4L, 7L, 12L)
     cell_for <- function(tku, fl) {
       r <- sl[toupper(sl$ticker) == tku & sl$fut_lag == fl, , drop = FALSE]
@@ -10635,10 +10729,13 @@ server <- function(input, output, session) {
       tags$td(style = paste0("color:#e2e8f0;font-weight:600;padding:2px 8px;",
                              if (r$tk %in% names(nc_tip)) "white-space:nowrap;" else ""),
               r$tk,
-              if (r$tk %in% names(nc_tip))
-                tags$span("\u25c6", title = nc_tip[[r$tk]],
-                          `aria-label` = "building a new category",
-                          style = "color:#c084fc;margin-left:4px;font-size:0.82rem;cursor:help;")),
+              if (r$tk %in% names(nc_tip)) {
+                pre <- identical(nc_mark[[r$tk]], "hollow")
+                tags$span(if (pre) "\u25c7" else "\u25c6", title = nc_tip[[r$tk]],
+                          `aria-label` = if (pre) "building a new market, not selling yet"
+                                         else "creating or redefining a market",
+                          style = "color:#c084fc;margin-left:4px;font-size:0.82rem;cursor:help;")
+              }),
       state_td(r$state),
       hold_td(r),
       best_td(r$best),
@@ -10679,14 +10776,17 @@ server <- function(input, output, session) {
       if (!is.null(d$nc) && nrow(d$nc)) tags$div(
         style = "color:#64748b;font-size:0.72rem;margin:-0.2rem 0 0.4rem;",
         tags$span("\u25c6", style = "color:#c084fc;"),
-        paste(" = building a new category: a model-knowledge tag, display only (it never",
-              "feeds the grade or any rule). Hover it for the category and why.")),
+        " = leads a market shift still under way (creating a category or redefining a market); ",
+        tags$span("\u25c7", style = "color:#c084fc;"),
+        paste(" = building one, not selling yet. A model-knowledge tag, display only (it never",
+              "feeds the grade or any rule). Hover a mark for the category and why.")),
       tags$div(style = "overflow-x:auto;",
         tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
           tags$thead(tags$tr(th("Plot"), th("Ticker", "left"), th("State"), th("Holding"), th("Best"),
                              th("Cluster"), th("Grade"),
                              th("4 mo"), th("7 mo"), th("12 mo"))),
           tags$tbody(body))),
+      off_note,
       # Delegated, bound once (survives the hourly re-render): any checkbox change
       # collects every ticked row into lcSketchChecked, which drives lc_sketch_ticks
       # -> lc_checked_lines -> the per-name lines on the sketch.
@@ -10719,13 +10819,20 @@ server <- function(input, output, session) {
     avail_id <- tryCatch(lc_board_filter_ids(), error = function(e) integer(0))
     det      <- d$qscmp_detail
     cl_suffix <- ""; n_over <- NULL
-    if (!is.null(sel_raw) && length(sel_raw) == 0L)
+    # Market-creators view (Kevin 2026-10-13): the baskets narrow to the marked
+    # names from every cluster, like a cluster pick but by ticker; the cluster
+    # boxes (and their deselect-all) are ignored while it is on.
+    nc_set <- lc_nc_only()
+    nc_view <- !is.null(nc_set)
+    if (!nc_view && !is.null(sel_raw) && length(sel_raw) == 0L)
       return(empty_plot("No cluster selected - check a cluster to show the sketch."))
-    narrowed <- !is.null(sel_raw) && length(sel_ids) > 0 &&
-                !is.null(det) && nrow(det) > 0 && !setequal(sel_ids, avail_id)
+    narrowed <- nc_view || (!is.null(sel_raw) && length(sel_ids) > 0 &&
+                !is.null(det) && nrow(det) > 0 && !setequal(sel_ids, avail_id))
     if (narrowed) {
-      dsel <- det[!is.na(det$id) & det$id %in% sel_ids, , drop = FALSE]
-      if (nrow(dsel) == 0)
+      dsel <- if (is.null(det)) det[FALSE, , drop = FALSE]
+              else if (nc_view) det[toupper(det$ticker) %in% nc_set, , drop = FALSE]
+              else det[!is.na(det$id) & det$id %in% sel_ids, , drop = FALSE]
+      if (nrow(dsel) == 0 && !nc_view)
         return(empty_plot(sprintf("No qualstream-graded names in cluster %s.",
                                   paste(sort(sel_ids), collapse = ", "))))
       key  <- as.character(cmp$d)
@@ -10738,7 +10845,8 @@ server <- function(input, output, session) {
       n_over    <- c(g = length(unique(dsel$ticker)), p = length(unique(dpas$ticker)))
       # literal middle dot: plotly titles don't decode HTML entities (a raw
       # '&middot;' rendered verbatim), unlike Shiny HTML() blocks
-      cl_suffix <- sprintf(" · cluster %s", paste(sort(sel_ids), collapse = ", "))
+      cl_suffix <- if (nc_view) " · \u25c6 market creators"
+                   else sprintf(" · cluster %s", paste(sort(sel_ids), collapse = ", "))
     }
     qs_g <- if (!is.null(d$qs)) suppressWarnings(as.numeric(d$qs$grade)) else numeric(0)
     n_g  <- if (!is.null(n_over)) unname(n_over[["g"]])
@@ -10746,6 +10854,9 @@ server <- function(input, output, session) {
     n_p  <- if (!is.null(n_over)) unname(n_over[["p"]])
             else if (!is.null(d$qs)) sum(qs_g >= 68, na.rm = TRUE) else 0L
     has_pass <- any(!is.na(cmp$passed_pct))
+    # the market-creators view can hold no graded series at all (every marked
+    # name vetoed or ungraded): SPY + the per-name lines still draw
+    has_graded <- any(!is.na(cmp$graded_pct))
     fig <- plot_ly()
     # Build end-of-line label annotations
     endlabels <- list()
@@ -10773,12 +10884,14 @@ server <- function(input, output, session) {
     fig <- add_trace(fig, x = cmp$d, y = cmp$spy_pct, type = "scatter", mode = "lines",
       name = "Benchmark (SPY)", line = list(color = "#3b82f6", width = 2.5),
       hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
-    fig <- add_trace(fig, x = cmp$d, y = cmp$graded_pct, type = "scatter", mode = "lines",
-      name = sprintf("All graded names (%d)", n_g), line = list(color = "#f59e0b", width = 3),
-      hovertemplate = "All graded names<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    if (has_graded)
+      fig <- add_trace(fig, x = cmp$d, y = cmp$graded_pct, type = "scatter", mode = "lines",
+        name = sprintf("%s graded names (%d)", if (nc_view) "\u25c6" else "All", n_g),
+        line = list(color = "#f59e0b", width = 3),
+        hovertemplate = "All graded names<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     if (has_pass) {
       fig <- add_trace(fig, x = cmp$d, y = cmp$passed_pct, type = "scatter", mode = "lines",
-        name = sprintf("Passed qualstream ≥ 68 (%d)", n_p),
+        name = sprintf("%sassed qualstream ≥ 68 (%d)", if (nc_view) "\u25c6 p" else "P", n_p),
         line = list(color = "#10b981", width = 3),
         hovertemplate = "Passed ≥68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     }
@@ -10824,7 +10937,35 @@ server <- function(input, output, session) {
     # the focused name stands out of the pack.
     pl <- tryCatch(lc_pick_lines(), error = function(e) NULL)
     pl_suffix <- ""
-    if (!is.null(pl) && length(pl$lines)) {
+    if (!is.null(pl) && length(pl$lines) && identical(pl$mode, "nc")) {
+      # market-creators view: every marked name as its own violet line with a
+      # glyph end label; names off the master list dashed (chart only)
+      first_on <- TRUE; first_off <- TRUE
+      for (nm in names(pl$lines)) {
+        ln <- pl$lines[[nm]]
+        off <- nm %in% pl$offlist
+        glyph <- if (identical(unname(pl$marker[nm]), "hollow")) "\u25c7" else "\u25c6"
+        fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
+          name = if (off) sprintf("\u25c6 off the master list (%d)", length(pl$offlist))
+                 else sprintf("\u25c6 market creators (%d)", pl$n - length(pl$offlist)),
+          legendgroup = if (off) "nclines_off" else "nclines",
+          showlegend = if (off) first_off else first_on,
+          line = list(color = if (off) "rgba(192,132,252,0.45)" else "rgba(192,132,252,0.75)",
+                      width = if (off) 1 else 1.4, dash = if (off) "dash" else "solid"),
+          hovertext = if (off) sprintf("%s %s (%s, chart only)", glyph, nm, pl$why[[nm]])
+                      else sprintf("%s %s", glyph, nm),
+          hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
+        if (off) first_off <- FALSE else first_on <- FALSE
+        if (nrow(ln) > 0) {
+          last_i <- nrow(ln)
+          endlabels[[length(endlabels) + 1]] <- list(
+            x = ln$d[last_i], y = ln$ret[last_i], text = paste(glyph, nm),
+            textfont = list(color = "#c084fc", size = 8), showarrow = FALSE,
+            xanchor = "left", yanchor = "middle", xshift = 5)
+        }
+      }
+      pl_suffix <- " · \u25c6 lines"
+    } else if (!is.null(pl) && length(pl$lines)) {
       first <- TRUE
       # single-cluster view: light grey lines with a ticker end label per name;
       # checkbox view (all clusters): the faint white bundle as before
@@ -11068,7 +11209,10 @@ server <- function(input, output, session) {
       G$xnum <- xlo + xp / PW * span
       G$xs <- format(as.POSIXct(G$xnum * 86400, origin = "1970-01-01", tz = "UTC"),
                      "%Y-%m-%d %H:%M:%S", tz = "UTC")
-      lineY <- if (any(!is.na(cmp$passed_pct))) cmp$passed_pct else cmp$graded_pct
+      # pins sit on the displayed line: passed, else graded, else SPY (the
+      # market-creators view can hold no basket series at all)
+      lineY <- if (any(!is.na(cmp$passed_pct))) cmp$passed_pct
+               else if (any(!is.na(cmp$graded_pct))) cmp$graded_pct else cmp$spy_pct
       okl <- !is.na(lineY)
       G$y <- if (sum(okl) >= 2)
                approx(as.numeric(cmp$d)[okl], lineY[okl], xout = G$xnum, rule = 2)$y
@@ -11169,7 +11313,6 @@ server <- function(input, output, session) {
       title = list(text = paste0(sprintf(
           "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s",
           format(d$qscmp_anchor, "%b %d")), cl_suffix,
-          if (!is.null(lc_nc_only())) " \u00b7 \u25c6 names only" else "",
           ov_suffix, ap_suffix, tp_suffix, pl_suffix),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
@@ -11247,7 +11390,9 @@ server <- function(input, output, session) {
     ap_note <- if (isTRUE(input$lcAllPins))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;", "All qualstream pins on"),
-        " - every name in the master list (graded >= 68, plus your open positions). ",
+        if (!is.null(lc_nc_only()))
+          " - every \u25c6 market creator on the master list, from every cluster. "
+        else " - every name in the master list (graded >= 68, plus your open positions). ",
         "One marker per day on the green line, ",
         span(style = "color:#34d399;", "▲ buy"), " / ",
         span(style = "color:#fbbf24;", "● hold"), " / ",
@@ -11285,36 +11430,52 @@ server <- function(input, output, session) {
             if (!is.null(clk) && nzchar(clk))
               paste0(" Pins hidden while ", clk, " is selected - click it again (or 'clear') to show all.")
             else if (!is.null(lc_nc_only()))
-              " 0 pins drawn - no \u25c6 new-category name in view has a buy/hold/sell event in this window."
+              " 0 pins drawn - no \u25c6 market creator on the master list has a buy/hold/sell event in this window."
             else " 0 pins drawn - no master-list name has a buy/hold/sell event in this window.")
         }))
       else NULL
-    pl_note <- if (isTRUE(input$lcAllPickLines))
+    nc_now <- lc_nc_only()
+    pl_note <- if (!is.null(nc_now)) local({
+      # market-creators view: its own lines and baskets, every cluster
+      pl_now <- tryCatch(lc_pick_lines(), error = function(e) NULL)
+      det <- d$qscmp_detail
+      n_ser <- if (!is.null(det) && nrow(det)) length(intersect(nc_now, toupper(det$ticker))) else 0L
+      tp_gone <- isTRUE(input$lcTopPerf) &&
+                 is.null(tryCatch(lc_top_perf(), error = function(e) NULL))
+      div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+        span(style = "color:#f8fafc; font-weight:700;", "\u25c6 Market creators view"),
+        if (is.null(pl_now)) " - no marked name has prices in this window."
+        else tagList(
+          " - every marked name, from every cluster, is drawn as its own ",
+          span(style = "color:#c084fc;", "violet line"),
+          " with its ticker at the end, rebased to 0% at the anchor; names off the master list",
+          " are dashed and appear on the chart only. "),
+        if (n_ser > 0) tagList("The ", span(style = "color:#f59e0b;", "orange"), " and ",
+                               span(style = "color:#10b981;", "green"),
+                               sprintf(" lines are the marked names' own baskets (%d with a graded series: all graded / passed 68). ", n_ser))
+        else " No marked name has a graded series in this window, so only SPY and the name lines draw. ",
+        "Hover a line for its ticker and return.",
+        if (tp_gone) span(style = "color:#fb923c;",
+          " Top performers needs 4 or more marked names with a graded series; this view has ",
+          sprintf("%d.", n_ser)))
+    }) else if (isTRUE(input$lcAllPickLines))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;", "All qualstream pick lines on"),
-        if (!is.null(lc_nc_only())) " - every \u25c6 new-category master-list name as its own "
-        else " - every passed-qualstream (>= 68) board name as its own ",
+        " - every passed-qualstream (>= 68) board name as its own ",
         span(style = "color:#f8fafc;", "faint white line"),
         ", each rebased to 0% at the anchor. Hover a line for its ticker and return. ",
         "The ", span(style = "color:#10b981;", "green line"),
-        if (!is.null(lc_nc_only()))
-          " is still the whole basket (the \u25c6 box narrows names, not the baskets). Click a chip to brighten "
-        else " is their average - these are the paths behind it. Click a chip to brighten ",
+        " is their average - these are the paths behind it. Click a chip to brighten ",
         "one out of the pack.")
       else if (!is.na(lc_single_cluster()))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;",
              sprintf("Cluster %d selected", lc_single_cluster())),
-        if (!is.null(lc_nc_only()) && is.null(tryCatch(lc_pick_lines(), error = function(e) NULL)))
-          " - it has no \u25c6 new-category names to draw."
-        else tagList(
-          if (!is.null(lc_nc_only())) " - each of its \u25c6 new-category names is drawn as its own "
-          else " - each of its master-list names is drawn as its own ",
-          span(style = "color:#f8fafc;", "light grey line"),
-          " with its ticker at the end, rebased to 0% at the anchor, so a pin can be read ",
-          "against the name's own path. The ", span(style = "color:#10b981;", "green line"),
-          if (!is.null(lc_nc_only())) " is still the whole cluster basket. Hover a line for its ticker and return; tick a row to draw it bright."
-          else " is their average. Hover a line for its ticker and return; tick a row to draw it bright."))
+        " - each of its master-list names is drawn as its own ",
+        span(style = "color:#f8fafc;", "light grey line"),
+        " with its ticker at the end, rebased to 0% at the anchor, so a pin can be read ",
+        "against the name's own path. The ", span(style = "color:#10b981;", "green line"),
+        " is their average. Hover a line for its ticker and return; tick a row to draw it bright.")
       else NULL
     tagList(ov_note, ap_note, pl_note,
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
