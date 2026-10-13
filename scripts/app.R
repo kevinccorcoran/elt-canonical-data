@@ -102,12 +102,12 @@ QS_MAX_AGE_DAYS <- 150L
 # a grade, the 68 bar, the seed/adopt queue or any BUY/HOLD rule, and it is never
 # backtestable (the tag comes from the model's own knowledge, so a past-dated tag
 # is hindsight). v1 rows (qual.ticker_category_tags, new_category_v1) are history
-# and no longer read. Latest tag per ticker within NC_MAX_AGE_DAYS (the tagger
-# refreshes at 180d, so a mark expires if it dies). NULL when the table is absent
+# and no longer read. Latest tag per ticker, no age window: the tagger asks about
+# each name once, so a window would drop every mark a year after its only tag
+# (a deliberate refresh writes a newer row, which wins). NULL when the table is absent
 # or empty (dev, staging, or before the tagger is deployed): no marker, no
 # checkbox, no narrowing.
 NC_TAG_VERSION  <- "market_shift_v2"
-NC_MAX_AGE_DAYS <- 365L
 lc_load_category_tags <- function(con) {
   x <- tryCatch(dbGetQuery(con, sprintf("
     SELECT DISTINCT ON (ticker) ticker, marker, kind, category, parent_market,
@@ -115,8 +115,8 @@ lc_load_category_tags <- function(con) {
            first_sale_year, company_rank, is_creator, votes_marked, votes_total,
            milestone, rationale, model, as_of::text AS as_of
     FROM qual.ticker_market_tags
-    WHERE tag_version = '%s' AND as_of >= CURRENT_DATE - %d
-    ORDER BY ticker, as_of DESC, tagged_at DESC", NC_TAG_VERSION, NC_MAX_AGE_DAYS)),
+    WHERE tag_version = '%s'
+    ORDER BY ticker, as_of DESC, tagged_at DESC", NC_TAG_VERSION)),
     error = function(e) NULL)
   if (is.null(x) || !nrow(x)) return(NULL)
   x$ticker <- toupper(x$ticker)
