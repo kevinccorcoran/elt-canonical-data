@@ -1204,34 +1204,6 @@ dark_layout <- function(p, ...) {
   layout(p, paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", ...)
 }
 
-# End labels for the sketch's per-name pick lines, placed once its y-range is
-# final (Kevin 2026-10-13: the axis fits the averages, so a name can run off
-# it). A name inside the range is labelled at its last value as before; one
-# that ran off is labelled at the edge it crossed with its final %, stacked
-# 11 px apart so several clipped names stay readable, in the right margin
-# (paper x = 1: a data-x label this long would widen the date axis past the
-# last day). yr = NULL (autoscale): nothing clips. ends: list of
-# list(text, x, y, col).
-lc_pick_end_labels <- function(ends, yr) {
-  lab <- function(e, y, txt, ya = "middle", ys = 0) {
-    a <- list(x = e$x, y = y, text = txt, textfont = list(color = e$col, size = 8),
-              showarrow = FALSE, xanchor = "left", yanchor = ya, xshift = 5)
-    if (ya != "middle") { a$xref <- "paper"; a$x <- 1 }
-    if (ys != 0) a$yshift <- ys
-    a
-  }
-  pct   <- function(v) sprintf("%s%.0f%%", if (v < 0) "\u2212" else "+", abs(v))
-  over  <- vapply(ends, function(e) !is.null(yr) && isTRUE(e$y > yr[2]), logical(1))
-  under <- vapply(ends, function(e) !is.null(yr) && isTRUE(e$y < yr[1]), logical(1))
-  hi <- ends[over];  hi <- hi[order(-vapply(hi, function(e) e$y, 0))]
-  lo <- ends[under]; lo <- lo[order(vapply(lo, function(e) e$y, 0))]
-  c(lapply(ends[!over & !under], function(e) lab(e, e$y, e$text)),
-    lapply(seq_along(hi), function(i)
-      lab(hi[[i]], yr[2], paste(hi[[i]]$text, "\u2191", pct(hi[[i]]$y)), "top", -11 * (i - 1))),
-    lapply(seq_along(lo), function(i)
-      lab(lo[[i]], yr[1], paste(lo[[i]]$text, "\u2193", pct(lo[[i]]$y)), "bottom", 11 * (i - 1))))
-}
-
 # Postgres COUNT()/SUM()/bigint arrive as integer64 (bit64). Left uncast,
 # bit64 arithmetic truncates fractions BEFORE dividing (hit_rate 0.75 -> 0
 # inside weighted.mean), and sprintf("%d") errors. Cast to double up front.
@@ -10852,7 +10824,6 @@ server <- function(input, output, session) {
     # the focused name stands out of the pack.
     pl <- tryCatch(lc_pick_lines(), error = function(e) NULL)
     pl_suffix <- ""
-    pl_ends <- list()   # their end labels, placed once the y-range is final
     if (!is.null(pl) && length(pl$lines)) {
       first <- TRUE
       # single-cluster view: light grey lines with a ticker end label per name;
@@ -10871,8 +10842,10 @@ server <- function(input, output, session) {
           hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
         if (pl_auto && nrow(ln) > 0) {
           last_i <- nrow(ln)
-          pl_ends[[length(pl_ends) + 1]] <- list(
-            text = nm, x = ln$d[last_i], y = ln$ret[last_i], col = "#94a3b8")
+          endlabels[[length(endlabels) + 1]] <- list(
+            x = ln$d[last_i], y = ln$ret[last_i], text = nm,
+            textfont = list(color = "#94a3b8", size = 8), showarrow = FALSE,
+            xanchor = "left", yanchor = "middle", xshift = 5)
         }
         first <- FALSE
       }
@@ -11017,17 +10990,6 @@ server <- function(input, output, session) {
       }
       ov_suffix <- sprintf(" · %s overlaid", ov$tk)
     }
-    # Fit the y-axis to the averages (Kevin 2026-10-13: "the averages are too
-    # flat looking"). SPY, the graded and passed baskets, the top-performers
-    # line, ticked rows and a clicked chip's line set the range; the per-name
-    # pick lines do not, so one +80% name no longer squeezes the averages into
-    # a thin band. A pick line that goes further runs off the edge with its
-    # final % pinned there (lc_pick_end_labels).
-    tpret <- if (!is.null(tp) && !is.null(tp$line)) tp$line$ret else numeric(0)
-    ckret <- if (!is.null(ckl) && length(ckl))
-               unlist(lapply(ckl, function(x) x$line$ret), use.names = FALSE) else numeric(0)
-    ovret <- if (!is.null(ov) && !is.null(ov$line)) ov$line$ret else numeric(0)
-    fit_vals <- c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, tpret, ckret, ovret)
     # all-pins mode (rebuilt 2026-10-06, Kevin: "need better way to represent").
     # ONE pin per (day, state), not one per name: a big symbol on the green line
     # (triangle-up buy, circle hold, triangle-down sell, white ring so it reads
@@ -11127,10 +11089,15 @@ server <- function(input, output, session) {
                  line = list(color = apcol[[s]], width = 2)),
           text = sub$hov, hovertemplate = "%{text}<extra></extra>")
       }
-      # y-range from the averages, the explicit picks and the pins (fit_vals,
-      # above); the per-name pick lines no longer stretch it
-      yhi <- max(c(fit_vals, G$y), na.rm = TRUE)
-      ylo <- min(c(fit_vals, G$y, 0), na.rm = TRUE)
+      # y-range from every drawn line (checked / pick / top-performer lines too,
+      # so a name that dips below 0 or spikes high never clips)
+      tpret <- if (!is.null(tp) && !is.null(tp$line)) tp$line$ret else numeric(0)
+      plret <- if (!is.null(pl) && length(pl$lines))
+                 unlist(lapply(pl$lines, function(x) x$ret), use.names = FALSE) else numeric(0)
+      ckret <- if (!is.null(ckl) && length(ckl))
+                 unlist(lapply(ckl, function(x) x$line$ret), use.names = FALSE) else numeric(0)
+      yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, G$y, tpret, plret, ckret), na.rm = TRUE)
+      ylo <- min(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, G$y, tpret, plret, ckret, 0), na.rm = TRUE)
       yspan <- max(yhi - ylo, 1)
       ylo2 <- ylo - yspan * 0.05
       yhi2 <- yhi + yspan * 0.06
@@ -11194,19 +11161,10 @@ server <- function(input, output, session) {
       ap_yrange <- c(ylo2, yhi2)
       ap_suffix <- " · all qualstream pins"
     }
-    # pins off: the same fit, but only when pick lines are drawn (without them
-    # plotly's own autoscale already fits the averages, unchanged)
-    fit_yrange <- ap_yrange
-    if (is.null(fit_yrange) && !is.null(pl) && length(pl$lines) && any(is.finite(fit_vals))) {
-      fhi <- max(fit_vals, na.rm = TRUE); flo <- min(c(fit_vals, 0), na.rm = TRUE)
-      fspan <- max(fhi - flo, 1)
-      fit_yrange <- c(flo - fspan * 0.05, fhi + fspan * 0.06)
-    }
-    endlabels <- c(endlabels, lc_pick_end_labels(pl_ends, fit_yrange))
     yax <- list(title = "Equal-weight return (%)", color = "#cbd5e1",
                 gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
                 zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%")
-    if (!is.null(fit_yrange)) yax$range <- fit_yrange
+    if (!is.null(ap_yrange)) yax$range <- ap_yrange
     dark_layout(fig,
       title = list(text = paste0(sprintf(
           "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s",
@@ -11331,8 +11289,6 @@ server <- function(input, output, session) {
             else " 0 pins drawn - no master-list name has a buy/hold/sell event in this window.")
         }))
       else NULL
-    axis_note <- paste(" The axis fits the averages: a name line that goes further runs off the",
-                       "edge, with its final % at the edge (the toolbar's autoscale shows every line).")
     pl_note <- if (isTRUE(input$lcAllPickLines))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;", "All qualstream pick lines on"),
@@ -11344,7 +11300,7 @@ server <- function(input, output, session) {
         if (!is.null(lc_nc_only()))
           " is still the whole basket (the \u25c6 box narrows names, not the baskets). Click a chip to brighten "
         else " is their average - these are the paths behind it. Click a chip to brighten ",
-        "one out of the pack.", axis_note)
+        "one out of the pack.")
       else if (!is.na(lc_single_cluster()))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;",
@@ -11358,8 +11314,7 @@ server <- function(input, output, session) {
           " with its ticker at the end, rebased to 0% at the anchor, so a pin can be read ",
           "against the name's own path. The ", span(style = "color:#10b981;", "green line"),
           if (!is.null(lc_nc_only())) " is still the whole cluster basket. Hover a line for its ticker and return; tick a row to draw it bright."
-          else " is their average. Hover a line for its ticker and return; tick a row to draw it bright.",
-          axis_note))
+          else " is their average. Hover a line for its ticker and return; tick a row to draw it bright."))
       else NULL
     tagList(ov_note, ap_note, pl_note,
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
