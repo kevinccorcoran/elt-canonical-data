@@ -97,6 +97,22 @@ REGRADE_AFTER_DAYS = Variable.get("QUAL_REGRADE_AFTER_DAYS", default_var="90")
 if not re.fullmatch(r"[0-9]+", REGRADE_AFTER_DAYS or ""):
     raise ValueError(f"QUAL_REGRADE_AFTER_DAYS must be an integer, got: {REGRADE_AFTER_DAYS!r}")
 
+# New-category tag knobs (qualstream category.py; display-only, see the task).
+# Measured 2026-10-13 on claude-opus-5-5 at effort low: ~$0.01 per name, so the
+# first run's backfill of the graded universe (~185 names) drains at
+# CATEGORY_MAX_NAMES a day in ~5 days for well under $1 a day; after that a
+# typical day tags zero to a handful of fresh entrants. MAX_NAMES x the
+# runner's per-name estimate must stay under MAX_COST or the guard refuses.
+CATEGORY_MAX_COST = Variable.get("QUAL_CATEGORY_MAX_COST", default_var="2")
+if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", CATEGORY_MAX_COST or ""):
+    raise ValueError(f"QUAL_CATEGORY_MAX_COST must be a number, got: {CATEGORY_MAX_COST!r}")
+CATEGORY_MAX_NAMES = Variable.get("QUAL_CATEGORY_MAX_NAMES", default_var="40")
+if not re.fullmatch(r"[0-9]+", CATEGORY_MAX_NAMES or ""):
+    raise ValueError(f"QUAL_CATEGORY_MAX_NAMES must be an integer, got: {CATEGORY_MAX_NAMES!r}")
+CATEGORY_RETAG_DAYS = Variable.get("QUAL_CATEGORY_RETAG_DAYS", default_var="180")
+if not re.fullmatch(r"[0-9]+", CATEGORY_RETAG_DAYS or ""):
+    raise ValueError(f"QUAL_CATEGORY_RETAG_DAYS must be an integer, got: {CATEGORY_RETAG_DAYS!r}")
+
 default_args = {
     "owner": "airflow",
     "email_on_failure": False,
@@ -175,3 +191,29 @@ with DAG(
         trigger_rule="all_done",
     )
     verify_coverage >> trigger_portfolio_sync
+
+    # New-category tag (Kevin 2026-10-13): "when qualstream grades a name, also
+    # check whether the company is building a new category". A SEPARATE model
+    # call per name (qualstream category.py) writing qual.ticker_category_tags,
+    # which the 3838 master list reads for its marker and its "New-category
+    # names only" filter. Display-only: it never touches the buy_decision_v1
+    # prompt, the grade, the veto, the 68 bar or the adopt queue (that rubric is
+    # pre-registered and frozen until 2027-02-13).
+    # After grading, so a name graded today is tagged today; all_done, so a red
+    # grade day still tags. Deliberately OFF the verify -> portfolio_sync chain:
+    # a tagging failure (red task, Telegram ping) can never delay or block the
+    # book's maintenance. Needs sql/006_category_tags.sql applied on the DB.
+    tag_new_category = BashOperator(
+        task_id="tag_new_category",
+        trigger_rule="all_done",
+        bash_command=(
+            f'cd "{QUALSTREAM_ROOT}" && '
+            f'export PYTHONPATH="{QUALSTREAM_ROOT}/src" && '
+            f'python -m qualstream.category '
+            f'--as-of {{{{ data_interval_end | ds }}}} '
+            f'--retag-after {CATEGORY_RETAG_DAYS} --limit {CATEGORY_MAX_NAMES} '
+            f'--max-cost {CATEGORY_MAX_COST}'
+        ),
+        append_env=True,
+    )
+    grade_new_buys >> tag_new_category

@@ -93,6 +93,32 @@ QS_CLUSTER_CAP <- 5L
 # grading runs monthly/incrementally - the caption warns as it approaches.
 QS_MAX_AGE_DAYS <- 150L
 
+# New-category tags (qualstream category.py -> qual.ticker_category_tags): one
+# model call per graded name asking whether the company is building a new
+# category. DISPLAY-ONLY (Kevin 2026-10-13: a marker next to the ticker and a way
+# to view only those names): the diamond on the master list and the
+# "New-category names only" view filter. It never feeds a grade, the 68 bar, the
+# seed/adopt queue or any BUY/HOLD rule, and it is never backtestable (the tag
+# comes from the model's own knowledge, so a past-dated tag is hindsight).
+# Latest tag per ticker within NC_MAX_AGE_DAYS (the tagger refreshes at 180d, so
+# a mark expires if it dies). NULL when the table is absent or empty (dev,
+# staging, or before the tagger is deployed): no marker, no checkbox, no narrowing.
+NC_TAG_VERSION  <- "new_category_v1"
+NC_MAX_AGE_DAYS <- 365L
+lc_load_category_tags <- function(con) {
+  x <- tryCatch(dbGetQuery(con, sprintf("
+    SELECT DISTINCT ON (ticker) ticker, new_category, category, category_age,
+           role, business_share, confidence, rationale, as_of::text AS as_of
+    FROM qual.ticker_category_tags
+    WHERE tag_version = '%s' AND as_of >= CURRENT_DATE - %d
+    ORDER BY ticker, as_of DESC, tagged_at DESC", NC_TAG_VERSION, NC_MAX_AGE_DAYS)),
+    error = function(e) NULL)
+  if (is.null(x) || !nrow(x)) return(NULL)
+  x$ticker <- toupper(x$ticker)
+  x$new_category <- as.logical(x$new_category)
+  x
+}
+
 # Dismissed set: tickers the user explicitly removed, kept so the qualstream
 # auto-seed does not resurrect them on the next Generate. Stored as a one-column
 # parquet next to the positions; empty file is deleted (mirrors save_portfolio).
@@ -2870,6 +2896,7 @@ ui <- navbarPage(
         checkboxInput("lcTopPerf", "Top performers (hindsight, any qs)", value = FALSE),
         checkboxInput("lcAllPickLines", "All qualstream pick lines (white)", value = FALSE),
         checkboxInput("lcAutoRefresh", "Auto-refresh (hourly)", value = TRUE),
+        uiOutput("lcNewCatUI"),
         uiOutput("idFilterLC")
       ), tagList(
         div(style = "color:#cbd5e1;font-size:0.72rem;font-weight:600;margin-bottom:0.3rem;",
@@ -9677,9 +9704,12 @@ server <- function(input, output, session) {
         FROM portfolio.state_history
         ORDER BY ticker, as_of, hz, captured_at DESC"),
         error = function(e) NULL)
+      # new-category tags: display-only marker + view filter (see NC_TAG_VERSION)
+      nc <- lc_load_category_tags(con)
       dat <- list(led = led, gate = gate, meta = meta, sl = sl, coh = coh,
                   qs = qs, qscmp = qscmp, qscmp_detail = qscmp_detail, qscmp_anchor = qs_anchor,
                   shadow = shadow, nested = nested, breadth = breadth, rec_states = rec_states,
+                  nc = nc,
                   qs_veto = if (!is.null(qsv) && nrow(qsv) > 0)
                               toupper(qsv$ticker[qsv$veto %in% TRUE])
                             else character(0),
@@ -10028,11 +10058,48 @@ server <- function(input, output, session) {
   # and names with no live id drop out too. Kevin 2026-10-07: "when a cluster is
   # selected only the specific tickers to that cluster should be showed on graph and
   # table" - this replaces the 2026-09-01 owned-names exemption on the pins.
+  # New-category tags (display-only, see NC_TAG_VERSION): rows with
+  # new_category = TRUE, upper-case tickers. NULL = no tags loaded at all.
+  lc_nc_tags <- reactive({
+    d <- app_dataLC()
+    x <- if (!is.null(d)) d$nc else NULL
+    if (is.null(x) || !nrow(x)) return(NULL)
+    x[x$new_category %in% TRUE, , drop = FALSE]
+  })
+  # The view filter's ticker set; NULL = no narrowing (box off, or no tags loaded:
+  # a missing table must never blank the board). character(0) = tags loaded but
+  # no name is building a new category, so the filtered view is honestly empty.
+  lc_nc_only <- reactive({
+    if (!isTRUE(input$lcNewCatOnly)) return(NULL)
+    x <- lc_nc_tags()
+    if (is.null(x)) NULL else x$ticker
+  })
+  output$lcNewCatUI <- renderUI({
+    d <- app_dataLC()
+    if (is.null(d) || is.null(d$nc) || !nrow(d$nc)) return(NULL)
+    n_nc <- sum(d$nc$new_category %in% TRUE)
+    div(style = "margin-bottom:0.9rem;",
+      # isolate: keep the box's state across the hourly data refresh re-render
+      checkboxInput("lcNewCatOnly", "\u25c6 New-category names only",
+                    value = isTRUE(isolate(input$lcNewCatOnly))),
+      div(style = "color:#64748b; font-size:0.68rem; margin-top:-0.55rem;",
+          sprintf("%d of %d tagged names; hover a \u25c6 for why. Display only.",
+                  n_nc, nrow(d$nc))))
+  })
+
   lc_in_sel <- function(tks, sel = lc_ids_effective()) {
-    if (is.null(sel)) return(rep(TRUE, length(tks)))
-    if (!length(sel)) return(rep(FALSE, length(tks)))
-    ids <- lc_live_ids()[toupper(tks)]
-    !is.na(ids) & ids %in% as.integer(sel)
+    keep <- if (is.null(sel)) rep(TRUE, length(tks))
+            else if (!length(sel)) rep(FALSE, length(tks))
+            else {
+              ids <- lc_live_ids()[toupper(tks)]
+              !is.na(ids) & ids %in% as.integer(sel)
+            }
+    # "New-category names only" (Kevin 2026-10-13) narrows the same readers the
+    # cluster boxes do: master list, pins, pick and checked lines, track strip.
+    # The green/orange/SPY basket lines stay whole as the benchmark.
+    nc <- lc_nc_only()
+    if (!is.null(nc)) keep <- keep & toupper(tks) %in% nc
+    keep
   }
   # Exactly one cluster ticked (Kevin 2026-10-12: "light grey lines for each
   # ticker when and only when a specific cluster id is selected"): the sketch then
@@ -10426,8 +10493,20 @@ server <- function(input, output, session) {
     cand <- cand[lc_in_sel(cand)]
     if (!length(cand))
       return(div(style = "color:#64748b; font-size:0.8rem; margin:0.4rem 0 0.8rem;",
-                 "No cluster ticked - tick a cluster box in the sidebar to list its names."))
+                 if (!is.null(lc_nc_only()) && !identical(lc_ids_effective(), character(0)))
+                   paste("No \u25c6 new-category names in this view - untick",
+                         "\"New-category names only\" to list every name.")
+                 else "No cluster ticked - tick a cluster box in the sidebar to list its names."))
     live <- lc_live_ids()
+    # new-category marker: tooltip = category, role, age, confidence, why
+    nc_tags <- lc_nc_tags()
+    nc_tip <- if (!is.null(nc_tags) && nrow(nc_tags))
+                setNames(sprintf("New category: %s (%s, %s, confidence %d). %s",
+                                 nc_tags$category, gsub("_", " ", nc_tags$role),
+                                 gsub("_", " ", nc_tags$category_age),
+                                 as.integer(nc_tags$confidence), nc_tags$rationale),
+                         nc_tags$ticker)
+              else character(0)
     HZS <- c(4L, 7L, 12L)
     cell_for <- function(tku, fl) {
       r <- sl[toupper(sl$ticker) == tku & sl$fut_lag == fl, , drop = FALSE]
@@ -10514,7 +10593,15 @@ server <- function(input, output, session) {
         tags$input(type = "checkbox", class = "sketchrow", `data-tk` = r$tk,
                    `aria-label` = paste("plot", r$tk, "on the sketch"),
                    checked = if (r$tk %in% chk_ticks) NA else NULL)),
-      tags$td(style = "color:#e2e8f0;font-weight:600;padding:2px 8px;", r$tk),
+      # the diamond rides the ticker (nowrap only on marked rows, so an untagged
+      # board renders byte-identical to before)
+      tags$td(style = paste0("color:#e2e8f0;font-weight:600;padding:2px 8px;",
+                             if (r$tk %in% names(nc_tip)) "white-space:nowrap;" else ""),
+              r$tk,
+              if (r$tk %in% names(nc_tip))
+                tags$span("\u25c6", title = nc_tip[[r$tk]],
+                          `aria-label` = "building a new category",
+                          style = "color:#c084fc;margin-left:4px;font-size:0.82rem;cursor:help;")),
       state_td(r$state),
       hold_td(r),
       best_td(r$best),
@@ -10552,6 +10639,11 @@ server <- function(input, output, session) {
                "Master list — every best bet, all horizons"),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
         HTML("One table, grouped by BUY / HOLD / SELL, every holding period on each row. Tick a row's box to draw that name's own line on the sketch below. STATE = current buy/hold/sell (filter-independent) · HOLDING = your open entries (count&times; · latest add · time left on the hold), owned rows tinted green and floated to the top of their group · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. New adopts appear here automatically.")),
+      if (!is.null(d$nc) && nrow(d$nc)) tags$div(
+        style = "color:#64748b;font-size:0.72rem;margin:-0.2rem 0 0.4rem;",
+        tags$span("\u25c6", style = "color:#c084fc;"),
+        paste(" = building a new category: a model-knowledge tag, display only (it never",
+              "feeds the grade or any rule). Hover it for the category and why.")),
       tags$div(style = "overflow-x:auto;",
         tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
           tags$thead(tags$tr(th("Plot"), th("Ticker", "left"), th("State"), th("Holding"), th("Best"),
