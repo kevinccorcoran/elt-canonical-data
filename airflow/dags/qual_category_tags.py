@@ -11,10 +11,12 @@ frozen until 2027-02-13; this DAG does not touch it.
 
 Why a separate DAG on its own clock instead of a task inside
 qual_scorecards_on_entry (2026-10-13 review):
-  * Airflow sets a run's state from its leaf tasks, and tools/pipeline_watch.sh
-    alerts on any DAG's failed latest run under one global 6h throttle. A
-    tagging problem must never make the GRADING run read as failed, or hold
-    back other alerts behind that throttle;
+  * Airflow sets a run's state from its leaf tasks, so a tagging problem must
+    never make the GRADING run read as failed. The split does not isolate
+    alerts: tools/pipeline_watch.sh alerts on any DAG's failed latest run under
+    one global 6h throttle, so a failed run here still pings and can hold back
+    other alerts for up to 6h. That is why the task fails only on systemic
+    problems (see the failure policy below);
   * a bad display-only Variable must not be able to break the grading DAG's
     import (that would stop grading and the book). Here a malformed knob falls
     back to its default instead of raising;
