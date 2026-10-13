@@ -107,8 +107,9 @@ NC_TAG_VERSION  <- "new_category_v1"
 NC_MAX_AGE_DAYS <- 365L
 lc_load_category_tags <- function(con) {
   x <- tryCatch(dbGetQuery(con, sprintf("
-    SELECT DISTINCT ON (ticker) ticker, new_category, category, category_age,
-           role, business_share, confidence, rationale, as_of::text AS as_of
+    SELECT DISTINCT ON (ticker) ticker, new_category, category, prior_option,
+           commercial_status, commercial_since_year, role, business_share,
+           confidence, rationale, as_of::text AS as_of
     FROM qual.ticker_category_tags
     WHERE tag_version = '%s' AND as_of >= CURRENT_DATE - %d
     ORDER BY ticker, as_of DESC, tagged_at DESC", NC_TAG_VERSION, NC_MAX_AGE_DAYS)),
@@ -9259,6 +9260,9 @@ server <- function(input, output, session) {
     avail_id <- tryCatch(lc_board_filter_ids(), error = function(e) integer(0))
     if (!is.null(sel_raw) && length(sel_ids) > 0 && !setequal(sel_ids, avail_id))
       det <- det[!is.na(det$id) & det$id %in% sel_ids, , drop = FALSE]
+    # and the "New-category names only" box (no ticker outside it is named)
+    nc_set <- lc_nc_only()
+    if (!is.null(nc_set)) det <- det[toupper(det$ticker) %in% nc_set, , drop = FALSE]
     if (!nrow(det)) return(NULL)
     # final realized return per ticker = its last non-NA ret in the window
     det <- det[order(det$ticker, det$d), , drop = FALSE]
@@ -10077,14 +10081,29 @@ server <- function(input, output, session) {
   output$lcNewCatUI <- renderUI({
     d <- app_dataLC()
     if (is.null(d) || is.null(d$nc) || !nrow(d$nc)) return(NULL)
-    n_nc <- sum(d$nc$new_category %in% TRUE)
+    # count inside the master-list universe the box narrows (latest non-vetoed
+    # grade >= QS_MIN, or owned) - the tagger also tags vetoed / sub-68 names,
+    # which no reader under the box can show
+    dv <- tryCatch(derivedLC(), error = function(e) NULL)
+    g <- if (!is.null(dv) && length(dv$qs_grade))
+           setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+         else setNames(numeric(0), character(0))
+    pp <- tryCatch(lc_pos(), error = function(e) NULL)
+    owned <- if (!is.null(pp) && nrow(pp)) {
+      sdv <- as.character(pp$sold_date)
+      toupper(pp$ticker[is.na(sdv) | !nzchar(sdv)])
+    } else character(0)
+    ml <- unique(c(names(g)[!is.na(g) & g >= QS_MIN], owned))
+    n_nc <- sum(ml %in% d$nc$ticker[d$nc$new_category %in% TRUE])
+    n_untagged <- sum(!(ml %in% d$nc$ticker))
     div(style = "margin-bottom:0.9rem;",
       # isolate: keep the box's state across the hourly data refresh re-render
       checkboxInput("lcNewCatOnly", "\u25c6 New-category names only",
                     value = isTRUE(isolate(input$lcNewCatOnly))),
       div(style = "color:#64748b; font-size:0.68rem; margin-top:-0.55rem;",
-          sprintf("%d of %d tagged names; hover a \u25c6 for why. Display only.",
-                  n_nc, nrow(d$nc))))
+          sprintf("%d of %d master-list names%s; hover a \u25c6 for why. Display only.",
+                  n_nc, length(ml),
+                  if (n_untagged > 0) sprintf(" (%d not tagged yet)", n_untagged) else "")))
   })
 
   lc_in_sel <- function(tks, sel = lc_ids_effective()) {
@@ -10094,9 +10113,11 @@ server <- function(input, output, session) {
               ids <- lc_live_ids()[toupper(tks)]
               !is.na(ids) & ids %in% as.integer(sel)
             }
-    # "New-category names only" (Kevin 2026-10-13) narrows the same readers the
-    # cluster boxes do: master list, pins, pick and checked lines, track strip.
-    # The green/orange/SPY basket lines stay whole as the benchmark.
+    # "New-category names only" (Kevin 2026-10-13) narrows every reader that names
+    # tickers: master list, pins, pick and checked lines, track strip (here), plus
+    # the top-performers line and the board's passed-qualstream list (lc_nc_only
+    # applied directly there). The green/orange/SPY basket lines stay whole as the
+    # benchmark, and the grading-gap tripwire is never narrowed by it.
     nc <- lc_nc_only()
     if (!is.null(nc)) keep <- keep & toupper(tks) %in% nc
     keep
@@ -10285,9 +10306,15 @@ server <- function(input, output, session) {
         "fewer names qualify."), qs_min, length(qs_top), sum(!is.na(bg)))),
       if (length(qs_top)) note_line(tagList(
         span("+", style = "color:#fb923c; font-weight:800;"),
-        sprintf(" passed qualstream: %s.",
-          paste(sprintf("%s %d", qs_top,
-                        as.integer(round(qs_grade[qs_top]))), collapse = ", ")))))
+        local({
+          nc_set <- lc_nc_only()
+          qs_top_v <- if (!is.null(nc_set)) qs_top[toupper(qs_top) %in% nc_set] else qs_top
+          sprintf(" passed qualstream%s: %s.",
+            if (!is.null(nc_set)) " (\u25c6 names only)" else "",
+            if (!length(qs_top_v)) "none"
+            else paste(sprintf("%s %d", qs_top_v,
+                               as.integer(round(qs_grade[qs_top_v]))), collapse = ", "))
+        }))))
     closed_foot <- div(style = "color:#64748b; font-weight:600; font-size:0.85rem; margin:0.4rem 0 0.5rem;",
           sprintf("closed - exited over a month ago (%d) · detail in the table below",
                   length(closed)))
@@ -10344,6 +10371,8 @@ server <- function(input, output, session) {
         return(div(style = "color:#64748b; font-size:0.72rem; margin:0.2rem 0 0.7rem;",
                    if (tp_on)
                      "No board-traded names among the top performers (they may be pre-window holds or names never on the board)."
+                   else if (!is.null(lc_nc_only()))
+                     "No board trades among the \u25c6 new-category names in this view."
                    else "No board trades in the selected clusters - adjust the cluster-id filter."))
       pill <- function(lab, big, sub, accent, valcol = "#e2e8f0")
         div(style = paste0("flex:1 1 0; min-width:120px; background:rgba(148,163,184,0.04);",
@@ -10358,6 +10387,11 @@ server <- function(input, output, session) {
         if (tp_on) div(style = paste0("color:#e879f9; font-size:0.66rem; font-weight:600;",
               " margin-bottom:0.35rem;"),
           sprintf("↳ top performers (%d traded) · hindsight-selected winners, descriptive", tr$n)),
+        # the box narrows the record to tagged names: say so, and that the tag is
+        # today's model-knowledge label laid over past trades (not a test of it)
+        if (!is.null(lc_nc_only())) div(style = paste0("color:#c084fc; font-size:0.66rem;",
+              " font-weight:600; margin-bottom:0.35rem;"),
+          "\u21b3 \u25c6 new-category names only \u00b7 today's model-knowledge tag laid over past trades, descriptive, not a test of the tag"),
         # PRIMARY: the full buy->sell round-trip record (one economic position each)
         div(style = "display:flex; gap:0.5rem; flex-wrap:wrap; align-items:stretch;",
           pill("trades", as.character(tr$n),
@@ -10501,10 +10535,13 @@ server <- function(input, output, session) {
     # new-category marker: tooltip = category, role, age, confidence, why
     nc_tags <- lc_nc_tags()
     nc_tip <- if (!is.null(nc_tags) && nrow(nc_tags))
-                setNames(sprintf("New category: %s (%s, %s, confidence %d). %s",
+                setNames(sprintf("New category: %s (%s, %s, confidence %d). Before it: %s. %s",
                                  nc_tags$category, gsub("_", " ", nc_tags$role),
-                                 gsub("_", " ", nc_tags$category_age),
-                                 as.integer(nc_tags$confidence), nc_tags$rationale),
+                                 ifelse(nc_tags$commercial_status %in% "not_yet_commercial",
+                                        "not yet commercial",
+                                        paste("selling at scale since", nc_tags$commercial_since_year)),
+                                 as.integer(nc_tags$confidence), nc_tags$prior_option,
+                                 nc_tags$rationale),
                          nc_tags$ticker)
               else character(0)
     HZS <- c(4L, 7L, 12L)
@@ -11131,7 +11168,9 @@ server <- function(input, output, session) {
     dark_layout(fig,
       title = list(text = paste0(sprintf(
           "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s",
-          format(d$qscmp_anchor, "%b %d")), cl_suffix, ov_suffix, ap_suffix, tp_suffix, pl_suffix),
+          format(d$qscmp_anchor, "%b %d")), cl_suffix,
+          if (!is.null(lc_nc_only())) " \u00b7 \u25c6 names only" else "",
+          ov_suffix, ap_suffix, tp_suffix, pl_suffix),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
@@ -11245,27 +11284,37 @@ server <- function(input, output, session) {
           else span(style = "color:#fb923c;",
             if (!is.null(clk) && nzchar(clk))
               paste0(" Pins hidden while ", clk, " is selected - click it again (or 'clear') to show all.")
+            else if (!is.null(lc_nc_only()))
+              " 0 pins drawn - no \u25c6 new-category name in view has a buy/hold/sell event in this window."
             else " 0 pins drawn - no master-list name has a buy/hold/sell event in this window.")
         }))
       else NULL
     pl_note <- if (isTRUE(input$lcAllPickLines))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;", "All qualstream pick lines on"),
-        " - every passed-qualstream (>= 68) board name as its own ",
+        if (!is.null(lc_nc_only())) " - every \u25c6 new-category master-list name as its own "
+        else " - every passed-qualstream (>= 68) board name as its own ",
         span(style = "color:#f8fafc;", "faint white line"),
         ", each rebased to 0% at the anchor. Hover a line for its ticker and return. ",
         "The ", span(style = "color:#10b981;", "green line"),
-        " is their average - these are the paths behind it. Click a chip to brighten ",
+        if (!is.null(lc_nc_only()))
+          " is still the whole basket (the \u25c6 box narrows names, not the baskets). Click a chip to brighten "
+        else " is their average - these are the paths behind it. Click a chip to brighten ",
         "one out of the pack.")
       else if (!is.na(lc_single_cluster()))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;",
              sprintf("Cluster %d selected", lc_single_cluster())),
-        " - each of its master-list names is drawn as its own ",
-        span(style = "color:#f8fafc;", "light grey line"),
-        " with its ticker at the end, rebased to 0% at the anchor, so a pin can be read ",
-        "against the name's own path. The ", span(style = "color:#10b981;", "green line"),
-        " is their average. Hover a line for its ticker and return; tick a row to draw it bright.")
+        if (!is.null(lc_nc_only()) && is.null(tryCatch(lc_pick_lines(), error = function(e) NULL)))
+          " - it has no \u25c6 new-category names to draw."
+        else tagList(
+          if (!is.null(lc_nc_only())) " - each of its \u25c6 new-category names is drawn as its own "
+          else " - each of its master-list names is drawn as its own ",
+          span(style = "color:#f8fafc;", "light grey line"),
+          " with its ticker at the end, rebased to 0% at the anchor, so a pin can be read ",
+          "against the name's own path. The ", span(style = "color:#10b981;", "green line"),
+          if (!is.null(lc_nc_only())) " is still the whole cluster basket. Hover a line for its ticker and return; tick a row to draw it bright."
+          else " is their average. Hover a line for its ticker and return; tick a row to draw it bright."))
       else NULL
     tagList(ov_note, ap_note, pl_note,
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
