@@ -10856,6 +10856,12 @@ server <- function(input, output, session) {
     if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
       return(empty_plot("No qualstream-graded names in range - run qualstream to populate this."))
     cmp$d <- as.Date(cmp$d)
+    # ◆/⚙ marks after tickers on the chart too (Kevin 2026-10-14): chips, the
+    # cluster view's name labels and ticked rows. No tags loaded = no change.
+    nc_tg <- tryCatch(lc_nc_tags(), error = function(e) NULL)
+    nc_g  <- if (!is.null(nc_tg) && nrow(nc_tg))
+               setNames(lc_nc_glyph(nc_tg$marker, nc_tg$enabler), nc_tg$ticker) else character(0)
+    tk_g  <- function(tk) { g <- unname(nc_g[toupper(tk)]); ifelse(is.na(g), tk, paste0(tk, g)) }
     # Cluster narrowing (live on the buy-cluster checkboxes): recompute the graded
     # and passed lines for the selected cluster(s) from the per-ticker detail. SPY is
     # cluster-independent and always stays. Rules honour the "UNCHECK TO NARROW"
@@ -11031,7 +11037,7 @@ server <- function(input, output, session) {
         if (pl_auto && nrow(ln) > 0) {
           last_i <- nrow(ln)
           endlabels[[length(endlabels) + 1]] <- list(
-            x = ln$d[last_i], y = ln$ret[last_i], text = nm,
+            x = ln$d[last_i], y = ln$ret[last_i], text = tk_g(nm),
             textfont = list(color = "#94a3b8", size = 8), showarrow = FALSE,
             xanchor = "left", yanchor = "middle", xshift = 5)
         }
@@ -11061,7 +11067,7 @@ server <- function(input, output, session) {
         if (nrow(ln) > 0) {
           last_i <- nrow(ln)
           endlabels[[length(endlabels) + 1]] <- list(
-            x = ln$d[last_i], y = ln$ret[last_i], text = nm,
+            x = ln$d[last_i], y = ln$ret[last_i], text = tk_g(nm),
             textfont = list(color = "#f8fafc", size = 8), showarrow = FALSE,
             xanchor = "left", yanchor = "middle", xshift = 5)
         }
@@ -11207,7 +11213,7 @@ server <- function(input, output, session) {
       PER <- 4L                                       # tickers per chip row
       G <- do.call(rbind, lapply(unique(key), function(k) {
         s <- ap[key == k, , drop = FALSE]
-        rows <- vapply(split(s$ticker, ceiling(seq_len(nrow(s)) / PER)),
+        rows <- vapply(split(tk_g(s$ticker), ceiling(seq_len(nrow(s)) / PER)),
                        paste, character(1), collapse = " ")
         how <- ifelse(is.na(s$prev) | !(s$prev %in% c("buy", "hold", "sell")), "new",
                ifelse(s$prev == "sell", "re-entered", paste("from", s$prev)))
@@ -11223,7 +11229,7 @@ server <- function(input, output, session) {
             (if (any(s$src %in% "nested"))
                "<br><i>backfilled by the shadow (context, not live evidence)</i>"
              else "<br><i>replayed from the ledger (daily recording began later)</i>") else "",
-          "<br>", paste(sprintf("%s · %s · %s own%s", s$ticker, how,
+          "<br>", paste(sprintf("%s · %s · %s own%s", tk_g(s$ticker), how,
                                 ifelse(is.na(s$own), "-", sprintf("%+.1f%%", s$own)), fold),
                         collapse = "<br>"))
         data.frame(date = s$date[1], state = s$state[1], ret = s$ret[1], n = nrow(s),
