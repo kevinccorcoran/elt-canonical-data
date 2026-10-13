@@ -49,11 +49,11 @@ Knobs (Airflow Variables, all optional):
                                 refuses to start when its estimate is above it
                                 ($0.03 per call x 3 answers, so 40 names = $3.60)
                                 and stops once actual spend reaches it (measured
-                                ~$0.021 per call, so ~$0.064 per name, ~$2.60 for
-                                40). A set Variable overrides this.
+                                r4 ~$0.028 per call, so ~$0.084 per name, ~$3.40
+                                for 40). A set Variable overrides this.
 
 A name is tagged once (Kevin 2026-10-13): a day with no newly graded name makes
-no model call, and a new name costs ~$0.064 (about 1 a week in Aug to Sep 2026).
+no model call, and a new name costs ~$0.084 (about 1 a week in Aug to Sep 2026).
 The cap is a safety stop sized for a full 40-name run (the one-time backfill).
 The same model asked again later would give the same facts, so there is no
 re-tag timer; a refresh after a model change is a manual run with --retag-after.
