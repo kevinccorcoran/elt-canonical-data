@@ -1781,6 +1781,56 @@ LEFT JOIN (SELECT DISTINCT ON (ticker) ticker, id
 WHERE e.entry_px > 0
 ORDER BY s.ticker, s.d;"
 
+# Sketch window (Kevin 2026-10-14: "a ruler I could drag, either way, and have the
+# viz re-rendered from the mark"). w = c(start, end) Dates, NA = that end left at
+# its edge. Re-anchors the sketch at the window's first trading day and trims it
+# at the end: SPY restarts at 0% there, and the graded/passed baskets are rebuilt
+# from the per-ticker detail with each name entering at its first bar on/after the
+# start, so they equal LC_QS_COMPARE_SQL run with __ANCHOR__ = start (equal weight
+# from that day, not the full window's drifted weights). qscmp_anchor moves to the
+# start, so the overlay, pins and name lines re-anchor there by their own rules.
+# NULL when the window holds under two trading days.
+lc_window_sketch <- function(d, w) {
+  cmp <- d$qscmp; dd <- as.Date(cmp$d)
+  ws <- if (is.na(w[1])) min(dd, na.rm = TRUE) else w[1]
+  we <- if (is.na(w[2])) max(dd, na.rm = TRUE) else w[2]
+  cmp <- cmp[!is.na(dd) & dd >= ws & dd <= we, , drop = FALSE]
+  if (nrow(cmp) < 2) return(NULL)
+  ws <- min(as.Date(cmp$d))                       # snap to the first trading day
+  rb <- function(x) {                             # % series, restarted at its first value
+    b <- x[!is.na(x)][1]
+    if (is.na(b)) x else round(((1 + x / 100) / (1 + b / 100) - 1) * 100, 2)
+  }
+  cmp$spy_pct <- rb(cmp$spy_pct)
+  det <- d$qscmp_detail
+  if (!is.null(det) && nrow(det)) {
+    ddt <- as.Date(det$d)
+    det <- det[!is.na(ddt) & ddt >= ws & ddt <= we, , drop = FALSE]
+    det <- det[order(det$ticker, det$d), , drop = FALSE]
+    if (nrow(det)) {                              # each name from its first in-window bar
+      base <- ave(det$ret, det$ticker, FUN = function(x) x[!is.na(x)][1])
+      det$ret <- (1 + det$ret) / (1 + base) - 1
+    }
+    key <- as.character(cmp$d)
+    avg <- function(sub) if (!nrow(sub)) rep(NA_real_, length(key)) else
+      round(as.numeric(tapply(sub$ret, sub$d, function(x) mean(x, na.rm = TRUE) * 100)[key]), 2)
+    cmp$graded_pct <- avg(det)
+    cmp$passed_pct <- avg(det[det$passed %in% TRUE, , drop = FALSE])
+  } else {                                        # no detail loaded: restart the lines as drawn
+    cmp$graded_pct <- rb(cmp$graded_pct)
+    cmp$passed_pct <- rb(cmp$passed_pct)
+  }
+  d$qscmp <- cmp; d$qscmp_detail <- det; d$qscmp_anchor <- ws
+  d$qscmp_to <- if (is.na(w[2])) NULL else we
+  d
+}
+
+# rows of df dated on/before we (the sketch window's end); NULL we = unchanged
+lc_win_cut <- function(df, we, col = "d") {
+  if (is.null(we) || is.null(df) || !nrow(df)) return(df)
+  df[as.Date(df[[col]]) <= we, , drop = FALSE]
+}
+
 # Personal DCA portfolio value + return vs a SAME-CASH-FLOW SPY benchmark.
 # __BUYS__ is a VALUES list of (ticker, buy_date, dollars) expanded in R from the
 # saved positions. Each buy fills at the first adj_close on/after its date; the
@@ -2982,6 +3032,8 @@ ui <- navbarPage(
         # windows vs SPY) sits directly above the sketch it summarizes.
         uiOutput("lcTrackStripLC"),
         # Benchmark comparison (+ click a board chip to overlay that ticker here).
+        # The window slider above it re-anchors the sketch (lc_window_sketch).
+        uiOutput("lcSketchWinUI"),
         plotlyOutput("qsCompareLC", height = "760px"),
         uiOutput("qsCompareNoteLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1rem;"),
@@ -8860,6 +8912,53 @@ server <- function(input, output, session) {
   # Holdings chart. SPY (same cash) benchmark is ALWAYS drawn. Which holdings
   # show = the by-id filter above (all on by default) intersected with any
   # checked rows (check rows to isolate). Each line starts at 0% on its first buy.
+  # ---- Sketch window slider (Kevin 2026-10-14) --------------------------------
+  # Two-handle date slider above the sketch: drag either end and the sketch runs
+  # from the left handle, every line at 0% there (lc_window_sketch), to the right
+  # one. Both handles at the ends = today's full 120-day chart, untouched
+  # (lc_sketch_data() is then app_dataLC() itself). An end left at its edge is
+  # kept as NA, so it follows the rolling range when the data reloads.
+  lc_sketch_win    <- reactiveVal(NULL)
+  lc_sketch_bounds <- reactiveVal(NULL)
+  observe({
+    d  <- app_dataLC()
+    dd <- if (!is.null(d) && !is.null(d$qscmp) && nrow(d$qscmp)) as.Date(d$qscmp$d) else NULL
+    b  <- if (length(dd) && any(!is.na(dd))) range(dd, na.rm = TRUE) else NULL
+    if (!identical(b, isolate(lc_sketch_bounds()))) lc_sketch_bounds(b)
+  })
+  observeEvent(input$lcSketchWin, {
+    b <- lc_sketch_bounds(); w <- suppressWarnings(as.Date(input$lcSketchWin))
+    if (is.null(b) || length(w) != 2 || anyNA(w)) return()
+    v <- c(if (w[1] <= b[1]) as.Date(NA) else w[1], if (w[2] >= b[2]) as.Date(NA) else w[2])
+    lc_sketch_win(if (all(is.na(v))) NULL else v)
+  })
+  observeEvent(input$lcSketchWinReset, {
+    lc_sketch_win(NULL)
+    b <- lc_sketch_bounds()
+    if (!is.null(b)) updateSliderInput(session, "lcSketchWin", value = b)
+  })
+  output$lcSketchWinUI <- renderUI({
+    b <- lc_sketch_bounds(); req(b)
+    w <- isolate(lc_sketch_win())
+    val <- if (is.null(w)) b else c(if (is.na(w[1])) b[1] else max(w[1], b[1]),
+                                    if (is.na(w[2])) b[2] else min(w[2], b[2]))
+    # side margins match the sketch's plot area (layout margin l = 60, r = 120)
+    div(style = "margin:0.4rem 120px 0 60px;",
+      sliderInput("lcSketchWin", NULL, min = b[1], max = b[2], value = val, step = 1,
+                  timeFormat = "%b %d", ticks = FALSE, width = "100%"),
+      div(style = "color:#64748b; font-size:0.7rem; margin-top:-0.7rem;",
+        "Drag either end of the window. Every line restarts at 0% on the start date. ",
+        actionLink("lcSketchWinReset", "Full 120 days", style = "color:#94a3b8;")))
+  })
+  # what the sketch and its lines/pins read: app_dataLC() re-anchored to the window
+  lc_sketch_data <- reactive({
+    d <- app_dataLC(); w <- lc_sketch_win()
+    if (is.null(d) || is.null(w) || is.null(d$qscmp) || !nrow(d$qscmp)) return(d)
+    out <- lc_window_sketch(d, w)
+    if (is.null(out)) { d$qscmp_short <- TRUE; return(d) }
+    out
+  })
+
   # ---- Ticker overlay for the benchmark chart (click a board chip) -----------
   # Builds the clicked ticker's own return line - rebased to 0% at the SAME
   # anchor as the benchmark basket lines - plus its lifecycle events
@@ -8871,7 +8970,7 @@ server <- function(input, output, session) {
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     if (is.null(dv) || is.null(dv$M)) return(NULL)
-    d <- app_dataLC()
+    d <- lc_sketch_data()
     anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(anchor)) return(NULL)
     now_state <- if (!is.null(dv$state_now) && tk %in% names(dv$state_now))
@@ -9009,7 +9108,7 @@ server <- function(input, output, session) {
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     if (is.null(dv) || is.null(dv$M)) return(NULL)
-    d <- app_dataLC()
+    d <- lc_sketch_data()
     anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(anchor)) return(NULL)
     # Same name set as the master list: every name graded >= QS_MIN, plus every
@@ -9179,7 +9278,7 @@ server <- function(input, output, session) {
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     if (is.null(dv) || is.null(dv$M)) return(NULL)
-    d <- app_dataLC()
+    d <- lc_sketch_data()
     anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(anchor)) return(NULL)
     if (!is.null(nc_set)) {
@@ -9262,7 +9361,7 @@ server <- function(input, output, session) {
     tks <- tks[lc_in_sel(tks)]
     if (!length(tks)) return(NULL)
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
-    d <- app_dataLC()
+    d <- lc_sketch_data()
     anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(anchor)) return(NULL)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)   # for the buy/hold/sell pins
@@ -9333,7 +9432,7 @@ server <- function(input, output, session) {
   # still renders without pins.
   lc_top_perf <- reactive({
     if (!isTRUE(input$lcTopPerf)) return(NULL)
-    d   <- tryCatch(app_dataLC(), error = function(e) NULL)
+    d   <- tryCatch(lc_sketch_data(), error = function(e) NULL)
     det <- if (!is.null(d)) d$qscmp_detail else NULL
     cmp <- if (!is.null(d)) d$qscmp else NULL
     if (is.null(det) || !nrow(det) || is.null(cmp) || !nrow(cmp)) return(NULL)
@@ -10849,8 +10948,10 @@ server <- function(input, output, session) {
   # qualstream graded vs the >= 68 (orange +) subset vs SPY, over the current
   # 4-month window. Descriptive only: see the caption + LC_QS_COMPARE_SQL.
   output$qsCompareLC <- renderPlotly({
-    req(app_dataLC())
-    d <- app_dataLC(); cmp <- d$qscmp
+    req(lc_sketch_data())
+    d <- lc_sketch_data(); cmp <- d$qscmp
+    if (isTRUE(d$qscmp_short))
+      return(empty_plot("The window holds under two trading days. Drag the handles further apart."))
     # (The Jan/May/Sep checkpoint-rollover empty state is gone with the rolling
     # 120d anchor - an empty chart now genuinely means no graded names in range.)
     if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
@@ -10952,6 +11053,7 @@ server <- function(input, output, session) {
     # buys by realized return, any qs. Dashed + labelled "hindsight" because it
     # is outcome-selected and not achievable ex ante. Buy pins ride the line.
     tp <- tryCatch(lc_top_perf(), error = function(e) NULL)
+    if (!is.null(tp)) tp$pins <- lc_win_cut(tp$pins, d$qscmp_to, "date")
     tp_suffix <- ""
     if (!is.null(tp) && !is.null(tp$line) && nrow(tp$line)) {
       fig <- add_trace(fig, x = tp$line$d, y = tp$line$ret, type = "scatter", mode = "lines",
@@ -10989,6 +11091,10 @@ server <- function(input, output, session) {
     # the whole bundle. A clicked chip's overlay draws brighter (below) on top so
     # the focused name stands out of the pack.
     pl <- tryCatch(lc_pick_lines(), error = function(e) NULL)
+    if (!is.null(pl) && length(pl$lines) && !is.null(d$qscmp_to)) {
+      pl$lines <- lapply(pl$lines, lc_win_cut, we = d$qscmp_to)
+      pl$lines <- pl$lines[vapply(pl$lines, nrow, integer(1)) > 0]
+    }
     pl_suffix <- ""
     if (!is.null(pl) && length(pl$lines) && identical(pl$mode, "nc")) {
       # market-creators view: every marked name as its own violet line with a
@@ -11051,6 +11157,9 @@ server <- function(input, output, session) {
     # names head-to-head against SPY / the baskets. Lines only (no pins); a clicked
     # chip's white overlay still rides brightest on top.
     ckl <- tryCatch(lc_checked_lines(), error = function(e) NULL)
+    if (!is.null(ckl) && !is.null(d$qscmp_to))
+      ckl <- lapply(ckl, function(x) { x$line <- lc_win_cut(x$line, d$qscmp_to)
+                                       x$ev <- lc_win_cut(x$ev, d$qscmp_to, "date"); x })
     ck_suffix <- ""
     if (!is.null(ckl) && length(ckl)) {
       # all checked lines draw white with a small white end-label (Kevin
@@ -11100,6 +11209,10 @@ server <- function(input, output, session) {
     # flag-pin at each lifecycle event, colored by state, labelled "<TK> BUY"
     # etc. with the growth-since-previous-pin (own %, and pp vs SPY) on hover.
     ov <- tryCatch(lc_overlay(), error = function(e) NULL)
+    if (!is.null(ov) && !is.null(d$qscmp_to)) {
+      ov$line <- lc_win_cut(ov$line, d$qscmp_to)
+      ov$ev   <- lc_win_cut(ov$ev, d$qscmp_to, "date")
+    }
     ann <- list(); ov_suffix <- ""; ap_yrange <- NULL
     if (!is.null(ov) && !is.null(ov$line) && nrow(ov$line)) {
       col_of <- c(buy = "#34d399", hold = "#fbbf24", sell = "#f87171",
@@ -11196,6 +11309,7 @@ server <- function(input, output, session) {
     # y-range then grows only as much as the tallest real stack needs.
     ap_suffix <- ""
     ap <- tryCatch(lc_all_pins(), error = function(e) NULL)
+    ap <- lc_win_cut(ap, d$qscmp_to, "date")
     if (!is.null(ap) && nrow(ap)) {
       apcol <- c(buy = "#34d399", hold = "#fbbf24", sell = "#f87171")
       apsym <- c(buy = "triangle-up", hold = "circle", sell = "triangle-down")
@@ -11364,8 +11478,9 @@ server <- function(input, output, session) {
     if (!is.null(ap_yrange)) yax$range <- ap_yrange
     dark_layout(fig,
       title = list(text = paste0(sprintf(
-          "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s",
-          format(d$qscmp_anchor, "%b %d")), cl_suffix,
+          "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s%s",
+          format(d$qscmp_anchor, "%b %d"),
+          if (is.null(d$qscmp_to)) "" else format(d$qscmp_to, " to %b %d")), cl_suffix,
           ov_suffix, ap_suffix, tp_suffix, pl_suffix),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
