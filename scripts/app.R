@@ -1789,7 +1789,7 @@ ORDER BY s.ticker, s.d;"
 # start, so they equal LC_QS_COMPARE_SQL run with __ANCHOR__ = start (equal weight
 # from that day, not the full window's drifted weights). qscmp_anchor moves to the
 # start, so the overlay, pins and name lines re-anchor there by their own rules.
-# NULL when the window holds under two trading days.
+# NULL when the window holds under two days of rows.
 lc_window_sketch <- function(d, w) {
   cmp <- d$qscmp; dd <- as.Date(cmp$d)
   ws <- if (is.na(w[1])) min(dd, na.rm = TRUE) else w[1]
@@ -1830,6 +1830,58 @@ lc_win_cut <- function(df, we, col = "d") {
   if (is.null(we) || is.null(df) || !nrow(df)) return(df)
   df[as.Date(df[[col]]) <= we, , drop = FALSE]
 }
+
+# Navigator behind the window slider (Kevin 2026-10-14 "improve slider"): the
+# full 120 days of the sketch's SPY / graded / passed lines as a mini chart, with
+# faint month lines and labels. s = data.frame(d, spy, graded, passed) in %, b =
+# the slider's c(min, max) Dates. It spans the slider's value range exactly: the
+# container sits half a handle in from each side, where ion.rangeSlider puts the
+# handle centres for min and max.
+lc_nav_svg <- function(s, b) {
+  span <- as.numeric(b[2] - b[1]); if (!is.finite(span) || span <= 0) return("")
+  v <- c(s$spy, s$graded, s$passed); v <- v[is.finite(v)]
+  lo <- min(c(v, 0)); hi <- max(c(v, 0)); pad <- max(hi - lo, 1) * 0.1
+  lo <- lo - pad; hi <- hi + pad
+  X <- function(dd) as.numeric(as.Date(dd) - b[1]) / span * 1000
+  Y <- function(y) (hi - y) / (hi - lo) * 100
+  line <- function(y, col, w) {
+    ok <- is.finite(y); if (sum(ok) < 2) return("")
+    sprintf('<polyline fill="none" stroke="%s" stroke-width="%s" stroke-opacity="0.85" vector-effect="non-scaling-stroke" points="%s"/>',
+            col, w, paste(sprintf("%.1f,%.2f", X(s$d[ok]), Y(y[ok])), collapse = " "))
+  }
+  m <- seq(as.Date(format(b[1], "%Y-%m-01")), b[2], by = "month"); m <- m[m > b[1]]
+  grid <- paste(sprintf('<line x1="%1$.1f" x2="%1$.1f" y1="0" y2="100" stroke="#1e293b" stroke-width="1" vector-effect="non-scaling-stroke"/>',
+                        X(m)), collapse = "")
+  zero <- sprintf('<line x1="0" x2="1000" y1="%1$.2f" y2="%1$.2f" stroke="#334155" stroke-width="1" vector-effect="non-scaling-stroke"/>', Y(0))
+  labs <- paste(sprintf('<span style="position:absolute; bottom:1px; left:calc(%.2f%% + 3px); font-size:9px; color:#475569;">%s</span>',
+                        X(m) / 10, format(m, "%b")), collapse = "")
+  paste0('<svg viewBox="0 0 1000 100" preserveAspectRatio="none" width="100%" height="100%" style="display:block">',
+         grid, zero, line(s$spy, "#3b82f6", 1.3), line(s$graded, "#f59e0b", 1.3),
+         line(s$passed, "#10b981", 1.6), "</svg>", labs)
+}
+
+# ion.rangeSlider "shiny" skin restyled as a dark navigator: a 52px band over the
+# mini chart, the window lit, I-beam edges. Handle width 10px matches the 5px
+# inset of the mini chart (see lc_nav_svg).
+LC_NAV_CSS <- "
+#lcSketchNav .irs--shiny { height: 80px; z-index: 1; }
+#lcSketchNav .irs--shiny .irs-line { top: 22px; height: 52px; background: transparent;
+  border: 1px solid #334155; border-radius: 4px; }
+#lcSketchNav .irs--shiny .irs-line::before { height: 52px; top: 0; cursor: pointer; }
+#lcSketchNav .irs--shiny .irs-bar { top: 22px; height: 52px; background: rgba(96,165,250,0.13);
+  border-top: 1px solid #60a5fa; border-bottom: 1px solid #60a5fa; cursor: grab; }
+#lcSketchNav .irs--shiny .irs-bar::before { height: 52px; top: 0; }
+#lcSketchNav .irs--shiny .irs-handle { top: 18px; width: 10px; height: 60px; border-radius: 3px;
+  border: 1px solid #0b1220; box-shadow: 0 0 0 1px #60a5fa; cursor: ew-resize;
+  background: linear-gradient(to right, #e2e8f0 0 35%, #64748b 35% 65%, #e2e8f0 65% 100%); }
+#lcSketchNav .irs--shiny .irs-handle.state_hover, #lcSketchNav .irs--shiny .irs-handle:hover {
+  background: linear-gradient(to right, #fff 0 35%, #94a3b8 35% 65%, #fff 65% 100%); }
+#lcSketchNav .irs--shiny .irs-from, #lcSketchNav .irs--shiny .irs-to, #lcSketchNav .irs--shiny .irs-single {
+  background: #0b1220; color: #e2e8f0; border: 1px solid #60a5fa; font-size: 11px; }
+#lcSketchNav .irs--shiny .irs-min, #lcSketchNav .irs--shiny .irs-max { background: transparent;
+  color: #64748b; font-size: 10px; }
+#lcSketchNav .form-group { margin-bottom: 0.6rem; }
+"
 
 # Personal DCA portfolio value + return vs a SAME-CASH-FLOW SPY benchmark.
 # __BUYS__ is a VALUES list of (ticker, buy_date, dollars) expanded in R from the
@@ -8932,23 +8984,76 @@ server <- function(input, output, session) {
     v <- c(if (w[1] <= b[1]) as.Date(NA) else w[1], if (w[2] >= b[2]) as.Date(NA) else w[2])
     lc_sketch_win(if (all(is.na(v))) NULL else v)
   })
-  observeEvent(input$lcSketchWinReset, {
-    lc_sketch_win(NULL)
-    b <- lc_sketch_bounds()
-    if (!is.null(b)) updateSliderInput(session, "lcSketchWin", value = b)
+  # one-click windows ending on the last day: 1, 2 or 3 months back, or all 120 days
+  lc_sketch_preset <- function(months) {
+    b <- lc_sketch_bounds(); if (is.null(b)) return()
+    if (is.na(months)) { lc_sketch_win(NULL); start <- b[1] }
+    else start <- max(b[1], seq(b[2], by = sprintf("-%d month", months), length.out = 2)[2])
+    # timeFormat again: without it Shiny resets a date slider's labels to ISO dates
+    updateSliderInput(session, "lcSketchWin", value = c(start, b[2]), timeFormat = "%b %d")
+  }
+  observeEvent(input$lcSketchWin1M, lc_sketch_preset(1L))
+  observeEvent(input$lcSketchWin2M, lc_sketch_preset(2L))
+  observeEvent(input$lcSketchWin3M, lc_sketch_preset(3L))
+  observeEvent(input$lcSketchWinReset, lc_sketch_preset(NA))
+  # the navigator's mini lines: SPY / graded / passed over the full 120 days for
+  # the current view, narrowed the way output$qsCompareLC narrows them (the
+  # disruptor/enabler view, else a strict subset of the cluster boxes); never windowed
+  lc_nav_series <- reactive({
+    d <- app_dataLC(); if (is.null(d) || is.null(d$qscmp) || !nrow(d$qscmp)) return(NULL)
+    cmp <- d$qscmp; det <- d$qscmp_detail
+    nc_set  <- lc_nc_only()
+    sel_raw <- lc_ids_effective(); sel_ids <- suppressWarnings(as.integer(sel_raw))
+    avail_id <- tryCatch(lc_board_filter_ids(), error = function(e) integer(0))
+    dsel <- if (is.null(det) || !nrow(det)) NULL
+            else if (!is.null(nc_set)) det[toupper(det$ticker) %in% nc_set, , drop = FALSE]
+            else if (!is.null(sel_raw) && length(sel_ids) > 0 && !setequal(sel_ids, avail_id))
+              det[!is.na(det$id) & det$id %in% sel_ids, , drop = FALSE]
+            else NULL
+    if (!is.null(dsel)) {
+      key <- as.character(cmp$d)
+      avg <- function(sub) if (!nrow(sub)) rep(NA_real_, length(key)) else
+        as.numeric(tapply(sub$ret, sub$d, function(x) mean(x, na.rm = TRUE) * 100)[key])
+      cmp$graded_pct <- avg(dsel)
+      cmp$passed_pct <- avg(dsel[dsel$passed %in% TRUE, , drop = FALSE])
+    }
+    data.frame(d = as.Date(cmp$d), spy = cmp$spy_pct, graded = cmp$graded_pct,
+               passed = cmp$passed_pct)
+  })
+  output$lcSketchNavBg <- renderUI({
+    b <- lc_sketch_bounds(); s <- lc_nav_series(); req(b, s)
+    HTML(lc_nav_svg(s, b))
+  })
+  output$lcSketchWinInfo <- renderUI({
+    b <- lc_sketch_bounds(); req(b)
+    if (is.null(lc_sketch_win()))
+      return(span(sprintf("All 120 days, %s to %s. Drag an edge, or drag the lit window to slide it.",
+                          format(b[1], "%b %d"), format(b[2], "%b %d"))))
+    sd <- lc_sketch_data()
+    if (isTRUE(sd$qscmp_short)) return(span(style = "color:#fb923c;", "The window is under two days long."))
+    end <- max(as.Date(sd$qscmp$d))
+    span(sprintf("%s to %s (%d days). Every line restarts at 0%% on %s.",
+                 format(sd$qscmp_anchor, "%b %d"), format(end, "%b %d"),
+                 as.integer(end - sd$qscmp_anchor), format(sd$qscmp_anchor, "%b %d")))
   })
   output$lcSketchWinUI <- renderUI({
     b <- lc_sketch_bounds(); req(b)
     w <- isolate(lc_sketch_win())
     val <- if (is.null(w)) b else c(if (is.na(w[1])) b[1] else max(w[1], b[1]),
                                     if (is.na(w[2])) b[2] else min(w[2], b[2]))
+    lnk <- function(id, lab) actionLink(id, lab, style = "color:#94a3b8; margin-left:0.6rem;")
     # side margins match the sketch's plot area (layout margin l = 60, r = 120)
-    div(style = "margin:0.4rem 120px 0 60px;",
-      sliderInput("lcSketchWin", NULL, min = b[1], max = b[2], value = val, step = 1,
-                  timeFormat = "%b %d", ticks = FALSE, width = "100%"),
-      div(style = "color:#64748b; font-size:0.7rem; margin-top:-0.7rem;",
-        "Drag either end of the window. Every line restarts at 0% on the start date. ",
-        actionLink("lcSketchWinReset", "Full 120 days", style = "color:#94a3b8;")))
+    tagList(tags$style(HTML(LC_NAV_CSS)),
+      div(id = "lcSketchNav", style = "position:relative; margin:0.5rem 120px 0 60px;",
+        uiOutput("lcSketchNavBg", style = paste("position:absolute; top:23px; left:5px; right:5px;",
+                                                "height:50px; z-index:0; pointer-events:none;")),
+        sliderInput("lcSketchWin", NULL, min = b[1], max = b[2], value = val, step = 1,
+                    timeFormat = "%b %d", ticks = FALSE, width = "100%"),
+        div(style = paste("display:flex; justify-content:space-between; gap:1rem;",
+                          "color:#94a3b8; font-size:0.74rem; margin-top:-0.3rem;"),
+          uiOutput("lcSketchWinInfo", inline = TRUE),
+          span(style = "white-space:nowrap;", lnk("lcSketchWin1M", "1M"), lnk("lcSketchWin2M", "2M"),
+               lnk("lcSketchWin3M", "3M"), lnk("lcSketchWinReset", "All")))))
   })
   # what the sketch and its lines/pins read: app_dataLC() re-anchored to the window
   lc_sketch_data <- reactive({
@@ -10951,7 +11056,7 @@ server <- function(input, output, session) {
     req(lc_sketch_data())
     d <- lc_sketch_data(); cmp <- d$qscmp
     if (isTRUE(d$qscmp_short))
-      return(empty_plot("The window holds under two trading days. Drag the handles further apart."))
+      return(empty_plot("The window is under two days long. Drag the handles further apart."))
     # (The Jan/May/Sep checkpoint-rollover empty state is gone with the rolling
     # 120d anchor - an empty chart now genuinely means no graded names in range.)
     if (is.null(cmp) || nrow(cmp) == 0 || all(is.na(cmp$graded_pct)))
