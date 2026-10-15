@@ -10275,6 +10275,44 @@ server <- function(input, output, session) {
     } else character(0)
     unique(c(names(g)[!is.na(g) & g >= QS_MIN], owned))
   })
+  # Master-list window return (Kevin 2026-10-15: "sort table high to low, based on
+  # the current graph extent, take into consideration the slide range"). One price
+  # pull per data load for every master-list name from the full sketch anchor; the
+  # return over the slider window is then computed in R on every drag. Same
+  # arithmetic as lc_price_lines + lc_win_cut, so a name's number equals the end of
+  # its line on the sketch: base = first close on/after the window start, end =
+  # last close on/before the window end (SPY's last date when the window is open).
+  lc_ml_px <- reactive({
+    d <- app_dataLC()
+    if (is.null(d) || is.null(d$qscmp_anchor)) return(NULL)
+    if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
+    tks <- lc_ml_names(); if (!length(tks)) return(NULL)
+    con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
+    on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
+    inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
+    px <- tryCatch(dbGetQuery(con, sprintf(
+      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
+       WHERE ticker IN (%s) AND date >= '%s'
+         AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
+       ORDER BY ticker, date", inlist, format(as.Date(d$qscmp_anchor)))),
+      error = function(e) NULL)
+    if (is.null(px) || !nrow(px)) return(NULL)
+    px$ticker <- toupper(px$ticker); px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
+    px[!is.na(px$px) & px$px > 0, , drop = FALSE]
+  })
+  lc_ml_winret <- reactive({
+    none <- setNames(numeric(0), character(0))
+    px <- lc_ml_px(); if (is.null(px) || !nrow(px)) return(none)
+    d  <- lc_sketch_data()
+    ws <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else min(px$d)
+    we <- if (!is.null(d) && !is.null(d$qscmp_to)) as.Date(d$qscmp_to) else max(px$d)
+    w  <- px[px$d >= ws & px$d <= we, , drop = FALSE]
+    if (!nrow(w)) return(none)
+    w  <- w[order(w$ticker, w$d), , drop = FALSE]
+    b  <- w[!duplicated(w$ticker), , drop = FALSE]
+    e  <- w[!duplicated(w$ticker, fromLast = TRUE), , drop = FALSE]
+    setNames((e$px[match(b$ticker, e$ticker)] / b$px - 1) * 100, b$ticker)
+  })
   # Why a marked name is not on the master list (chart hover, note under the
   # table): vetoed, graded under QS_MIN, or no grade inside QS_MAX_AGE_DAYS.
   lc_offlist_why <- function(tks) {
@@ -10788,6 +10826,8 @@ server <- function(input, output, session) {
            bin = r$rank_bin, win = r$bin_win_pct, eid = r$eid)
     }
     st <- lc_state_for_display(dv, d, pp)
+    # move over the sketch window (slider) = the end of the name's line on the sketch
+    wr <- tryCatch(lc_ml_winret(), error = function(e) setNames(numeric(0), character(0)))
     recs <- lapply(cand, function(tk) {
       tku <- toupper(tk)
       cells <- setNames(lapply(HZS, function(fl) cell_for(tku, fl)), as.character(HZS))
@@ -10813,12 +10853,18 @@ server <- function(input, output, session) {
       left_mo <- if (owned && !is.na(add_d)) hold_mo - as.numeric(Sys.Date() - add_d) / 30.44 else NA_real_
       list(tk = tku, grade = gr, eid = eid, lid = unname(live[tku]), cells = cells, best = best,
            state = state, ntop = ntop, win7 = if (is.na(win7)) -1 else win7,
-           owned = owned, n_ent = n_ent, add_d = add_d, left_mo = left_mo)
+           owned = owned, n_ent = n_ent, add_d = add_d, left_mo = left_mo,
+           wret = if (tku %in% names(wr)) unname(wr[[tku]]) else NA_real_)
     })
+    # inside each buy/hold/sell group: window return high to low (the order of the
+    # line ends on the sketch, Kevin 2026-10-15), unpriced names last; owned rows
+    # keep their tint but no longer float (that would break the high-to-low order)
     sord <- c(buy = 0, hold = 1, sell = 2, closed = 3)
+    wret_v <- vapply(recs, function(r) as.numeric(r$wret), numeric(1))
     ord  <- order(vapply(recs, function(r) {
                     v <- sord[r$state]; if (length(v) != 1 || is.na(v)) 4 else v }, numeric(1)),
-                  -vapply(recs, function(r) as.numeric(isTRUE(r$owned)), numeric(1)),
+                  is.na(wret_v),
+                  -ifelse(is.na(wret_v), 0, wret_v),
                   -vapply(recs, `[[`, numeric(1), "ntop"),
                   -vapply(recs, `[[`, numeric(1), "win7"))
     recs <- recs[ord]
@@ -10855,6 +10901,12 @@ server <- function(input, output, session) {
       tags$td(style = "text-align:center;color:#cbd5e1;white-space:nowrap;font-size:0.72rem;",
               sprintf("%d× · %s%s", r$n_ent, add, lft))
     }
+    # Return cell: the name's move over the sketch window, the sort key above
+    ret_td <- function(x) if (is.na(x))
+      tags$td(style = "text-align:right;color:#334155;padding:2px 8px;", "—")
+      else tags$td(style = sprintf("text-align:right;padding:2px 8px;font-weight:600;color:%s;white-space:nowrap;",
+                                   if (x >= 0) "#34d399" else "#f87171"),
+                   sprintf("%+.1f%%", x))
     # persisted checked set (isolate: ticking a box must not re-render the whole
     # table - only the sketch reacts, via lc_sketch_ticks / lc_checked_lines)
     chk_ticks <- toupper(isolate(lc_sketch_ticks()))
@@ -10879,6 +10931,7 @@ server <- function(input, output, session) {
                             collapse = "; "),
                           style = "color:#c084fc;margin-left:4px;font-size:0.82rem;cursor:help;")
               }),
+      ret_td(r$wret),
       state_td(r$state),
       hold_td(r),
       best_td(r$best),
@@ -10892,13 +10945,13 @@ server <- function(input, output, session) {
     )
     # Group the ONE table by buy / hold / sell with a full-width section header, so
     # the board's kanban and the horizon table are the same surface: buy/hold/sell
-    # is the grouping, and every holding period (4/7/12mo) stays on each row. Owned
-    # names are tinted and float to the top of their group.
+    # is the grouping, and every holding period (4/7/12mo) stays on each row. Rows
+    # sort by the sketch-window return inside their group; owned names are tinted.
     scol_hdr <- c(buy = "#10b981", hold = "#eab308", sell = "#dc2626", other = "#64748b")
     slab_hdr <- c(buy = "BUY", hold = "HOLD", sell = "SELL", other = "UNRANKED")
     skey <- function(r) if (is.na(r$state)) "other" else r$state
     scount <- table(vapply(recs, skey, character(1)))
-    grp_hdr <- function(s) tags$tr(tags$td(colspan = 10, style = sprintf(paste0(
+    grp_hdr <- function(s) tags$tr(tags$td(colspan = 11, style = sprintf(paste0(
       "padding:9px 8px 3px;color:%s;font-weight:800;font-size:0.76rem;",
       "text-transform:uppercase;letter-spacing:0.05em;border-bottom:2px solid %s55;"),
       scol_hdr[[s]], scol_hdr[[s]]),
@@ -10915,7 +10968,7 @@ server <- function(input, output, session) {
       tags$div(style = "color:#f1f5f9;font-weight:700;font-size:0.95rem;margin:0.3rem 0 0.1rem;",
                "Master list — every best bet, all horizons"),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
-        HTML("One table, grouped by BUY / HOLD / SELL, every holding period on each row. Tick a row's box to draw that name's own line on the sketch below. STATE = current buy/hold/sell (filter-independent) · HOLDING = your open entries (count&times; · latest add · time left on the hold), owned rows tinted green and floated to the top of their group · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. New adopts appear here automatically.")),
+        HTML("One table, grouped by BUY / HOLD / SELL, every holding period on each row. Tick a row's box to draw that name's own line on the sketch below. RETURN = the name's move over the sketch window (the slider), the same number its line ends on; rows sort on it, high to low, inside each group · STATE = current buy/hold/sell (filter-independent) · HOLDING = your open entries (count&times; · latest add · time left on the hold), owned rows tinted green · BEST = strongest hold length · &#10003; = top-slot buy at that horizon with its realized win% · b# = ranked but not top slot · &mdash; = not ranked. New adopts appear here automatically.")),
       if (!is.null(d$nc) && nrow(d$nc)) tags$div(
         style = "color:#64748b;font-size:0.72rem;margin:-0.2rem 0 0.4rem;",
         tags$span("\u25c6", style = "color:#c084fc;"),
@@ -10928,7 +10981,8 @@ server <- function(input, output, session) {
               "Hover a mark for the market and why.")),
       tags$div(style = "overflow-x:auto;",
         tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
-          tags$thead(tags$tr(th("Plot"), th("Ticker", "left"), th("State"), th("Holding"), th("Best"),
+          tags$thead(tags$tr(th("Plot"), th("Ticker", "left"), th("Return", "right"), th("State"),
+                             th("Holding"), th("Best"),
                              th("Cluster"), th("Grade"),
                              th("4 mo"), th("7 mo"), th("12 mo"))),
           tags$tbody(body))),
