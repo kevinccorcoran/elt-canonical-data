@@ -696,6 +696,31 @@ lc_pin_reason <- function(why) {
 # one-day jump. Kevin 2026-10-16: "very subtle smoothing".
 LC_LINE_SMOOTHING <- 0.5
 lc_line <- function(...) list(..., shape = "spline", smoothing = LC_LINE_SMOOTHING)
+
+# Bundle lines (one faint line per name that never carries pins: cluster grey
+# lines, qualstream pick lines, market-creator lines) also get a light centered
+# average over LC_BUNDLE_SMOOTH_K sessions so the bundle reads calmer; the spline
+# alone was invisible at full range (Kevin 2026-10-16). Averaged over trading
+# days only (weekend rows hold Monday's close). The first and last points stay
+# real, so each line still starts at 0% and ends at its real return (= the master
+# list Return), and hover shows the real value. Lines that carry pins (SPY, the
+# baskets, checked names, the chip overlay) stay exact.
+LC_BUNDLE_SMOOTH_K <- 3L
+lc_soft_line <- function(ln, k = LC_BUNDLE_SMOOTH_K) {
+  if (is.null(ln) || !nrow(ln)) return(ln)
+  wd <- as.integer(format(as.Date(ln$d), "%u"))
+  keep <- wd <= 5; keep[c(1, length(keep))] <- TRUE
+  ln <- ln[keep, , drop = FALSE]
+  ln$raw <- ln$ret
+  n <- nrow(ln)
+  if (n > k) {
+    s <- as.numeric(stats::filter(ln$ret, rep(1 / k, k), sides = 2))
+    s[is.na(s)] <- ln$ret[is.na(s)]
+    s[c(1, n)] <- ln$ret[c(1, n)]
+    ln$ret <- s
+  }
+  ln
+}
 lc_pin_debounce <- function(ev, run_d, last_d, min_days = PIN_DWELL_RUNDAYS,
                             every = FALSE, why_of = NULL) {
   if (is.null(ev) || !nrow(ev)) return(ev)
@@ -11163,7 +11188,7 @@ server <- function(input, output, session) {
       # glyph end label; names off the master list dashed (chart only)
       first_on <- TRUE; first_off <- TRUE
       for (nm in names(pl$lines)) {
-        ln <- pl$lines[[nm]]
+        ln <- lc_soft_line(pl$lines[[nm]])
         off <- nm %in% pl$offlist
         glyph <- lc_nc_glyph(unname(pl$marker[nm]), isTRUE(unname(pl$enabler[nm])))
         fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
@@ -11175,7 +11200,8 @@ server <- function(input, output, session) {
                          width = if (off) 1 else 1.4, dash = if (off) "dash" else "solid"),
           hovertext = if (off) sprintf("%s %s (%s, chart only)", glyph, nm, pl$why[[nm]])
                       else sprintf("%s %s", glyph, nm),
-          hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
+          customdata = ln$raw,
+          hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{customdata:.1f}%<extra></extra>"))
         if (off) first_off <- FALSE else first_on <- FALSE
         if (nrow(ln) > 0) {
           last_i <- nrow(ln)
@@ -11195,13 +11221,13 @@ server <- function(input, output, session) {
       pl_name <- if (pl_auto) sprintf("Cluster %d names (%d)", pl$cluster, pl$n)
                  else sprintf("Qualstream pick lines (%d)", pl$n)
       for (nm in names(pl$lines)) {
-        ln <- pl$lines[[nm]]
+        ln <- lc_soft_line(pl$lines[[nm]])
         fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
           name = pl_name,
           legendgroup = "picklines", showlegend = first,
           line = lc_line(color = pl_col, width = 1),
-          hovertext = nm,
-          hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
+          hovertext = nm, customdata = ln$raw,
+          hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{customdata:.1f}%<extra></extra>"))
         if (pl_auto && nrow(ln) > 0) {
           last_i <- nrow(ln)
           endlabels[[length(endlabels) + 1]] <- list(
