@@ -23,6 +23,16 @@ preflight() {
     1.6.[0-9]|1.[0-5].*)
       echo "[preflight] ERROR: stale httpuv (${ver%% *}) - known segfault ABI (crashes under reconnect churn). Rebuild the image: cd docker/airflow && docker compose build && docker compose up -d --no-deps airflow-shiny" ;;
   esac
+  # rstudio/httpuv#171: stock httpuv segfaults when a request is abandoned
+  # while R is busy (the Dockerfile builds it patched; a stock reinstall
+  # silently drops the fix).
+  local patched
+  patched=$(Rscript -e 'cat(!is.null(packageDescription("httpuv")[["Patched"]]))' 2>/dev/null)
+  if [ "$patched" = "TRUE" ]; then
+    echo "[preflight] httpuv patched for rstudio/httpuv#171"
+  else
+    echo "[preflight] ERROR: httpuv is NOT patched for rstudio/httpuv#171 - abandoned requests will segfault R. Rebuild the image: cd docker/airflow && docker compose build airflow-shiny && docker compose up -d --no-deps airflow-shiny"
+  fi
 }
 
 # Identify the running app.R R process: echoes "<pid> <cpu_ticks>" (utime+stime),
