@@ -688,6 +688,14 @@ lc_pin_reason <- function(why) {
   ifelse(grepl("unproven", w), "de-proved at re-mint, votes unchanged",
   ifelse(grepl("washed|flicker", w), "washed out, share below 0.50", ""))
 }
+
+# Lifecycle chart lines (sketch + portfolio chart) draw as a gentle spline through
+# the SAME daily points: display only, so every value, hover, pin and line end is
+# unchanged. Plotly smoothing runs 0 (straight segments) to 1.3; 0.5 only rounds
+# the corners between days, with at most a slight overshoot right after a big
+# one-day jump. Kevin 2026-10-16: "very subtle smoothing".
+LC_LINE_SMOOTHING <- 0.5
+lc_line <- function(...) list(..., shape = "spline", smoothing = LC_LINE_SMOOTHING)
 lc_pin_debounce <- function(ev, run_d, last_d, min_days = PIN_DWELL_RUNDAYS,
                             every = FALSE, why_of = NULL) {
   if (is.null(ev) || !nrow(ev)) return(ev)
@@ -9548,14 +9556,14 @@ server <- function(input, output, session) {
       fig <- add_trace(fig, x = sub$d, y = sub$ret_pct, type = "scatter",
         mode = if (nrow(sub) <= 1) "markers" else "lines+markers",
         name = tkr, legendgroup = tkr,
-        line = list(color = col, width = 1.8), marker = list(color = col, size = 6),
+        line = lc_line(color = col, width = 1.8), marker = list(color = col, size = 6),
         hovertemplate = paste0(tkr, "<br>%{x|%b %d %Y}: %{y:+.1f}%<extra></extra>"))
     }
     sp <- ser[ser$ticker == "__SPY__", , drop = FALSE]
     if (nrow(sp)) fig <- add_trace(fig, x = sp$d, y = sp$ret_pct, type = "scatter",
       mode = if (nrow(sp) <= 1) "markers" else "lines+markers",
       name = "SPY (same cash)", legendgroup = "SPY",
-      line = list(color = "#e2e8f0", width = 3, dash = "dash"),
+      line = lc_line(color = "#e2e8f0", width = 3, dash = "dash"),
       marker = list(color = "#e2e8f0", size = 7),
       hovertemplate = "SPY (same cash)<br>%{x|%b %d %Y}: %{y:+.1f}%<extra></extra>")
     # date x-axis; pad a single-day range so plotly does not fall back to
@@ -11090,17 +11098,17 @@ server <- function(input, output, session) {
       }
     }
     fig <- add_trace(fig, x = cmp$d, y = cmp$spy_pct, type = "scatter", mode = "lines",
-      name = "Benchmark (SPY)", line = list(color = "#3b82f6", width = 2.5),
+      name = "Benchmark (SPY)", line = lc_line(color = "#3b82f6", width = 2.5),
       hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     if (has_graded)
       fig <- add_trace(fig, x = cmp$d, y = cmp$graded_pct, type = "scatter", mode = "lines",
         name = sprintf("%s graded names (%d)", if (nc_view) paste0("\u25c6", NC_GEAR) else "All", n_g),
-        line = list(color = "#f59e0b", width = 3),
+        line = lc_line(color = "#f59e0b", width = 3),
         hovertemplate = "All graded names<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     if (has_pass) {
       fig <- add_trace(fig, x = cmp$d, y = cmp$passed_pct, type = "scatter", mode = "lines",
         name = sprintf("%sassed qualstream ≥ 68 (%d)", if (nc_view) paste0("\u25c6", NC_GEAR, " p") else "P", n_p),
-        line = list(color = "#10b981", width = 3),
+        line = lc_line(color = "#10b981", width = 3),
         hovertemplate = "Passed ≥68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
     }
     # Top-performers HINDSIGHT ceiling (opt-in, off by default): top decile of
@@ -11112,7 +11120,7 @@ server <- function(input, output, session) {
     if (!is.null(tp) && !is.null(tp$line) && nrow(tp$line)) {
       fig <- add_trace(fig, x = tp$line$d, y = tp$line$ret, type = "scatter", mode = "lines",
         name = sprintf("Top performers ≥ mean+1σ · hindsight, any qs (%d)", tp$n),
-        line = list(color = "#e879f9", width = 2.5, dash = "dash"),
+        line = lc_line(color = "#e879f9", width = 2.5, dash = "dash"),
         hovertemplate = "Top performers (hindsight)<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
       # buy pins ride the line, ticker-labelled: green = bought in-window,
       # grey square = held since before the window (carried in at the anchor).
@@ -11163,8 +11171,8 @@ server <- function(input, output, session) {
                  else sprintf("%s disruptors + enablers (%d)", paste0("\u25c6", NC_GEAR), pl$n - length(pl$offlist)),
           legendgroup = if (off) "nclines_off" else "nclines",
           showlegend = if (off) first_off else first_on,
-          line = list(color = if (off) "rgba(192,132,252,0.45)" else "rgba(192,132,252,0.75)",
-                      width = if (off) 1 else 1.4, dash = if (off) "dash" else "solid"),
+          line = lc_line(color = if (off) "rgba(192,132,252,0.45)" else "rgba(192,132,252,0.75)",
+                         width = if (off) 1 else 1.4, dash = if (off) "dash" else "solid"),
           hovertext = if (off) sprintf("%s %s (%s, chart only)", glyph, nm, pl$why[[nm]])
                       else sprintf("%s %s", glyph, nm),
           hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
@@ -11191,7 +11199,7 @@ server <- function(input, output, session) {
         fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
           name = pl_name,
           legendgroup = "picklines", showlegend = first,
-          line = list(color = pl_col, width = 1),
+          line = lc_line(color = pl_col, width = 1),
           hovertext = nm,
           hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
         if (pl_auto && nrow(ln) > 0) {
@@ -11225,7 +11233,7 @@ server <- function(input, output, session) {
         ln <- ckl[[nm]]$line; ev <- ckl[[nm]]$ev
         fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
           name = nm, legendgroup = paste0("ck_", nm), showlegend = TRUE,
-          line = list(color = "#f8fafc", width = 2),
+          line = lc_line(color = "#f8fafc", width = 2),
           hovertemplate = paste0(nm, "<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
         if (nrow(ln) > 0) {
           last_i <- nrow(ln)
@@ -11274,7 +11282,7 @@ server <- function(input, output, session) {
       lab_of <- c(buy = "BUY", hold = "HOLD", sell = "SELL",
                   qualstream = "QS+", current = "current", carried = "carried")
       fig <- add_trace(fig, x = ov$line$d, y = ov$line$ret, type = "scatter", mode = "lines",
-        name = ov$tk, line = list(color = "#f8fafc", width = 2.4),
+        name = ov$tk, line = lc_line(color = "#f8fafc", width = 2.4),
         hovertemplate = paste0(ov$tk, "<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
       ev <- ov$ev
       if (!is.null(ev) && nrow(ev)) {
