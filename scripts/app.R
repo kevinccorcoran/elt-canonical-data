@@ -700,24 +700,25 @@ lc_line <- function(...) list(..., shape = "spline", smoothing = LC_LINE_SMOOTHI
 # Bundle lines (one faint line per name that never carries pins: cluster grey
 # lines, qualstream pick lines, market-creator lines) also get a light centered
 # average over LC_BUNDLE_SMOOTH_K sessions so the bundle reads calmer; the spline
-# alone was invisible at full range (Kevin 2026-10-16). Averaged over trading
-# days only (weekend rows hold Monday's close). The first and last points stay
-# real, so each line still starts at 0% and ends at its real return (= the master
-# list Return), and hover shows the real value. Lines that carry pins (SPY, the
-# baskets, checked names, the chip overlay) stay exact.
-LC_BUNDLE_SMOOTH_K <- 3L
+# alone was invisible at full range (Kevin 2026-10-16: 3, then "slightly more"
+# -> 5). Averaged over trading days only (weekend rows hold Monday's close). The
+# window narrows toward both ends, so the first and last points stay real: each
+# line still starts at 0% and ends at its real return (= the master list Return),
+# without a kink next to the ends. Hover shows the real value. Lines that carry
+# pins (SPY, the baskets, checked names, the chip overlay) stay exact.
+LC_BUNDLE_SMOOTH_K <- 5L
 lc_soft_line <- function(ln, k = LC_BUNDLE_SMOOTH_K) {
   if (is.null(ln) || !nrow(ln)) return(ln)
   wd <- as.integer(format(as.Date(ln$d), "%u"))
   keep <- wd <= 5; keep[c(1, length(keep))] <- TRUE
   ln <- ln[keep, , drop = FALSE]
   ln$raw <- ln$ret
-  n <- nrow(ln)
-  if (n > k) {
-    s <- as.numeric(stats::filter(ln$ret, rep(1 / k, k), sides = 2))
-    s[is.na(s)] <- ln$ret[is.na(s)]
-    s[c(1, n)] <- ln$ret[c(1, n)]
-    ln$ret <- s
+  n <- nrow(ln); h <- (k - 1L) %/% 2L
+  if (n > 2 && h > 0 && !anyNA(ln$ret)) {
+    cs <- c(0, cumsum(ln$ret))
+    i <- seq_len(n); w <- pmin(h, i - 1L, n - i)   # half-window, 0 at both ends
+    ln$ret <- (cs[i + w + 1] - cs[i - w]) / (2 * w + 1)
+    ln$ret[c(1, n)] <- ln$raw[c(1, n)]             # exact, not cumsum-rounded
   }
   ln
 }
