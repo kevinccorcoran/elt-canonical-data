@@ -2,26 +2,26 @@
 
 ![Architecture Diagram](tools/alphastream_system_architecture.png?v=7)
 
-AlphaStream is an end-to-end data and machine-learning system. It ingests time-series data, cleans it into a canonical layer, then ranks groups with unsupervised clustering and statistical scoring, and proves every ranking against periods it never trained on. A separate LLM layer grades each selection against a weighted qualitative rubric. An interactive front end sits on top.
+AlphaStream is a data and machine-learning system. It ingests time-series data, cleans it into a canonical layer, ranks groups with unsupervised clustering and statistical scoring, and validates every ranking on periods outside the training data. A separate LLM layer grades each selection against a weighted qualitative rubric. An interactive front end sits on top.
 
 Over 2012–2024, its selections outperformed the benchmark by roughly 8 percentage points a year.
 
 ## Project status
 
-**Build phase: complete.** The end-to-end system is deployed and running in prod on a schedule: ingestion, canonical layer, clustering and scoring, walk-forward validation, the qualitative LLM grade, and the front end. The selection gate in the modeling layer was **frozen on 2026-08-13** as a pre-registered forward test, so results can be graded out-of-sample without re-tuning on the same history.
+**Build phase: complete.** The system runs in prod on a schedule: ingestion, canonical layer, clustering and scoring, walk-forward validation, the qualitative LLM grade, and the front end. The selection gate in the modeling layer was **frozen on 2026-08-13** as a pre-registered forward test, so results are graded out-of-sample without re-tuning on the same history.
 
-Work from here is **monitoring and optimization**, not new construction:
+Remaining work is monitoring and optimization:
 
-- **Monitor** — the pipeline runs unattended, with alerting on every DAG and two independent watchdogs that page when silence would otherwise be mistaken for health. See the [Operations Manual](docs/operations_manual.md).
-- **Do not re-tune before the checkpoints.** Any objective, sizing, or filter change resets the forward clock the freeze exists to measure. Optimization ideas are parked until the 6-/12-month checkpoints grade the frozen rules.
+- **Monitor** — the pipeline runs unattended. Every DAG alerts on failure, and two independent watchdogs alert when a scheduled run goes missing. See the [Operations Manual](docs/operations_manual.md).
+- **Do not re-tune before the checkpoints.** Changing the objective, sizing, or filters resets the forward clock. Optimization ideas wait until the 6- and 12-month checkpoints grade the frozen rules.
 
 ## Repositories
 
-AlphaStream is organized into three repositories:
+Three repositories:
 
-- **`elt-canonical-data`** (this repo, public) — the data layer. Ingestion, raw storage, cleaned canonical tables, and shared infrastructure and documentation.
-- **`inference-models`** (private) — the modeling layer: unsupervised clustering, statistical scoring, walk-forward validation, and serving tables that sit on top of the canonical tables.
-- **`qualstream`** (private, decoupled) — a standalone agent that grades each group member qualitatively with one Claude call per member, judged only from a point-in-time data block (no web search, so every grade is reproducible and backtestable), refreshed every 4 months.
+- **`elt-canonical-data`** (this repo, public) — the data layer: ingestion, raw storage, cleaned canonical tables, shared infrastructure and documentation.
+- **`inference-models`** (private) — the modeling layer: unsupervised clustering, statistical scoring, walk-forward validation, and serving tables on top of the canonical tables.
+- **`qualstream`** (private, decoupled) — a standalone agent that grades each group member with one Claude call, using only a point-in-time data block (no web search), so every grade is reproducible and backtestable. Refreshed every 4 months.
 
 ## Environments
 
@@ -32,23 +32,23 @@ AlphaStream is organized into three repositories:
 
 ![Pipeline](tools/pipeline_grouped.png?v=3)
 
-The end-to-end flow, grouped by stage, each box labeled with the database schema it lands in. The pipeline pulls data in, screens it for quality, and standardizes it into a canonical layer, then splits it into return features and clusters (unsupervised machine learning) that feed a statistical scoring stage, and validates it before it reaches the front end. A parallel qualitative stage (qualstream) grades each selection against a weighted rubric with a single LLM call and feeds the same front end. The diagram flags the machine-learning and LLM stages.
+The flow, grouped by stage; each box is labeled with the database schema it lands in. Data is pulled in, screened for quality, and standardized into the canonical layer. From there it splits into return features and clusters (unsupervised machine learning), feeds a statistical scoring stage, and is validated before reaching the front end. A parallel qualitative stage (qualstream) grades each selection with a single LLM call and feeds the same front end. The machine-learning and LLM stages are marked on the diagram.
 
 ## Data Lineage
 
 ### ELT — Canonical Data
 ![ELT Canonical Data Lineage](tools/elt_lineage_graph.jpg)
 
-From raw ingestion to the standardized, deduplicated tables that serve as the single source of truth for every downstream model.
+From raw ingestion to the standardized, deduplicated tables that every downstream model reads.
 
 ### ELT — Modeling & Scoring
 ![ELT Inference Lineage](tools/inference_lineage_graph.jpg?v=2)
 
-Unsupervised clustering, statistical scoring, and walk-forward validation tables that sit on top of the canonical layer.
+Unsupervised clustering, statistical scoring, and walk-forward validation tables on top of the canonical layer.
 
 ## Analytics Front End
 
-Ten linked views that walk the model end to end: check the data, find and rank the groups, confirm the ranking holds up, then see how past selections played out against the benchmark. Built with R, Shiny, Plotly, and PostgreSQL, in Docker.
+Ten views: data checks, group ranking, validation, and past selections against the benchmark. Built with R, Shiny, Plotly, and PostgreSQL, in Docker.
 
 ![The front end's ten views, grouped into four workflow stages](tools/dashboard_tab_map.png?v=2)
 
@@ -56,22 +56,22 @@ Ten linked views that walk the model end to end: check the data, find and rank t
 
 ![Transition Range](tools/alpha_forecast.jpg?v=2)
 
-Compares each group's past and future return distributions across lag horizons spanning up to 60 years.
+Compares each group's past and future return distributions across lag horizons up to 60 years.
 
 Supports:
 - Side-by-side comparison of past and future distributions across groups.
 - Filtering by group, time window, and environment.
-- Record counts per group to gauge reliability.
+- Record counts per group.
 
 ### Clusters
 
 ![Cluster scatter](tools/clusters_scatter.jpg)
 
-Groups items that behave alike into clusters and plots every member in a single view.
+Groups items that behave alike into clusters and plots every member in one view.
 
 Supports:
 - One point per member, placed by age and rate of change.
-- Color-coding by cluster to compare groups at a glance.
+- Color-coding by cluster.
 - Toggling clusters on or off and switching environments.
 
 ### Rank Stability
@@ -81,7 +81,7 @@ Supports:
 Small multiples of rank stability across 84 walk-forward cohorts, one heatmap per cluster id. Each cell combines two signals at a given vingtile (5% rank bin) and horizon: whether the median beat its benchmark and whether the forecast direction was correct.
 
 Supports:
-- Green means the model was right: the median beat the benchmark and the forecast direction was correct.
+- Green means both held: the median beat the benchmark and the forecast direction was correct.
 - Top-ranked ids (1-12) shade green when both hold; bottom-ranked ids (13-19) shade purple when the reverse held.
 - Filtering by environment, cluster, vingtile depth, metric, and cutoff range.
 
@@ -89,7 +89,7 @@ Supports:
 
 ![Predictions: per-selection realized excess vs benchmark](tools/dashboard_predictions.jpg?v=1)
 
-Replays every ranked selection as it stood at each walk-forward cutoff and shows how it actually performed against the benchmark.
+Replays every ranked selection as it stood at each walk-forward cutoff and shows how it performed against the benchmark.
 
 Supports:
 - One bar per selection, sized by its realized excess versus the benchmark over the hold window.
@@ -100,11 +100,11 @@ Supports:
 
 ![Forecast: selections vs benchmark vs walk-forward backtest](tools/dashboard_forecast.jpg?v=2)
 
-Stands at any past date and tracks the model's selections forward in real values against the benchmark, with the walk-forward backtest as the expected path.
+Starts at any past date and tracks the model's selections forward in real values against the benchmark, with the walk-forward backtest as the expected path.
 
 Supports:
 - Selected set versus benchmark versus per-cluster backtest over the chosen hold length.
-- A live out-of-sample log tracked on its own clock since the model went live.
+- A live out-of-sample log since the model went live.
 - Excess return, sensitivity, and a risk-adjusted ratio for the selected window.
 
 ### Lifecycle
@@ -116,7 +116,7 @@ Sorts every active selection into enter, hold, or exit by its place in the hold 
 Supports:
 - Enter, hold, and exit columns, each showing entry date and hold-window progress.
 - A hindsight view of the graded and gate-passing sets against the benchmark.
-- A follow-along simulator tracking adopted selections against the benchmark.
+- A simulator tracking adopted selections against the benchmark.
 
 ## Project Timeline
 
