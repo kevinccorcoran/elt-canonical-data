@@ -40,6 +40,14 @@
     g <- lc_line_groups(); labs <- if (is.null(g)) character(0) else unique(g$label)
     lc_group_hidden(setdiff(labs, as.character(unlist(input$lcGroupShow))))
   }, ignoreNULL = FALSE, ignoreInit = TRUE)
+  # The names in the unticked groups: the two return tables under the sketch leave
+  # them out too, as the chart does (Kevin 2026-10-19: "table to update based on
+  # selection"). Nothing unticked, or grouping off, drops nothing.
+  lc_group_dropped <- reactive({
+    hid <- lc_group_hidden(); if (!length(hid)) return(character(0))
+    g <- lc_line_groups(); if (is.null(g) || !nrow(g)) return(character(0))
+    toupper(g$ticker[g$label %in% hid])
+  })
 
   output$qsCompareLC <- renderPlotly({
     req(lc_sketch_data())

@@ -4,7 +4,8 @@
   # is split equally across that day's BUY names and held until each name's SELL;
   # SPY gets the same deposits. One row per schedule, $1,000 in total each.
   # lc_strategy_base holds every name of that set before the cluster and marks
-  # view filter, with its trail, prices and run days; both tables slice it.
+  # view filter, with its trail, prices and run days; both tables slice it. Names
+  # in unticked line groups drop out of both tables, as off the chart.
   lc_strategy_base <- reactive({
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
@@ -35,16 +36,27 @@
   lc_strategy <- reactive({
     b <- lc_strategy_base(); if (is.null(b)) return(NULL)
     tks <- lc_scope_names(b$dv)
-    if (!length(tks)) return(NULL)
+    drop <- toupper(tks) %in% lc_group_dropped()      # names in unticked line groups
+    tks <- tks[!drop]
+    if (!length(tks)) return(if (any(drop)) structure(data.frame(), n_drop = sum(drop)) else NULL)
     res <- tryCatch(lc_strategy_schedules(b$states[tks], b$px, b$run_d, b$start, b$end),
                     error = function(e) NULL)
     if (is.null(res)) return(NULL)
     attr(res, "start") <- b$start; attr(res, "end") <- b$end; attr(res, "n_names") <- length(tks)
+    attr(res, "n_drop") <- sum(drop)
     res
   })
 
   output$lcStrategyLC <- renderUI({
-    r <- lc_strategy(); if (is.null(r) || !nrow(r)) return(NULL)
+    r <- lc_strategy(); if (is.null(r)) return(NULL)
+    if (!nrow(r)) return(if (isTRUE(attr(r, "n_drop") > 0))
+      tags$div(style = "color:#64748b;font-size:0.72rem;margin:0.6rem 0;",
+               "Every line group is unticked, so the return tables have no names. Tick a group above to bring its names back."))
+    n_drop <- attr(r, "n_drop")
+    who <- if (n_drop > 0)
+      sprintf("%d names: graded >= %d or held, ticked clusters, minus the %d in unticked line groups",
+              attr(r, "n_names"), QS_MIN, n_drop)
+      else sprintf("the pins' %d names: graded >= %d or held, ticked clusters", attr(r, "n_names"), QS_MIN)
     th <- function(x, al = "right") tags$th(style = sprintf(
       "text-align:%s;color:#cbd5e1;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em;padding:3px 10px;border-bottom:1px solid #1e293b;", al), x)
     td <- function(x, col = "#e2e8f0", al = "right", wt = 400) tags$td(style = sprintf(
@@ -68,11 +80,11 @@
                sprintf("What the board's calls would have earned, %s to %s", format(s, "%b %d"), format(e, "%b %d"))),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
         sprintf(paste("$1,000 in total per row. Each deposit is split equally across the names the board says",
-                      "BUY that day (the pins' %d names: graded >= %d or held, ticked clusters), held until",
+                      "BUY that day (%s), held until",
                       "that name's SELL, then kept as cash; a deposit on a day with no BUY waits for the next",
                       "one. SPY gets the same deposits on the same days. The board had a BUY on %d of %d run",
                       "days%s. Follows the slider."),
-                attr(r, "n_names"), QS_MIN, attr(r, "buy_days"), attr(r, "run_days"),
+                who, attr(r, "buy_days"), attr(r, "run_days"),
                 if (is.na(lb)) "" else sprintf(", the last on %s", format(lb, "%b %d")))),
       tags$div(style = "overflow-x:auto;",
         tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
@@ -102,6 +114,8 @@
   lc_strategy_clusters <- reactive({
     b <- lc_strategy_base(); if (is.null(b)) return(NULL)
     U <- lc_scope_names(b$dv)                         # the selection, as the table above
+    drop <- toupper(U) %in% lc_group_dropped()        # minus the unticked line groups
+    U <- U[!drop]
     if (!length(U)) return(NULL)
     ids <- lc_live_ids()[toupper(U)]
     boxes <- sort(unique(as.integer(tryCatch(lc_board_filter_ids(), error = function(e) integer(0)))))
@@ -151,6 +165,7 @@
     attr(blocks, "scope") <- if (nc_view) sprintf("the %s names, every cluster", gear)
       else if (length(present) == 1) sprintf("cluster %d", present)
       else sprintf("clusters %s", and_join(present))
+    attr(blocks, "n_drop") <- sum(drop)
     blocks
   })
 
@@ -195,7 +210,9 @@
       tags$div(style = "color:#f1f5f9;font-weight:700;font-size:0.95rem;margin:0.9rem 0 0.1rem;",
                sprintf("Scenarios for %s, %s to %s", attr(bl, "scope"), format(s, "%b %d"), format(e, "%b %d"))),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
-        paste("Same $1,000 per cell and the same rules as the table above, for the ticked clusters,",
+        paste("Same $1,000 per cell and the same rules as the table above,",
+              if (attr(bl, "n_drop") > 0) "for the ticked clusters without the names in unticked line groups,"
+              else "for the ticked clusters,",
               "each on its own and together when more than one is ticked. The thirds rank the names by",
               "their return over the window (the master list's RETURN), so they are picked with hindsight;",
               "top and bottom get a third each, the middle the rest.",
