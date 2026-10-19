@@ -3,8 +3,9 @@
   # qualstream graded vs the >= 68 (orange +) subset vs SPY, over the current
   # 4-month window. Descriptive only: see the caption + LC_QS_COMPARE_SQL.
   # "Smooth lines" button above the sketch (Kevin 2026-10-19): each click flips
-  # strong display smoothing (lc_strong_line) for this tab; off on every page load.
-  lc_smooth_on <- reactiveVal(FALSE)
+  # strong display smoothing (lc_strong_line) for this tab; ON on every page load
+  # (Kevin 2026-10-19: "smooth line to be on by default").
+  lc_smooth_on <- reactiveVal(TRUE)
   observeEvent(input$lcSmoothBtn, {
     lc_smooth_on(!isTRUE(lc_smooth_on()))
     session$sendCustomMessage("lcSmoothState", isTRUE(lc_smooth_on()))
