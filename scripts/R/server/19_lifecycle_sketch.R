@@ -30,6 +30,17 @@
     tryCatch(lc_group_lines(lines, spy$d, spy$spy_pct), error = function(e) NULL)
   })
 
+  # Group checkboxes under the sketch (Kevin 2026-10-19: "i want check boxes for
+  # categories"): the labels of the unticked groups. Keyed by label, so a hidden
+  # group stays hidden across slider moves while a group with that label exists
+  # ("Like SPY" always does). All boxes unticked arrives as NULL; ignoreInit stops
+  # the startup NULL (no boxes yet) from hiding everything.
+  lc_group_hidden <- reactiveVal(character(0))
+  observeEvent(input$lcGroupShow, {
+    g <- lc_line_groups(); labs <- if (is.null(g)) character(0) else unique(g$label)
+    lc_group_hidden(setdiff(labs, as.character(unlist(input$lcGroupShow))))
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
+
   output$qsCompareLC <- renderPlotly({
     req(lc_sketch_data())
     d <- lc_sketch_data(); cmp <- d$qscmp
@@ -235,9 +246,11 @@
       pl_name <- if (pl_auto) sprintf("Cluster %d names (%d)", pl$cluster, pl$n)
                  else sprintf("Qualstream pick lines (%d)", pl$n)
       grp <- tryCatch(lc_line_groups(), error = function(e) NULL); seen <- character(0)
+      hid <- if (is.null(grp)) character(0) else lc_group_hidden()
       for (nm in names(pl$lines)) {
-        ln <- if (smooth) lc_strong_line(pl$lines[[nm]]) else lc_soft_line(pl$lines[[nm]])
         gi <- if (is.null(grp)) NA_integer_ else match(nm, grp$ticker)
+        if (!is.na(gi) && grp$label[gi] %in% hid) next   # unticked group: not drawn
+        ln <- if (smooth) lc_strong_line(pl$lines[[nm]]) else lc_soft_line(pl$lines[[nm]])
         if (is.na(gi)) {
           fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
             name = pl_name,
@@ -270,7 +283,7 @@
       }
       pl_suffix <- paste0(if (pl_auto) sprintf(" · cluster %d lines", pl$cluster)
                           else sprintf(" · %d pick lines", pl$n),
-                          if (!is.null(grp)) " grouped by profile" else "")
+                          if (!is.null(grp)) " grouped" else "")
     }
     # Checked master-list names: each ticked row draws its own rebased return line
     # in a distinct color, with a legend entry, so you can compare a handful of
@@ -543,22 +556,27 @@
       annotations = c(endlabels, ann))
   })
 
-  # One line under the sketch naming who is in each profile group (the legend
-  # shows the groups; hover a line for its group too).
+  # Who is in each profile group, one checkbox per group: untick to hide that
+  # group's lines (the legend shows the groups; hover a line for its group too).
+  # Re-rendered only when the groups change; the ticks come from lc_group_hidden.
   output$lcLineGroupsLC <- renderUI({
     g <- lc_line_groups(); if (is.null(g) || !nrow(g)) return(NULL)
     d <- lc_sketch_data()
     g <- g[order(g$rank), , drop = FALSE]
-    parts <- lapply(split(g, g$rank), function(x) tags$span(style = sprintf("color:%s;", x$col[1]),
-      tags$b(x$label[1]), paste0(": ", paste(x$ticker, collapse = ", "))))
-    sep <- lapply(seq_along(parts), function(i) if (i == 1) parts[[i]] else tagList(" \u00b7 ", parts[[i]]))
-    div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+    labs <- unique(g$label)
+    hidden <- isolate(lc_group_hidden())
+    div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.2rem;",
         span(style = "color:#f8fafc; font-weight:700;", "Line groups"),
         sprintf(paste(" from %s%s, by how close each name's line runs to SPY's and to the others",
-                      "(level and shape over the window, at most 4 groups): "),
+                      "(level and shape over the window, at most 4 groups). Untick a group to hide its lines."),
                 format(as.Date(d$qscmp_anchor), "%b %d"),
                 if (is.null(d$qscmp_to)) "" else format(as.Date(d$qscmp_to), " to %b %d")),
-        sep)
+        div(class = "lc-groupbox",
+            checkboxGroupInput("lcGroupShow", NULL, inline = TRUE,
+              choiceNames = lapply(labs, function(l) tags$span(
+                style = sprintf("color:%s;", g$col[g$label == l][1]),
+                tags$b(l), paste0(": ", paste(g$ticker[g$label == l], collapse = ", ")))),
+              choiceValues = labs, selected = setdiff(labs, hidden))))
   })
 
   # Honesty caption: the comparison is a single-grade-run snapshot with partial
