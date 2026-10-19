@@ -4,8 +4,10 @@ import pendulum
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.bash import BashOperator
+from airflow.operators.python import ShortCircuitOperator
 
 from utils.alerting import on_failure_telegram
+from utils.dag_locks import walk_forward_not_running
 from utils.dbt_helpers import get_inference_dbt_bash_command
 
 runtime_env = Variable.get("ENV", default_var="dev")
@@ -36,6 +38,15 @@ with DAG(
     catchup=False,
     is_paused_upon_creation=False,
 ) as dag:
+
+    # Cross-DAG lock: this DAG rebuilds transition_scored_split at the
+    # default 2016 cutoff, the table the walk-forward snapshots each cutoff's
+    # holdout from; never while a walk is active.
+    wf_not_running = ShortCircuitOperator(
+        task_id="wf_not_running",
+        python_callable=walk_forward_not_running,
+        op_kwargs={"chain": "backtest"},
+    )
 
     # Build the train-only feature_set first — scored_split reads from it
     # so validation_agreement's clusters don't peek at post-cutoff data.
@@ -83,5 +94,6 @@ with DAG(
         do_xcom_push=False,
     )
 
+    wf_not_running >> dbt_run_feature_set_train
     dbt_run_feature_set_train >> dbt_run_transition_scored_split >> dbt_run_validation_agreement
     dbt_run_transition_scored_split >> dbt_run_payoff_backtest
