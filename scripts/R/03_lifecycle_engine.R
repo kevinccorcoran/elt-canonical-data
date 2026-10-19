@@ -509,6 +509,39 @@ lc_soft_line <- function(ln, k = LC_BUNDLE_SMOOTH_K) {
   }
   ln
 }
+
+# Strong smoothing, the sketch's "Smooth lines" button (Kevin 2026-10-19: "in the
+# graph i would like an option like a button to smooth the lines very noticely").
+# Off by default. The same tapered centered average as above, run twice over
+# LC_STRONG_SMOOTH_K trading days (a triangular kernel about a month wide), on
+# EVERY sketch line including SPY and the baskets. Display only, like the light
+# one: each line still starts at 0% and ends at its real return, hovers show the
+# real value, pins sit on the smoothed line at their own date, and the y axis keeps
+# the unsmoothed range, so toggling never zooms (Kevin 2026-10-13: no axis zoom).
+LC_STRONG_SMOOTH_K <- 11L
+lc_taper_avg <- function(x, k) {
+  n <- length(x); h <- (k - 1L) %/% 2L
+  if (n <= 2 || h <= 0) return(x)
+  cs <- c(0, cumsum(x)); i <- seq_len(n); w <- pmin(h, i - 1L, n - i)
+  y <- (cs[i + w + 1] - cs[i - w]) / (2 * w + 1)
+  y[c(1, n)] <- x[c(1, n)]
+  y
+}
+lc_smooth2 <- function(v, k = LC_STRONG_SMOOTH_K) {
+  ok <- which(!is.na(v)); if (length(ok) < 3) return(v)
+  v[ok] <- lc_taper_avg(lc_taper_avg(v[ok], k), k)
+  v
+}
+lc_weekdays <- function(df, col = "d") {             # trading days, first and last kept
+  if (is.null(df) || !nrow(df)) return(df)
+  keep <- as.integer(format(as.Date(df[[col]]), "%u")) <= 5; keep[c(1, length(keep))] <- TRUE
+  df[keep, , drop = FALSE]
+}
+lc_strong_line <- function(ln, k = LC_STRONG_SMOOTH_K) {
+  if (is.null(ln) || !nrow(ln)) return(ln)
+  ln <- lc_weekdays(ln); ln$raw <- ln$ret; ln$ret <- lc_smooth2(ln$ret, k)
+  ln
+}
 lc_pin_debounce <- function(ev, run_d, last_d, min_days = PIN_DWELL_RUNDAYS,
                             every = FALSE, why_of = NULL) {
   if (is.null(ev) || !nrow(ev)) return(ev)
