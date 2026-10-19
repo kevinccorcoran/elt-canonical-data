@@ -115,9 +115,10 @@ services:
   #     host. A check without --hostname says "Found 2 alive jobs", which is
   #     the HA topology, not a fault.
   #
-  # DECOMMISSIONED 2026-08-05: the two services below (airflow-webserver and
-  # airflow-violin) restore what the legacy container uniquely provided, so it
-  # was stopped and every role now runs in its own service. It is stopped, NOT
+  # DECOMMISSIONED 2026-08-05: the services below restore what the legacy
+  # container uniquely provided, so it was stopped and every role now runs in
+  # its own service. (The violin board on 3839 was retired the same day; its
+  # airflow-violin service and scripts/app_violin.R were removed 2026-10-19.) It is stopped, NOT
   # removed -- `docker start airflow` is the rollback, and it will re-seize
   # 3838/3839/8080 if the compose services are not running. Do not run
   # `docker compose up --remove-orphans` until you are happy to lose that
@@ -146,26 +147,6 @@ services:
     ports:
       # Loopback-only: reach remotely via SSH tunnel.
       - "127.0.0.1:8080:8080"
-
-  # Second Shiny board (violin). app_violin.R hardcodes host=0.0.0.0 port=3839,
-  # so unlike app.R it needs no SHINY_PORT and has no watchdog wrapper.
-  airflow-violin:
-    <<: *airflow-common
-    container_name: airflow-violin
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: bash -c "Rscript /opt/airflow/scripts/app_violin.R"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS --max-time 8 http://localhost:3839/ >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
-    ports:
-      # Loopback-only: unauthenticated dashboard. Reach remotely via SSH tunnel.
-      - "127.0.0.1:3839:3839"
 
   airflow-shiny:
     <<: *airflow-common
