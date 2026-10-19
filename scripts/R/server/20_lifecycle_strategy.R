@@ -88,8 +88,10 @@
   # ── Each cluster box on its own (Kevin 2026-10-19: "for each checkbox cluster i
   # also want returns based on different scenarios, for example all but last, all
   # industries having markers only, stdv ticker returns") ──────────────────────
-  # Same calls, window and deposit schedules as the table above, for every cluster
-  # box whatever is ticked, then every cluster together. Per block: all names; the
+  # Same calls, window and deposit schedules as the table above, for what is
+  # selected only (Kevin 2026-10-19: "i only want see what ever is selected"): one
+  # block per ticked cluster, then those clusters together when more than one is
+  # ticked; under the marks view, the marked names by cluster. Per block: all names; the
   # worst name left out ("all but last": the master list sorts by window return, so
   # its bottom row) and, beside it, the best name left out, because dropping only
   # the loser flatters the result; the diamond/gear marked names only (display
@@ -98,9 +100,11 @@
   # depend on the names.
   lc_strategy_clusters <- reactive({
     b <- lc_strategy_base(); if (is.null(b)) return(NULL)
-    U <- b$tks
+    U <- lc_scope_names(b$dv)                         # the selection, as the table above
+    if (!length(U)) return(NULL)
     ids <- lc_live_ids()[toupper(U)]
     boxes <- sort(unique(as.integer(tryCatch(lc_board_filter_ids(), error = function(e) integer(0)))))
+    nc_view <- !is.null(lc_nc_only())
     wr <- lc_ml_winret()
     wr <- setNames(as.numeric(wr[toupper(U)]), U)
     nc <- tryCatch(lc_nc_tags(), error = function(e) NULL)
@@ -113,7 +117,8 @@
     }
     row <- function(label, set) c(list(label = label, n = length(set)), run1(set))
     scen <- function(set) {
-      out <- list(row(sprintf("All %d name%s", length(set), if (length(set) == 1) "" else "s"), set))
+      out <- list(row(if (length(set) == 1) paste("Only", set) else sprintf("All %d names", length(set)),
+                      set))
       w <- wr[set]; w <- w[!is.na(w)]
       if (length(w) >= 2) {
         lo <- names(w)[which.min(w)]; hi <- names(w)[which.max(w)]
@@ -122,16 +127,28 @@
           row(sprintf("Without the best (%s, %+.1f%%)", hi, w[[hi]]), setdiff(set, hi))))
       }
       mk <- set[toupper(set) %in% marked]
-      if (length(mk))
-        out <- c(out, list(row(sprintf("◆ %s marked only (%s)", NC_GEAR, paste(mk, collapse = ", ")), mk)))
+      if (length(mk) && length(mk) < length(set))
+        out <- c(out, list(row(sprintf("\u25c6 %s marked only (%s)", NC_GEAR, paste(mk, collapse = ", ")), mk)))
       out
     }
-    blocks <- lapply(boxes, function(k) {
+    present <- boxes[boxes %in% ids]
+    and_join <- function(x) if (length(x) < 2) paste(x) else
+      paste(paste(x[-length(x)], collapse = ", "), "and", x[length(x)])
+    blocks <- lapply(present, function(k) {
       set <- U[!is.na(ids) & ids == k]
-      if (length(set)) list(title = sprintf("Cluster %d", k), n = length(set), rows = scen(set))
+      list(title = sprintf("Cluster %d", k), n = length(set), rows = scen(set))
     })
-    c(Filter(Negate(is.null), blocks),
-      list(list(title = "Every cluster", n = length(U), rows = scen(U))))
+    gear <- paste("\u25c6", NC_GEAR)
+    if (length(present) != 1 || any(is.na(ids) | !(ids %in% present)))
+      blocks <- c(blocks, list(list(
+        title = if (nc_view) sprintf("Every cluster, %s names", gear)
+                else if (is.null(lc_ids_effective())) "Every cluster"
+                else sprintf("Clusters %s together", and_join(present)),
+        n = length(U), rows = scen(U))))
+    attr(blocks, "scope") <- if (nc_view) sprintf("the %s names, every cluster", gear)
+      else if (length(present) == 1) sprintf("cluster %d", present)
+      else sprintf("clusters %s", and_join(present))
+    blocks
   })
 
   output$lcStrategyClustersLC <- renderUI({
@@ -162,7 +179,7 @@
     body <- lapply(bl, function(blk) tagList(
       tags$tr(tags$td(colspan = length(sch) + 2, style = paste0(
         "color:#f1f5f9;font-weight:700;font-size:0.78rem;padding:7px 10px 3px;",
-        "border-bottom:1px solid #1e293b;"), sprintf("%s · %d name%s", blk$title, blk$n,
+        "border-bottom:1px solid #1e293b;"), sprintf("%s \u00b7 %d name%s", blk$title, blk$n,
                                                      if (blk$n == 1) "" else "s"))),
       lapply(blk$rows, function(x) tags$tr(
         td(x$label, "#e2e8f0", "left", 400), cells(x),
@@ -173,12 +190,12 @@
     s <- attr(ref, "first_day"); e <- lc_strategy_base()$end
     tagList(
       tags$div(style = "color:#f1f5f9;font-weight:700;font-size:0.95rem;margin:0.9rem 0 0.1rem;",
-               sprintf("Each cluster on its own, %s to %s", format(s, "%b %d"), format(e, "%b %d"))),
+               sprintf("Scenarios for %s, %s to %s", attr(bl, "scope"), format(s, "%b %d"), format(e, "%b %d"))),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
-        paste("Same $1,000 per cell and the same rules as the table above, for every cluster box",
-              "whatever is ticked, then every cluster together. Without the worst / best leaves out the",
+        paste("Same $1,000 per cell and the same rules as the table above, for the ticked clusters,",
+              "each on its own and together when more than one is ticked. Without the worst / best leaves out the",
               "name with the lowest / highest return over the window (the master list's RETURN).",
-              "◆", NC_GEAR, "marked only keeps the disruptor and enabler names (display tags,",
+              "\u25c6", NC_GEAR, "marked only keeps the disruptor and enabler names (display tags,",
               "never a rule). Spread is the standard deviation of the names' window returns: how far",
               "apart the names landed. Hover a cell for dollars and vs SPY.")),
       tags$div(style = "overflow-x:auto;",
