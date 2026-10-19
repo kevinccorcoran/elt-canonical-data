@@ -5,9 +5,11 @@ import pendulum
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.bash import BashOperator
+from airflow.operators.python import ShortCircuitOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 from utils.alerting import on_failure_telegram
+from utils.dag_locks import walk_forward_not_running
 from utils.dbt_helpers import get_dbt_bash_command, get_dbt_deps_command, get_inference_dbt_bash_command, get_inference_dbt_deps_command
 
 
@@ -70,6 +72,17 @@ with DAG(
     max_active_runs=1,
     is_paused_upon_creation=False,
 ) as dag:
+
+    # ------------------------------------------------------------------
+    # 00. Cross-DAG lock: the walk-forward reads the grid and the train
+    #     clustering this DAG rebuilds; skip the whole chain (all three
+    #     roots, and so the inference trigger) while a walk is active.
+    # ------------------------------------------------------------------
+    wf_not_running = ShortCircuitOperator(
+        task_id="wf_not_running",
+        python_callable=walk_forward_not_running,
+        op_kwargs={"chain": "metrics"},
+    )
 
     # ------------------------------------------------------------------
     # 0. Disk space guard — fail fast if DB disk is > 85% full
@@ -267,7 +280,13 @@ with DAG(
     # DEPENDENCIES
     # ------------------------------------------------------------------
 
-    # Disk check first, then deps
+    # Walk-forward lock in front of every root (the two ranking builds have
+    # no other upstream), then the disk check, then deps
+    wf_not_running >> [
+        check_disk_space,
+        dbt_run_ticker_weighted_growth_ranking,
+        dbt_run_ticker_weighted_growth_ranking_train,
+    ]
     check_disk_space >> dbt_deps >> dbt_run_intermediate_fibonacci_base
     dbt_run_intermediate_fibonacci_base >> dbt_run_fibonacci_offset_observation_dates
 
