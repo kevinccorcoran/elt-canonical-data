@@ -543,6 +543,58 @@ lc_strong_line <- function(ln, k = LC_STRONG_SMOOTH_K) {
   ln <- lc_weekdays(ln); ln$raw <- ln$ret; ln$ret <- lc_smooth2(ln$ret, k)
   ln
 }
+
+# Line groups on the sketch (Kevin 2026-10-19: "for range extent i need to visually
+# group ticker lines that have similar profile as spy, also other ticker not
+# similar profiles grouped as well, 3-4 groups or less"). Over the window, every
+# name's line and SPY's on one weekday grid; the gap between two lines is their RMS
+# distance in pp, i.e. level and shape, what the eye compares. SPY's line is a FIXED
+# group centre; up to 3 more centres start from a Ward split of the names and then
+# k-means style each name joins the nearest centre (SPY's or a group's average
+# line) until nothing moves. So "Like SPY" means the line runs closer to SPY than
+# to any other group's average; a plain clustering with SPY as one point pulled a
+# far outlier (STX, -42%) into SPY's group just because it had nowhere else to go.
+# Other groups are named by the shape of their average line against SPY and where
+# it ends. Display only: no rule reads it.
+lc_group_lines <- function(lines, spy_d, spy_ret, k_max = 4L) {
+  lines <- lines[vapply(lines, function(x) !is.null(x) && sum(!is.na(x$ret)) >= 2, logical(1))]
+  if (length(lines) < 2) return(NULL)
+  grid <- sort(unique(as.Date(spy_d))); grid <- grid[as.integer(format(grid, "%u")) <= 5]
+  if (length(grid) < 3 || sum(!is.na(spy_ret)) < 2) return(NULL)
+  gx <- as.numeric(grid)
+  at <- function(d, y) { ok <- !is.na(y); approx(as.numeric(as.Date(d))[ok], y[ok], xout = gx, rule = 2)$y }
+  spy <- at(spy_d, spy_ret)
+  Y <- t(vapply(lines, function(ln) at(ln$d, ln$ret), numeric(length(gx))))
+  n <- nrow(Y); k0 <- min(k_max - 1L, if (n >= 6) 3L else if (n >= 3) 2L else 1L)
+  g0 <- if (k0 > 1) cutree(hclust(dist(Y), method = "ward.D2"), k = k0) else rep(1L, n)
+  C <- rbind(spy, t(vapply(seq_len(k0), function(j) colMeans(Y[g0 == j, , drop = FALSE]), numeric(ncol(Y)))))
+  a <- NULL
+  for (it in 1:50) {
+    D2 <- vapply(seq_len(nrow(C)), function(j) rowMeans((Y - matrix(C[j, ], n, ncol(Y), byrow = TRUE))^2),
+                 numeric(n))
+    a_new <- max.col(-matrix(D2, nrow = n), ties.method = "first")
+    if (identical(a_new, a)) break
+    a <- a_new
+    for (j in seq_len(nrow(C))[-1]) if (any(a == j)) C[j, ] <- colMeans(Y[a == j, , drop = FALSE])
+  }
+  rel <- lapply(seq_len(nrow(C)), function(j) C[j, ] - spy)
+  endg <- vapply(rel, function(r) r[length(r)], numeric(1))
+  shape <- vapply(rel, function(r) {
+    E <- r[length(r)]; M <- max(r); m <- min(r)
+    if (M >= 10 && E <= M / 2 && M > -m) "Spiked, then faded"
+    else if (m <= -10 && E >= m / 2 && -m > M) "Dipped, then recovered"
+    else if (E >= 0) "Above SPY" else "Below SPY"
+  }, character(1))
+  used <- sort(unique(a)); others <- setdiff(used, 1L); others <- others[order(-endg[others])]
+  pal <- c("#f472b6", "#a78bfa", "#94a3b8")
+  lab <- col <- character(nrow(C))
+  lab[1] <- "Like SPY"; col[1] <- "#93c5fd"
+  for (i in seq_along(others)) {
+    k <- others[i]; lab[k] <- sprintf("%s, ends %+.0fpp", shape[k], endg[k]); col[k] <- pal[min(i, length(pal))]
+  }
+  data.frame(ticker = rownames(Y), grp = a, label = lab[a], col = col[a], rank = match(a, c(1L, others)),
+             end_gap = endg[a], stringsAsFactors = FALSE)
+}
 lc_pin_debounce <- function(ev, run_d, last_d, min_days = PIN_DWELL_RUNDAYS,
                             every = FALSE, why_of = NULL) {
   if (is.null(ev) || !nrow(ev)) return(ev)

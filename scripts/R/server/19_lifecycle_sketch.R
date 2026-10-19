@@ -11,6 +11,25 @@
     session$sendCustomMessage("lcSmoothState", isTRUE(lc_smooth_on()))
   })
 
+  # "Group lines" button (Kevin 2026-10-19): colours the per-name lines by profile
+  # over the window (lc_group_lines); on by default, a click turns it off.
+  lc_group_on <- reactiveVal(TRUE)
+  observeEvent(input$lcGroupBtn, {
+    lc_group_on(!isTRUE(lc_group_on()))
+    session$sendCustomMessage("lcGroupState", isTRUE(lc_group_on()))
+  })
+  # The groups for the lines on screen: the cluster lines or the pick lines (the
+  # marks view keeps its own violet styling), cut to the window like the chart.
+  lc_line_groups <- reactive({
+    if (!isTRUE(lc_group_on())) return(NULL)
+    pl <- tryCatch(lc_pick_lines(), error = function(e) NULL)
+    if (is.null(pl) || !length(pl$lines) || identical(pl$mode, "nc")) return(NULL)
+    d <- lc_sketch_data(); if (is.null(d) || is.null(d$qscmp) || !nrow(d$qscmp)) return(NULL)
+    spy <- lc_win_cut(d$qscmp, d$qscmp_to)
+    lines <- lapply(pl$lines, lc_win_cut, we = d$qscmp_to)
+    tryCatch(lc_group_lines(lines, spy$d, spy$spy_pct), error = function(e) NULL)
+  })
+
   output$qsCompareLC <- renderPlotly({
     req(lc_sketch_data())
     d <- lc_sketch_data(); cmp <- d$qscmp
@@ -215,25 +234,43 @@
       pl_col  <- if (pl_auto) "rgba(148,163,184,0.55)" else "rgba(248,250,252,0.30)"
       pl_name <- if (pl_auto) sprintf("Cluster %d names (%d)", pl$cluster, pl$n)
                  else sprintf("Qualstream pick lines (%d)", pl$n)
+      grp <- tryCatch(lc_line_groups(), error = function(e) NULL); seen <- character(0)
       for (nm in names(pl$lines)) {
         ln <- if (smooth) lc_strong_line(pl$lines[[nm]]) else lc_soft_line(pl$lines[[nm]])
-        fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
-          name = pl_name,
-          legendgroup = "picklines", showlegend = first,
-          line = lc_line(color = pl_col, width = 1),
-          hovertext = nm, customdata = ln$raw,
-          hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{customdata:.1f}%<extra></extra>"))
+        gi <- if (is.null(grp)) NA_integer_ else match(nm, grp$ticker)
+        if (is.na(gi)) {
+          fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
+            name = pl_name,
+            legendgroup = "picklines", showlegend = first,
+            line = lc_line(color = pl_col, width = 1),
+            hovertext = nm, customdata = ln$raw,
+            hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{customdata:.1f}%<extra></extra>"))
+          first <- FALSE
+        } else {                                          # coloured by profile group
+          gk <- as.character(grp$grp[gi])
+          fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
+            name = sprintf("%s (%d)", grp$label[gi], sum(grp$grp == grp$grp[gi])),
+            legendgroup = paste0("linegrp_", gk), showlegend = !(gk %in% seen),
+            legendrank = 1000 + grp$rank[gi], opacity = 0.85,
+            line = lc_line(color = grp$col[gi], width = 1.3),
+            hovertext = sprintf("%s \u00b7 %s", nm, grp$label[gi]), customdata = ln$raw,
+            hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{customdata:.1f}%<extra></extra>"))
+          seen <- c(seen, gk)
+        }
         if (pl_auto && nrow(ln) > 0) {
           last_i <- nrow(ln)
-          endlabels[[length(endlabels) + 1]] <- list(
+          endlabels[[length(endlabels) + 1]] <- c(list(
             x = ln$d[last_i], y = ln$ret[last_i], text = tk_g(nm),
-            textfont = list(color = "#94a3b8", size = 8), showarrow = FALSE,
-            xanchor = "left", yanchor = "middle", xshift = 5)
+            textfont = list(color = if (is.na(gi)) "#94a3b8" else grp$col[gi], size = 8), showarrow = FALSE,
+            xanchor = "left", yanchor = "middle", xshift = 5),
+            # annotations colour by `font` (textfont is ignored there), so only the
+            # grouped labels take their group's colour
+            if (!is.na(gi)) list(font = list(color = grp$col[gi])))
         }
-        first <- FALSE
       }
-      pl_suffix <- if (pl_auto) sprintf(" · cluster %d lines", pl$cluster)
-                   else sprintf(" · %d pick lines", pl$n)
+      pl_suffix <- paste0(if (pl_auto) sprintf(" · cluster %d lines", pl$cluster)
+                          else sprintf(" · %d pick lines", pl$n),
+                          if (!is.null(grp)) " grouped by profile" else "")
     }
     # Checked master-list names: each ticked row draws its own rebased return line
     # in a distinct color, with a legend entry, so you can compare a handful of
@@ -504,6 +541,24 @@
                         font = list(color = "#e2e8f0", size = 11)),
       margin = list(l = 60, r = 120, t = 44, b = 40),
       annotations = c(endlabels, ann))
+  })
+
+  # One line under the sketch naming who is in each profile group (the legend
+  # shows the groups; hover a line for its group too).
+  output$lcLineGroupsLC <- renderUI({
+    g <- lc_line_groups(); if (is.null(g) || !nrow(g)) return(NULL)
+    d <- lc_sketch_data()
+    g <- g[order(g$rank), , drop = FALSE]
+    parts <- lapply(split(g, g$rank), function(x) tags$span(style = sprintf("color:%s;", x$col[1]),
+      tags$b(x$label[1]), paste0(": ", paste(x$ticker, collapse = ", "))))
+    sep <- lapply(seq_along(parts), function(i) if (i == 1) parts[[i]] else tagList(" \u00b7 ", parts[[i]]))
+    div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+        span(style = "color:#f8fafc; font-weight:700;", "Line groups"),
+        sprintf(paste(" from %s%s, by how close each name's line runs to SPY's and to the others",
+                      "(level and shape over the window, at most 4 groups): "),
+                format(as.Date(d$qscmp_anchor), "%b %d"),
+                if (is.null(d$qscmp_to)) "" else format(as.Date(d$qscmp_to), " to %b %d")),
+        sep)
   })
 
   # Honesty caption: the comparison is a single-grade-run snapshot with partial
