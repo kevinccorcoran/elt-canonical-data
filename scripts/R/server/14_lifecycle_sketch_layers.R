@@ -1,4 +1,27 @@
 # AlphaStream dashboard - Lifecycle: sketch layers (pins, pick lines, checked names, top performers). Part of app.R, split 2026-10-19: files load in name order (see app.R).
+  # Names in the sketch's scope (the pins and the strategy table): the master
+  # list's set, every name graded >= QS_MIN plus every open position, in a live
+  # state. NOT gated on board_ok: after the 2026-10-01 re-mint de-gated id 9,
+  # every held name fell off the gate's board, so the old board_ok rule left 0
+  # pin candidates while the master list still showed all 25 holds (17 board_ok
+  # names, 23 graded, overlap 0). Then the cluster-id view filter: only names in
+  # the ticked clusters (by live id), owned or not (Kevin 2026-10-07, replacing
+  # the 2026-09-01 owned-names exemption; every master-list cluster has its own
+  # box). Untouched / all ticked = everything.
+  lc_scope_names <- function(dv) {
+    grade_u <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
+    pp_univ <- tryCatch(lc_pos(), error = function(e) NULL)
+    owned_univ <- if (!is.null(pp_univ) && nrow(pp_univ)) {
+      sdu <- as.character(pp_univ$sold_date)
+      toupper(pp_univ$ticker[is.na(sdu) | !nzchar(sdu)])
+    } else character(0)
+    tks <- dv$tickers[
+      dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
+      ((!is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN) |
+       toupper(dv$tickers) %in% owned_univ)]
+    tks[lc_in_sel(tks)]
+  }
+
   # "Show all pins" mode: every qualstream-pass board ticker's buy/hold/sell
   # entries as pins on the benchmark chart - NO lines, label = ticker only,
   # colored by state (buy green / hold orange / sell red). Reuses the exact
@@ -12,26 +35,7 @@
     d <- lc_sketch_data()
     anchor <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(anchor)) return(NULL)
-    # Same name set as the master list: every name graded >= QS_MIN, plus every
-    # open position, in a live state. NOT gated on board_ok: after the 2026-10-01
-    # re-mint de-gated id 9, every held name fell off the gate's board, so the
-    # old board_ok rule left 0 pin candidates while the master list still showed
-    # all 25 holds (17 board_ok names, 23 graded, overlap 0).
-    grade_u <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
-    pp_univ <- tryCatch(lc_pos(), error = function(e) NULL)
-    owned_univ <- if (!is.null(pp_univ) && nrow(pp_univ)) {
-      sdu <- as.character(pp_univ$sold_date)
-      toupper(pp_univ$ticker[is.na(sdu) | !nzchar(sdu)])
-    } else character(0)
-    tks <- dv$tickers[
-      dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
-      ((!is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN) |
-       toupper(dv$tickers) %in% owned_univ)]
-    # cluster-id view filter: only names in the ticked clusters (by live id), owned
-    # or not (Kevin 2026-10-07, replacing the 2026-09-01 owned-names exemption -
-    # every master-list cluster now has its own box, so an adopted name's cluster
-    # can always be ticked). Untouched / all ticked = everything.
-    tks <- tks[lc_in_sel(tks)]
+    tks <- lc_scope_names(dv)
     if (!length(tks)) return(NULL)
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
