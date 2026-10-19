@@ -3,14 +3,16 @@
   # Over the sketch window (the slider), the same names as the pins: each deposit
   # is split equally across that day's BUY names and held until each name's SELL;
   # SPY gets the same deposits. One row per schedule, $1,000 in total each.
-  lc_strategy <- reactive({
+  # lc_strategy_base holds every name of that set before the cluster and marks
+  # view filter, with its trail, prices and run days; both tables slice it.
+  lc_strategy_base <- reactive({
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     if (is.null(dv) || is.null(dv$M)) return(NULL)
     d <- lc_sketch_data()
     start <- if (!is.null(d) && !is.null(d$qscmp_anchor)) as.Date(d$qscmp_anchor) else NA
     if (is.na(start)) return(NULL)
-    tks <- lc_scope_names(dv)
+    tks <- lc_scope_names(dv, narrow = FALSE)
     if (!length(tks)) return(NULL)
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
@@ -28,9 +30,16 @@
       else data.frame(date = as.Date(tr$date), state = tr$state, stringsAsFactors = FALSE)
     })
     run_d <- if (!is.null(d$led$dd)) d$led$dd else as.Date(d$led$d)
-    res <- tryCatch(lc_strategy_schedules(states, px, run_d, start, end), error = function(e) NULL)
+    list(dv = dv, tks = tks, states = states, px = px, run_d = run_d, start = start, end = end)
+  })
+  lc_strategy <- reactive({
+    b <- lc_strategy_base(); if (is.null(b)) return(NULL)
+    tks <- lc_scope_names(b$dv)
+    if (!length(tks)) return(NULL)
+    res <- tryCatch(lc_strategy_schedules(b$states[tks], b$px, b$run_d, b$start, b$end),
+                    error = function(e) NULL)
     if (is.null(res)) return(NULL)
-    attr(res, "start") <- start; attr(res, "end") <- end; attr(res, "n_names") <- length(tks)
+    attr(res, "start") <- b$start; attr(res, "end") <- b$end; attr(res, "n_names") <- length(tks)
     res
   })
 
@@ -74,4 +83,106 @@
       tags$div(style = "color:#64748b;font-size:0.7rem;margin:0.3rem 0 0.6rem;",
         paste("States before Aug 7 for names the board did not track are replayed with today's evidence,",
               "as on the pins; prices are closes, no costs or dividends. Not a forecast.")))
+  })
+
+  # ── Each cluster box on its own (Kevin 2026-10-19: "for each checkbox cluster i
+  # also want returns based on different scenarios, for example all but last, all
+  # industries having markers only, stdv ticker returns") ──────────────────────
+  # Same calls, window and deposit schedules as the table above, for every cluster
+  # box whatever is ticked, then every cluster together. Per block: all names; the
+  # worst name left out ("all but last": the master list sorts by window return, so
+  # its bottom row) and, beside it, the best name left out, because dropping only
+  # the loser flatters the result; the diamond/gear marked names only (display
+  # tags, never a rule); and the spread, the standard deviation of the names'
+  # window returns (the master list's RETURN). SPY is one row: its deposits do not
+  # depend on the names.
+  lc_strategy_clusters <- reactive({
+    b <- lc_strategy_base(); if (is.null(b)) return(NULL)
+    U <- b$tks
+    ids <- lc_live_ids()[toupper(U)]
+    boxes <- sort(unique(as.integer(tryCatch(lc_board_filter_ids(), error = function(e) integer(0)))))
+    wr <- lc_ml_winret()
+    wr <- setNames(as.numeric(wr[toupper(U)]), U)
+    nc <- tryCatch(lc_nc_tags(), error = function(e) NULL)
+    marked <- if (!is.null(nc) && nrow(nc)) toupper(nc$ticker) else character(0)
+    run1 <- function(set) {
+      r <- tryCatch(lc_strategy_schedules(b$states[set], b$px, b$run_d, b$start, b$end),
+                    error = function(e) NULL)
+      w <- wr[set]; w <- w[!is.na(w)]
+      list(r = r, spread = if (length(w) >= 2) stats::sd(w) else NA_real_)
+    }
+    row <- function(label, set) c(list(label = label, n = length(set)), run1(set))
+    scen <- function(set) {
+      out <- list(row(sprintf("All %d name%s", length(set), if (length(set) == 1) "" else "s"), set))
+      w <- wr[set]; w <- w[!is.na(w)]
+      if (length(w) >= 2) {
+        lo <- names(w)[which.min(w)]; hi <- names(w)[which.max(w)]
+        out <- c(out, list(
+          row(sprintf("Without the worst (%s, %+.1f%%)", lo, w[[lo]]), setdiff(set, lo)),
+          row(sprintf("Without the best (%s, %+.1f%%)", hi, w[[hi]]), setdiff(set, hi))))
+      }
+      mk <- set[toupper(set) %in% marked]
+      if (length(mk))
+        out <- c(out, list(row(sprintf("◆ %s marked only (%s)", NC_GEAR, paste(mk, collapse = ", ")), mk)))
+      out
+    }
+    blocks <- lapply(boxes, function(k) {
+      set <- U[!is.na(ids) & ids == k]
+      if (length(set)) list(title = sprintf("Cluster %d", k), n = length(set), rows = scen(set))
+    })
+    c(Filter(Negate(is.null), blocks),
+      list(list(title = "Every cluster", n = length(U), rows = scen(U))))
+  })
+
+  output$lcStrategyClustersLC <- renderUI({
+    bl <- lc_strategy_clusters(); if (is.null(bl) || !length(bl)) return(NULL)
+    ref <- bl[[length(bl)]]$rows[[1]]$r
+    if (is.null(ref) || !nrow(ref)) return(NULL)
+    sch <- ref$schedule
+    th <- function(x, al = "right") tags$th(style = sprintf(
+      "text-align:%s;color:#cbd5e1;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em;padding:3px 10px;border-bottom:1px solid #1e293b;", al), x)
+    td <- function(x, col = "#e2e8f0", al = "right", wt = 400, tip = NULL) tags$td(title = tip, style = sprintf(
+      "text-align:%s;color:%s;font-weight:%d;padding:3px 10px;border-bottom:1px solid #0f172a;font-variant-numeric:tabular-nums;", al, col, wt), x)
+    sgn <- function(v) if (is.na(v)) "#94a3b8" else if (v >= 0) "#10b981" else "#dc2626"
+    cells <- function(x) {
+      r <- x$r
+      if (is.null(r) || !nrow(r)) return(lapply(sch, function(s) td("n/a", "#64748b")))
+      if (identical(as.integer(attr(r, "buy_days")), 0L))
+        return(lapply(sch, function(s) td("no BUY", "#64748b", tip = "No name in this set had a BUY day in the window")))
+      lapply(sch, function(s) {
+        i <- match(s, r$schedule); v <- r$ret_pct[i]; vs <- v - r$spy_pct[i]
+        td(sprintf("%+.1f%%", v), sgn(v), wt = 700, tip = sprintf(
+          "$%s now from $1,000; SPY with the same deposits %+.1f%%, so %+.1fpp vs SPY; %d name%s bought",
+          formatC(r$value[i], format = "f", digits = 0, big.mark = ","), r$spy_pct[i], vs,
+          r$names[i], if (r$names[i] == 1) "" else "s"))
+      })
+    }
+    spy_row <- tags$tr(td("SPY, same deposits", "#94a3b8", "left", 600),
+                       lapply(ref$spy_pct, function(v) td(sprintf("%+.1f%%", v), sgn(v))), td(""))
+    body <- lapply(bl, function(blk) tagList(
+      tags$tr(tags$td(colspan = length(sch) + 2, style = paste0(
+        "color:#f1f5f9;font-weight:700;font-size:0.78rem;padding:7px 10px 3px;",
+        "border-bottom:1px solid #1e293b;"), sprintf("%s · %d name%s", blk$title, blk$n,
+                                                     if (blk$n == 1) "" else "s"))),
+      lapply(blk$rows, function(x) tags$tr(
+        td(x$label, "#e2e8f0", "left", 400), cells(x),
+        td(if (is.na(x$spread)) "n/a" else sprintf("%.1fpp", x$spread), "#cbd5e1"))))
+    )
+    short <- c("Lump sum at the start" = "Lump sum")
+    hdr <- ifelse(sch %in% names(short), short[sch], sch)
+    s <- attr(ref, "first_day"); e <- lc_strategy_base()$end
+    tagList(
+      tags$div(style = "color:#f1f5f9;font-weight:700;font-size:0.95rem;margin:0.9rem 0 0.1rem;",
+               sprintf("Each cluster on its own, %s to %s", format(s, "%b %d"), format(e, "%b %d"))),
+      tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
+        paste("Same $1,000 per cell and the same rules as the table above, for every cluster box",
+              "whatever is ticked, then every cluster together. Without the worst / best leaves out the",
+              "name with the lowest / highest return over the window (the master list's RETURN).",
+              "◆", NC_GEAR, "marked only keeps the disruptor and enabler names (display tags,",
+              "never a rule). Spread is the standard deviation of the names' window returns: how far",
+              "apart the names landed. Hover a cell for dollars and vs SPY.")),
+      tags$div(style = "overflow-x:auto;",
+        tags$table(style = "width:100%;border-collapse:collapse;font-size:0.8rem;",
+          tags$thead(tags$tr(th("Names", "left"), lapply(hdr, th), th("Spread (stdev)"))),
+          tags$tbody(spy_row, body))))
   })

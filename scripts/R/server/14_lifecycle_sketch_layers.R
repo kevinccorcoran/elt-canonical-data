@@ -7,8 +7,9 @@
   # names, 23 graded, overlap 0). Then the cluster-id view filter: only names in
   # the ticked clusters (by live id), owned or not (Kevin 2026-10-07, replacing
   # the 2026-09-01 owned-names exemption; every master-list cluster has its own
-  # box). Untouched / all ticked = everything.
-  lc_scope_names <- function(dv) {
+  # box). Untouched / all ticked = everything. narrow = FALSE skips that view
+  # filter (the per-cluster strategy table splits the whole set itself).
+  lc_scope_names <- function(dv, narrow = TRUE) {
     grade_u <- setNames(suppressWarnings(as.numeric(dv$qs_grade)), toupper(names(dv$qs_grade)))
     pp_univ <- tryCatch(lc_pos(), error = function(e) NULL)
     owned_univ <- if (!is.null(pp_univ) && nrow(pp_univ)) {
@@ -19,7 +20,7 @@
       dv$state_now[dv$tickers] %in% c("buy", "hold", "sell", "closed") &
       ((!is.na(grade_u[toupper(dv$tickers)]) & grade_u[toupper(dv$tickers)] >= QS_MIN) |
        toupper(dv$tickers) %in% owned_univ)]
-    tks[lc_in_sel(tks)]
+    if (narrow) tks[lc_in_sel(tks)] else tks
   }
 
   # "Show all pins" mode: every qualstream-pass board ticker's buy/hold/sell

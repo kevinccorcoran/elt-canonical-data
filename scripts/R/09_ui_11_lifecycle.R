@@ -41,6 +41,7 @@ ui_tab_lifecycle <- tabPanel("Lifecycle",
         plotlyOutput("qsCompareLC", height = "760px"),
         uiOutput("qsCompareNoteLC"),
         uiOutput("lcStrategyLC"),
+        uiOutput("lcStrategyClustersLC"),
         tags$hr(style = "border-color:#1e293b; margin:0.9rem 0 1rem;"),
         # --- My portfolio: strategy follower (model-linked DCA + ladder sells) ---
         tags$details(open = NA, class = "pf-wide",
