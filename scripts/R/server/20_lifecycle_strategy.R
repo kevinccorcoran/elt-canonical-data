@@ -91,13 +91,14 @@
   # Same calls, window and deposit schedules as the table above, for what is
   # selected only (Kevin 2026-10-19: "i only want see what ever is selected"): one
   # block per ticked cluster, then those clusters together when more than one is
-  # ticked; under the marks view, the marked names by cluster. Per block: all names; the
-  # worst name left out ("all but last": the master list sorts by window return, so
-  # its bottom row) and, beside it, the best name left out, because dropping only
-  # the loser flatters the result; the diamond/gear marked names only (display
-  # tags, never a rule); and the spread, the standard deviation of the names'
-  # window returns (the master list's RETURN). SPY is one row: its deposits do not
-  # depend on the names.
+  # ticked; under the marks view, the marked names by cluster. Per block: all names;
+  # the top, middle and bottom third by window return (the master list's RETURN), in
+  # place of the first cut's "without the worst / best" (Kevin 2026-10-19: "for this
+  # i actuall need top third names, bottom third, and mid third"); top and bottom
+  # take round(n / 3) names each, the middle the rest, none under 3 names; the
+  # diamond/gear marked names only (display tags, never a rule); and the spread, the
+  # standard deviation of the names' window returns. SPY is one row: its deposits do
+  # not depend on the names.
   lc_strategy_clusters <- reactive({
     b <- lc_strategy_base(); if (is.null(b)) return(NULL)
     U <- lc_scope_names(b$dv)                         # the selection, as the table above
@@ -119,12 +120,14 @@
     scen <- function(set) {
       out <- list(row(if (length(set) == 1) paste("Only", set) else sprintf("All %d names", length(set)),
                       set))
-      w <- wr[set]; w <- w[!is.na(w)]
-      if (length(w) >= 2) {
-        lo <- names(w)[which.min(w)]; hi <- names(w)[which.max(w)]
-        out <- c(out, list(
-          row(sprintf("Without the worst (%s, %+.1f%%)", lo, w[[lo]]), setdiff(set, lo)),
-          row(sprintf("Without the best (%s, %+.1f%%)", hi, w[[hi]]), setdiff(set, hi))))
+      w <- wr[set]; w <- sort(w[!is.na(w)], decreasing = TRUE)
+      k <- round(length(w) / 3)
+      if (length(w) >= 3) {
+        third <- function(lbl, tk) row(sprintf("%s (%s)", lbl, paste(tk, collapse = ", ")), tk)
+        top <- names(w)[seq_len(k)]; bot <- names(w)[length(w) - k + seq_len(k)]
+        mid <- setdiff(names(w), c(top, bot))
+        out <- c(out, list(third("Top third", top)),
+                 if (length(mid)) list(third("Middle third", mid)), list(third("Bottom third", bot)))
       }
       mk <- set[toupper(set) %in% marked]
       if (length(mk) && length(mk) < length(set))
@@ -193,8 +196,9 @@
                sprintf("Scenarios for %s, %s to %s", attr(bl, "scope"), format(s, "%b %d"), format(e, "%b %d"))),
       tags$div(style = "color:#64748b;font-size:0.72rem;margin-bottom:0.4rem;",
         paste("Same $1,000 per cell and the same rules as the table above, for the ticked clusters,",
-              "each on its own and together when more than one is ticked. Without the worst / best leaves out the",
-              "name with the lowest / highest return over the window (the master list's RETURN).",
+              "each on its own and together when more than one is ticked. The thirds rank the names by",
+              "their return over the window (the master list's RETURN), so they are picked with hindsight;",
+              "top and bottom get a third each, the middle the rest.",
               "\u25c6", NC_GEAR, "marked only keeps the disruptor and enabler names (display tags,",
               "never a rule). Spread is the standard deviation of the names' window returns: how far",
               "apart the names landed. Hover a cell for dollars and vs SPY.")),
