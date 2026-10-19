@@ -165,6 +165,27 @@ with DAG(
     # under-covered while reporting success.
     grade_new_buys >> verify_coverage
 
+    # Daily Lifecycle board (elt-inference-models scripts/board_daily.py): the
+    # dashboard's board walk and per-name trails computed once here instead of on
+    # every page load; writes monitoring.board_daily, board_daily_runs and
+    # board_trail (created by the script; history frozen from its first run).
+    # After grading so today's grades rank the adopt queue; all_done so a red
+    # grade day still publishes the board on yesterday's grades. Read-only for
+    # every rule: nothing downstream (portfolio_sync) reads it. Non-blocking leaf.
+    board_daily = BashOperator(
+        task_id="board_daily",
+        trigger_rule="all_done",
+        bash_command=(
+            "set -euo pipefail && "
+            "cd /opt/elt-inference-models && "
+            "python scripts/board_daily.py --daily"
+        ),
+        append_env=True,
+        do_xcom_push=False,
+        execution_timeout=timedelta(minutes=15),
+    )
+    grade_new_buys >> board_daily
+
     # Hands-off book maintenance runs after grading so today's grades rank the
     # adopt queue. all_done: a red grade day must still snapshot states and
     # archive sells (it just adopts on yesterday's grades).
