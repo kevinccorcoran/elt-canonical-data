@@ -38,6 +38,18 @@ ui_tab_lifecycle <- tabPanel("Lifecycle",
         # Benchmark comparison (+ click a board chip to overlay that ticker here).
         # The window slider above it re-anchors the sketch (lc_window_sketch).
         uiOutput("lcSketchWinUI"),
+        # "Smooth lines" button (strong display smoothing, lc_strong_line): the
+        # server flips it per click and sends lcSmoothState to restyle it.
+        div(style = "display:flex; justify-content:flex-end; margin:0.3rem 0 0.1rem;",
+            actionButton("lcSmoothBtn", "Smooth lines: off",
+                         style = "padding:0.35rem 0.9rem !important; font-size:0.7rem !important;")),
+        tags$style(HTML("#lcSmoothBtn.on { background:#34d399 !important; }")),
+        tags$script(HTML(paste(
+          "Shiny.addCustomMessageHandler('lcSmoothState', function(on) {",
+          "  var b = document.getElementById('lcSmoothBtn'); if (!b) return;",
+          "  b.classList.toggle('on', !!on);",
+          "  b.textContent = on ? 'Smooth lines: on' : 'Smooth lines: off';",
+          "});"))),
         plotlyOutput("qsCompareLC", height = "760px"),
         uiOutput("qsCompareNoteLC"),
         uiOutput("lcStrategyLC"),

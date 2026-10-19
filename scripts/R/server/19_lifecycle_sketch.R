@@ -2,6 +2,14 @@
   # Does the qualstream marking help? Equal-weight return of the current BUYs
   # qualstream graded vs the >= 68 (orange +) subset vs SPY, over the current
   # 4-month window. Descriptive only: see the caption + LC_QS_COMPARE_SQL.
+  # "Smooth lines" button above the sketch (Kevin 2026-10-19): each click flips
+  # strong display smoothing (lc_strong_line) for this tab; off on every page load.
+  lc_smooth_on <- reactiveVal(FALSE)
+  observeEvent(input$lcSmoothBtn, {
+    lc_smooth_on(!isTRUE(lc_smooth_on()))
+    session$sendCustomMessage("lcSmoothState", isTRUE(lc_smooth_on()))
+  })
+
   output$qsCompareLC <- renderPlotly({
     req(lc_sketch_data())
     d <- lc_sketch_data(); cmp <- d$qscmp
@@ -66,6 +74,20 @@
     # the market-creators view can hold no graded series at all (every marked
     # name vetoed or ungraded): SPY + the per-name lines still draw
     has_graded <- any(!is.na(cmp$graded_pct))
+    # strong smoothing (the button): the basket lines draw from cmpL; cmp keeps the
+    # real values for the end labels, the hovers (cmpR, same rows as cmpL) and the
+    # axis range, so a toggle never zooms
+    smooth <- isTRUE(lc_smooth_on())
+    cmpL <- cmp
+    if (smooth) {
+      cmpL <- lc_weekdays(cmp)
+      for (cn in intersect(c("spy_pct", "graded_pct", "passed_pct"), names(cmpL)))
+        cmpL[[cn]] <- lc_smooth2(cmpL[[cn]])
+    }
+    cmpR <- if (smooth) lc_weekdays(cmp) else cmp
+    hov <- function(lbl, raw) if (smooth)
+      list(customdata = raw, hovertemplate = paste0(lbl, "<br>%{x|%b %d}: %{customdata:.1f}%<extra></extra>"))
+      else list(hovertemplate = paste0(lbl, "<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
     fig <- plot_ly()
     # Build end-of-line label annotations
     endlabels <- list()
@@ -90,19 +112,19 @@
           xanchor = "left", yanchor = "middle", xshift = 5)
       }
     }
-    fig <- add_trace(fig, x = cmp$d, y = cmp$spy_pct, type = "scatter", mode = "lines",
-      name = "Benchmark (SPY)", line = lc_line(color = "#3b82f6", width = 2.5),
-      hovertemplate = "SPY<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+    fig <- do.call(add_trace, c(list(fig, x = cmpL$d, y = cmpL$spy_pct, type = "scatter", mode = "lines",
+      name = "Benchmark (SPY)", line = lc_line(color = "#3b82f6", width = 2.5)),
+      hov("SPY", cmpR$spy_pct)))
     if (has_graded)
-      fig <- add_trace(fig, x = cmp$d, y = cmp$graded_pct, type = "scatter", mode = "lines",
+      fig <- do.call(add_trace, c(list(fig, x = cmpL$d, y = cmpL$graded_pct, type = "scatter", mode = "lines",
         name = sprintf("%s graded names (%d)", if (nc_view) paste0("\u25c6", NC_GEAR) else "All", n_g),
-        line = lc_line(color = "#f59e0b", width = 3),
-        hovertemplate = "All graded names<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+        line = lc_line(color = "#f59e0b", width = 3)),
+        hov("All graded names", cmpR$graded_pct)))
     if (has_pass) {
-      fig <- add_trace(fig, x = cmp$d, y = cmp$passed_pct, type = "scatter", mode = "lines",
+      fig <- do.call(add_trace, c(list(fig, x = cmpL$d, y = cmpL$passed_pct, type = "scatter", mode = "lines",
         name = sprintf("%sassed qualstream ≥ 68 (%d)", if (nc_view) paste0("\u25c6", NC_GEAR, " p") else "P", n_p),
-        line = lc_line(color = "#10b981", width = 3),
-        hovertemplate = "Passed ≥68<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+        line = lc_line(color = "#10b981", width = 3)),
+        hov("Passed ≥68", cmpR$passed_pct)))
     }
     # Top-performers HINDSIGHT ceiling (opt-in, off by default): top decile of
     # buys by realized return, any qs. Dashed + labelled "hindsight" because it
@@ -111,10 +133,14 @@
     if (!is.null(tp)) tp$pins <- lc_win_cut(tp$pins, d$qscmp_to, "date")
     tp_suffix <- ""
     if (!is.null(tp) && !is.null(tp$line) && nrow(tp$line)) {
-      fig <- add_trace(fig, x = tp$line$d, y = tp$line$ret, type = "scatter", mode = "lines",
+      tpl <- if (smooth) lc_strong_line(tp$line) else tp$line
+      if (smooth && !is.null(tp$pins) && nrow(tp$pins))      # pins stay on the drawn line
+        tp$pins$y <- approx(as.numeric(as.Date(tpl$d)), tpl$ret,
+                            xout = as.numeric(as.Date(tp$pins$date)), rule = 2)$y
+      fig <- do.call(add_trace, c(list(fig, x = tpl$d, y = tpl$ret, type = "scatter", mode = "lines",
         name = sprintf("Top performers ≥ mean+1σ · hindsight, any qs (%d)", tp$n),
-        line = lc_line(color = "#e879f9", width = 2.5, dash = "dash"),
-        hovertemplate = "Top performers (hindsight)<br>%{x|%b %d}: %{y:.1f}%<extra></extra>")
+        line = lc_line(color = "#e879f9", width = 2.5, dash = "dash")),
+        hov("Top performers (hindsight)", tpl$raw)))
       # buy pins ride the line, ticker-labelled: green = bought in-window,
       # grey square = held since before the window (carried in at the anchor).
       if (!is.null(tp$pins) && nrow(tp$pins)) {
@@ -156,7 +182,7 @@
       # glyph end label; names off the master list dashed (chart only)
       first_on <- TRUE; first_off <- TRUE
       for (nm in names(pl$lines)) {
-        ln <- lc_soft_line(pl$lines[[nm]])
+        ln <- if (smooth) lc_strong_line(pl$lines[[nm]]) else lc_soft_line(pl$lines[[nm]])
         off <- nm %in% pl$offlist
         glyph <- lc_nc_glyph(unname(pl$marker[nm]), isTRUE(unname(pl$enabler[nm])))
         fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
@@ -189,7 +215,7 @@
       pl_name <- if (pl_auto) sprintf("Cluster %d names (%d)", pl$cluster, pl$n)
                  else sprintf("Qualstream pick lines (%d)", pl$n)
       for (nm in names(pl$lines)) {
-        ln <- lc_soft_line(pl$lines[[nm]])
+        ln <- if (smooth) lc_strong_line(pl$lines[[nm]]) else lc_soft_line(pl$lines[[nm]])
         fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
           name = pl_name,
           legendgroup = "picklines", showlegend = first,
@@ -225,10 +251,17 @@
       ck_pincol <- c(buy = "#22c55e", hold = "#f59e0b", sell = "#ef4444", closed = "#94a3b8")
       for (nm in names(ckl)) {
         ln <- ckl[[nm]]$line; ev <- ckl[[nm]]$ev
-        fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
+        if (smooth) {                                      # pins ride the drawn line, hover stays real
+          ln <- lc_strong_line(ln)
+          if (!is.null(ev) && nrow(ev)) {
+            ev$raw <- ev$ret
+            ev$ret <- approx(as.numeric(as.Date(ln$d)), ln$ret,
+                             xout = as.numeric(as.Date(ev$date)), rule = 2)$y
+          }
+        }
+        fig <- do.call(add_trace, c(list(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
           name = nm, legendgroup = paste0("ck_", nm), showlegend = TRUE,
-          line = lc_line(color = "#f8fafc", width = 2),
-          hovertemplate = paste0(nm, "<br>%{x|%b %d}: %{y:.1f}%<extra></extra>"))
+          line = lc_line(color = "#f8fafc", width = 2)), hov(nm, ln$raw)))
         if (nrow(ln) > 0) {
           last_i <- nrow(ln)
           endlabels[[length(endlabels) + 1]] <- list(
@@ -255,7 +288,9 @@
               textfont = list(color = pc, size = 10),
               cliponaxis = FALSE,
               hovertext = sprintf("%s %s %s", nm, toupper(s), format(sub$date)),
-              hovertemplate = "%{hovertext}<br>%{y:.1f}%<extra></extra>")
+              hovertemplate = if (smooth) "%{hovertext}<br>%{customdata:.1f}%<extra></extra>"
+                              else "%{hovertext}<br>%{y:.1f}%<extra></extra>",
+              customdata = if (smooth) sub$raw)
           }
         }
       }
@@ -343,11 +378,11 @@
                      "%Y-%m-%d %H:%M:%S", tz = "UTC")
       # pins sit on the displayed line: passed, else graded, else SPY (the
       # market-creators view can hold no basket series at all)
-      lineY <- if (any(!is.na(cmp$passed_pct))) cmp$passed_pct
-               else if (any(!is.na(cmp$graded_pct))) cmp$graded_pct else cmp$spy_pct
+      lineY <- if (any(!is.na(cmpL$passed_pct))) cmpL$passed_pct
+               else if (any(!is.na(cmpL$graded_pct))) cmpL$graded_pct else cmpL$spy_pct
       okl <- !is.na(lineY)
       G$y <- if (sum(okl) >= 2)
-               approx(as.numeric(cmp$d)[okl], lineY[okl], xout = G$xnum, rule = 2)$y
+               approx(as.numeric(cmpL$d)[okl], lineY[okl], xout = G$xnum, rule = 2)$y
              else G$ret
       for (s in c("buy", "hold", "sell")) for (stl in c(TRUE, FALSE)) {
         sub <- G[G$state == s & G$settled == stl, , drop = FALSE]; if (!nrow(sub)) next
@@ -384,9 +419,9 @@
       cx <- ifelse(xa == "right", xp - wp / 2 + 3, ifelse(xa == "left", xp + wp / 2 - 3, xp))
       # obstacles: the three basket lines (a thin box per day) + every pin
       lpts <- do.call(rbind, lapply(c("spy_pct", "graded_pct", "passed_pct"), function(cn)
-        if (cn %in% names(cmp)) data.frame(x = as.numeric(cmp$d), y = cmp[[cn]]) else NULL))
+        if (cn %in% names(cmpL)) data.frame(x = as.numeric(cmpL$d), y = cmpL[[cn]]) else NULL))
       lpts <- lpts[!is.na(lpts$y), , drop = FALSE]
-      lw <- 2 * PW / max(nrow(cmp), 1)
+      lw <- 2 * PW / max(nrow(cmpL), 1)
       off <- rep(STEM, nrow(G))
       for (it in 1:8) {
         R  <- yhi2 - ylo2
@@ -441,12 +476,20 @@
                 gridcolor = "rgba(148,163,184,0.10)", zeroline = TRUE,
                 zerolinecolor = "rgba(148,163,184,0.30)", ticksuffix = "%")
     if (!is.null(ap_yrange)) yax$range <- ap_yrange
+    else if (smooth) {                                    # no zoom on toggle: the real lines' range
+      rawy <- c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct,
+                if (!is.null(tp) && !is.null(tp$line)) tp$line$ret,
+                if (!is.null(pl) && length(pl$lines)) unlist(lapply(pl$lines, function(x) x$ret), use.names = FALSE),
+                if (!is.null(ckl) && length(ckl)) unlist(lapply(ckl, function(x) x$line$ret), use.names = FALSE))
+      ylo <- min(c(rawy, 0), na.rm = TRUE); yhi <- max(rawy, na.rm = TRUE); ysp <- max(yhi - ylo, 1)
+      yax$range <- c(ylo - ysp * 0.05, yhi + ysp * 0.06)
+    }
     dark_layout(fig,
       title = list(text = paste0(sprintf(
           "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s%s",
           format(d$qscmp_anchor, "%b %d"),
           if (is.null(d$qscmp_to)) "" else format(d$qscmp_to, " to %b %d")), cl_suffix,
-          ap_suffix, tp_suffix, pl_suffix),
+          ap_suffix, tp_suffix, pl_suffix, if (smooth) " · smoothed" else ""),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
