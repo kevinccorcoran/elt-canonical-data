@@ -210,6 +210,19 @@
     beat12 <- cv$beat_pct[cv$horizon_months == 12][1]
     H <- if (is.null(d$hold_months)) 36 else d$hold_months
     win <- if (isTRUE(d$to_today)) sprintf("%d mo, held to today", nrow(live) - 1) else sprintf("%dmo hold", H)
+    # Look-ahead label (Kevin 2026-10-20, after elt-inference-models
+    # docs/lookahead_audit_2026-10-20.md): the selections, Typical and the
+    # projection all come from walk_forward_top_picks, whose scores used data
+    # dated after each as-of date. Only the Live log is out of sample.
+    tagList(
+    tags$div(style = paste("color:#fbbf24; background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.35);",
+                           "border-radius:6px; padding:6px 10px; font-size:0.78rem; margin-bottom:0.5rem; line-height:1.45;"),
+      HTML(paste("<b>Look-ahead warning (audit Oct 20, 2026).</b> These backtest selections were scored with data",
+                 "dated after their own cutoff, often years later, so for most past dates they were not knowable",
+                 "then. Where an honest test is possible,",
+                 "the same picks returned about -2pp vs Benchmark over 12 months instead of about +19pp. Read the",
+                 "edge shown in the selections, Typical and the projection as mostly look-ahead. The Live log is",
+                 "the real record."))),
     tags$div(style = "color:#cbd5e1; font-size:0.82rem; margin-bottom:0.6rem; line-height:1.5;",
       HTML(sprintf(paste0(
         "<b>As of %s</b> (%s): the selections returned <b>%+.1f%%</b> vs Benchmark <b>%+.1f%%</b> = <b>%+.1fpp</b>. ",
@@ -217,7 +230,7 @@
         "<b>%+.1f%%</b> vs Benchmark <b>%+.1f%%</b> = <b>%+.1fpp</b>. A fixed hold makes as-of dates comparable; ",
         "'to today' lets old dates run 8-13 years (dropped series get frozen and drag them)."),
         format(d$anchor, "%b %Y"), win, pend, spend, beat_live, beat12,
-        lg$entry_d[1], lg$basket_ret_pct[1], lg$spy_ret_pct[1], lg$basket_ret_pct[1] - lg$spy_ret_pct[1])))
+        lg$entry_d[1], lg$basket_ret_pct[1], lg$spy_ret_pct[1], lg$basket_ret_pct[1] - lg$spy_ret_pct[1]))))
   })
 
   # Risk-adjusted stats: does the beat survive accounting for how much market
