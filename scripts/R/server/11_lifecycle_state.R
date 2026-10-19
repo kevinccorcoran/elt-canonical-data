@@ -22,9 +22,13 @@
   # master-list checkboxes -> the set of tickers to draw as their own lines on the
   # sketch (persisted across re-renders/hourly refresh so a checked name stays on).
   lc_sketch_ticks <- reactiveVal(character(0))
+  # Unticking the last row sends an empty list, which arrives as NULL, so NULL
+  # must clear the lines (Kevin 2026-10-19: with every row unticked the last
+  # name's white line stayed on). At startup NULL just sets the empty default.
   observeEvent(input$lcSketchChecked, {
-    lc_sketch_ticks(toupper(as.character(input$lcSketchChecked)))
-  }, ignoreNULL = TRUE)
+    v <- unlist(input$lcSketchChecked)
+    lc_sketch_ticks(if (is.null(v)) character(0) else toupper(as.character(v)))
+  }, ignoreNULL = FALSE)
   lcAutoTick   <- reactiveVal(0)
   # Generate trigger bookkeeping for the cross-session memo: a click on the
   # button forces a reload; the auto-start and hourly ticks may reuse a load
