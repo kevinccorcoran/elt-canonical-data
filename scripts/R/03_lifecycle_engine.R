@@ -658,3 +658,81 @@ lc_track_agg <- function(A, B) {
        vs_now  = wc$v, n_now  = wc$n, nm_now  = wc$nm)
 }
 
+
+# What the board's own calls would have earned over a range (Kevin 2026-10-19).
+# Money goes in on a schedule and each deposit is split equally across the names
+# the board says BUY that day (`states`: the per-name trails, change points of
+# buy/hold/sell, as on the pins); a purchase is held until that name's next SELL,
+# then kept as cash. A deposit on a day with no BUY waits for the next run day
+# that has one (to the end if none comes). SPY gets the same deposits on the same
+# days and is held to the end. Prices are as-of closes (`px`: ticker, d, px incl.
+# SPY). One row per schedule, each investing `total` in all.
+lc_strategy_schedules <- function(states, px, run_d, start, end, total = 1000) {
+  start <- as.Date(start); end <- as.Date(end)
+  rd <- sort(unique(as.Date(run_d)[as.Date(run_d) >= start & as.Date(run_d) <= end]))
+  states <- Filter(function(s) !is.null(s) && nrow(s) > 0, states)
+  if (!length(rd) || is.null(px) || !nrow(px)) return(NULL)
+  by_tk <- lapply(split(px[, c("d", "px")], px$ticker), function(p) p[order(p$d), , drop = FALSE])
+  price_at <- function(tk, x) {
+    p <- by_tk[[tk]]; if (is.null(p)) return(NA_real_)
+    i <- findInterval(as.numeric(x), as.numeric(p$d)); if (i < 1) NA_real_ else p$px[i]
+  }
+  tks <- names(states)
+  state_on <- function(tk) {                          # state on every run day in range
+    s <- states[[tk]]; i <- findInterval(as.numeric(rd), as.numeric(s$date))
+    out <- rep(NA_character_, length(rd)); out[i > 0] <- s$state[i[i > 0]]; out
+  }
+  st <- if (length(tks)) vapply(tks, state_on, character(length(rd))) else
+          matrix(character(0), nrow = length(rd), ncol = 0)
+  st <- matrix(st, nrow = length(rd), dimnames = list(NULL, tks))
+  buys_on <- lapply(seq_along(rd), function(j) {      # priced BUY names per run day
+    b <- tks[st[j, ] %in% "buy"]
+    b[!is.na(vapply(b, function(tk) price_at(tk, rd[j]), numeric(1)))]
+  })
+  has_buy <- lengths(buys_on) > 0
+  exit_of <- function(tk, D) {
+    s <- states[[tk]]; k <- which(s$date > D & s$state == "sell")
+    if (length(k)) s$date[k[1]] else as.Date(NA)
+  }
+  spy_end <- price_at("SPY", end)
+  first_on_or_after <- function(x) {
+    i <- findInterval(as.numeric(x) - 1, as.numeric(rd)) + 1
+    rd[i[i <= length(rd)]]
+  }
+  sched <- list(
+    "Lump sum at the start" = start,
+    "Every run day"         = rd,
+    "Every week"            = seq(start, end, by = "week"),
+    "Every 2 weeks"         = seq(start, end, by = "2 weeks"),
+    "Every month"           = seq(start, end, by = "month"))
+  rows <- lapply(names(sched), function(nm) {
+    dep <- first_on_or_after(sched[[nm]])
+    if (!length(dep)) return(NULL)
+    a <- total / length(dep)
+    val <- spy <- 0; waited <- cashed <- sold <- 0L; names_bought <- character(0)
+    for (x in as.list(dep)) {
+      sp0 <- price_at("SPY", x)
+      spy <- spy + if (is.na(sp0) || is.na(spy_end)) a else a * spy_end / sp0
+      j <- which(rd >= x & has_buy)
+      if (!length(j)) { val <- val + a; cashed <- cashed + 1L; next }
+      D <- rd[j[1]]; if (D > x) waited <- waited + 1L
+      b <- buys_on[[j[1]]]; names_bought <- union(names_bought, b)
+      for (tk in b) {
+        p0 <- price_at(tk, D); ex <- exit_of(tk, D)
+        out_d <- if (!is.na(ex) && ex <= end) { sold <- sold + 1L; ex } else end
+        p1 <- price_at(tk, out_d); if (is.na(p1)) p1 <- p0
+        val <- val + (a / length(b)) * p1 / p0
+      }
+    }
+    data.frame(schedule = nm, deposits = length(dep), invested = total, value = val,
+               ret_pct = (val / total - 1) * 100, spy_value = spy, spy_pct = (spy / total - 1) * 100,
+               waited = waited, cashed = cashed, sold = sold, names = length(names_bought),
+               stringsAsFactors = FALSE)
+  })
+  out <- do.call(rbind, rows)
+  if (is.null(out)) return(NULL)
+  attr(out, "buy_days") <- sum(has_buy); attr(out, "run_days") <- length(rd)
+  attr(out, "first_day") <- rd[1]                     # deposits start at the first run day
+  attr(out, "last_buy") <- if (any(has_buy)) max(rd[has_buy]) else as.Date(NA)
+  out
+}
