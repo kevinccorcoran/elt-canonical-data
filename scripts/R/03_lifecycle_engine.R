@@ -512,7 +512,8 @@ lc_soft_line <- function(ln, k = LC_BUNDLE_SMOOTH_K) {
 
 # Strong smoothing, the sketch's "Smooth lines" button (Kevin 2026-10-19: "in the
 # graph i would like an option like a button to smooth the lines very noticely").
-# Off by default. The same tapered centered average as above, run twice over
+# On by default since the same day ("smooth line to be on by default"); a click
+# turns it off for the tab. The same tapered centered average as above, run twice over
 # LC_STRONG_SMOOTH_K trading days (a triangular kernel about a month wide), on
 # EVERY sketch line including SPY and the baskets. Display only, like the light
 # one: each line still starts at 0% and ends at its real return, hovers show the
