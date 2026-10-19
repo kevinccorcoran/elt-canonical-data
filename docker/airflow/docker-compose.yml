@@ -150,6 +150,13 @@ services:
 
   airflow-shiny:
     <<: *airflow-common
+    # Own image since 2026-10-19 (docker/shiny/Dockerfile: R 4.5 + the dashboard's
+    # packages, httpuv patched for rstudio/httpuv#171); the Airflow image has no R.
+    build:
+      context: ../..
+      dockerfile: docker/shiny/Dockerfile
+    image: alphastream-shiny:latest
+    init: true
     container_name: airflow-shiny
     restart: unless-stopped
     depends_on:
