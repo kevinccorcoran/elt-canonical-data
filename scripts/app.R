@@ -579,6 +579,7 @@ lc_bundle_memo_put <- function(sig, dat) {
   .lc_memo$bundle <- list(sig = sig, at = Sys.time(), dat = dat)
   .lc_memo$dv <- NULL; .lc_memo$dv_key <- NULL
   .lc_memo$trails <- new.env(parent = emptyenv()); .lc_memo$trails_stamp <- dat$memo_stamp
+  .lc_memo$px <- NULL; .lc_memo$px_from <- NULL; .lc_memo$px_spy_max <- NULL
   dat
 }
 lc_loaded_msg <- function(d) sprintf(
@@ -618,6 +619,126 @@ lc_dl_of <- function(d, key) {
   if (is.na(i)) as.Date(NA) else m[[i]]
 }
 
+# Price rows shared by every Lifecycle reader and session (2026-10-19): the pins,
+# pick lines, checked lines, master list and track record each pulled overlapping
+# cdm.ingest_combined ranges on every render. Rows are cached per ticker from the
+# earliest date asked, per database, and reset with each new load; every read
+# returns what its own query did: date >= from, optionally capped at SPY's last
+# date, ordered by ticker and date.
+lc_px_get <- function(con, tks, from, cap_spy = TRUE) {
+  tks <- unique(as.character(tks)); from <- format(as.Date(from))
+  info <- tryCatch(DBI::dbGetInfo(con), error = function(e) list())
+  db <- paste(info$host, info$port, info$dbname, sep = "|")
+  if (!identical(.lc_memo$px_db, db)) {
+    .lc_memo$px <- NULL; .lc_memo$px_from <- NULL; .lc_memo$px_spy_max <- NULL; .lc_memo$px_db <- db
+  }
+  have <- .lc_memo$px_from; if (is.null(have)) have <- setNames(character(0), character(0))
+  need <- tks[!(tks %in% names(have)) | (unname(have[tks]) > from) %in% TRUE]
+  if (length(need)) {
+    inl <- paste(sprintf("'%s'", gsub("'", "''", need, fixed = TRUE)), collapse = ",")
+    new <- DBI::dbGetQuery(con, sprintf(
+      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
+       WHERE ticker IN (%s) AND date >= '%s' ORDER BY ticker, date", inl, from))
+    old <- .lc_memo$px
+    if (!is.null(old)) old <- old[!(old$ticker %in% need), , drop = FALSE]
+    .lc_memo$px <- rbind(old, new)
+    have[need] <- from
+    .lc_memo$px_from <- have
+  }
+  if (cap_spy && is.null(.lc_memo$px_spy_max))
+    .lc_memo$px_spy_max <- DBI::dbGetQuery(con,
+      "SELECT MAX(date)::text AS d FROM cdm.ingest_combined WHERE ticker = 'SPY'")$d[1]
+  px <- .lc_memo$px
+  if (is.null(px)) return(data.frame(ticker = character(0), d = character(0), px = numeric(0),
+                                     stringsAsFactors = FALSE))
+  keep <- px$ticker %in% tks & px$d >= from
+  if (cap_spy) keep <- keep & !is.na(.lc_memo$px_spy_max) & px$d <= .lc_memo$px_spy_max
+  out <- px[keep, , drop = FALSE]
+  out <- out[order(out$ticker, out$d), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
+# The board from the pipeline (elt-inference-models scripts/board_daily.py, run
+# daily after grading): the same walk, cascade, adopt queue and trails as
+# derivedLC + lc_board_trail, computed once per day instead of on every page load,
+# with history frozen from the table's go-live (an evidence re-mint no longer
+# repaints old pins). Used when its latest run covers the latest ledger day;
+# otherwise (tables missing, the day's run not in yet, dev/staging DBs) the
+# dashboard derives the board itself as before.
+lc_board_load <- function(con, led_max) {
+  run <- tryCatch(DBI::dbGetQuery(con, "
+    SELECT as_of::text AS as_of, go_live::text AS go_live, runs_tot, coh_n,
+           array_to_string(coh_dates, ' ') AS coh_dates
+    FROM monitoring.board_daily_runs WHERE hz = 12 ORDER BY as_of DESC LIMIT 1"),
+    error = function(e) NULL)
+  if (is.null(run) || !nrow(run) || is.na(led_max) || run$as_of[1] < led_max) return(NULL)
+  daily <- DBI::dbGetQuery(con, "
+    SELECT ticker, state, why, src, proven, board_ok, entry_date::text AS entry_date,
+           exit_date::text AS exit_date, exit_reason, maturity_date::text AS maturity_date,
+           run_days, qs_rank, win_pct::float8 AS win_pct
+    FROM monitoring.board_daily WHERE as_of = $1::date AND hz = 12",
+    params = list(run$as_of[1]))
+  trail <- DBI::dbGetQuery(con, "
+    SELECT ticker, d::text AS date, state FROM monitoring.board_trail
+    WHERE as_of = $1::date AND hz = 12 ORDER BY ticker, seq",
+    params = list(run$as_of[1]))
+  if (!nrow(daily)) return(NULL)
+  # what the board said each day since its go-live, for every name: the pins'
+  # recorded flag and fold reasons read it like portfolio.state_history
+  hist <- DBI::dbGetQuery(con, "
+    SELECT ticker, as_of::text AS as_of, hz, state, why FROM monitoring.board_daily
+    WHERE hz = 12 AND as_of >= $1::date ORDER BY ticker, as_of",
+    params = list(run$go_live[1]))
+  list(run = as.list(run[1, ]), daily = daily, trail = trail, hist = hist)
+}
+# Recorded board states = portfolio.state_history (tracked names, since 2026-08-07)
+# plus, from the board table's go-live, the table's own day for every name. A day
+# the user moved by hand (paused/sold by user) keeps the user's row.
+lc_rec_with_board <- function(rec, hist) {
+  if (is.null(hist) || !nrow(hist)) return(rec)
+  cols <- c("ticker", "as_of", "hz", "state", "why")
+  hist <- hist[, cols]
+  if (is.null(rec) || !nrow(rec)) return(hist)
+  key <- function(x) paste(toupper(x$ticker), x$as_of, x$hz)
+  user <- !is.na(rec$why) & rec$why %in% c("paused by user", "sold by user")
+  out <- rbind(rec[!(key(rec) %in% key(hist)) | user, cols, drop = FALSE],
+               hist[!(key(hist) %in% key(rec[user, , drop = FALSE])), , drop = FALSE])
+  out <- out[order(out$ticker, out$as_of, out$hz), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+# derivedLC's list, built from the table rows: the same names, types and order, so
+# every reader keeps working. M carries no walk, only the names and (attribute
+# lc_trails) each name's stored trail, which lc_board_trail serves directly.
+lc_dv_from_board <- function(b, d) {
+  x <- b$daily[order(b$daily$ticker), , drop = FALSE]
+  tk <- x$ticker
+  nm <- function(v) setNames(v, tk)
+  M <- matrix(character(0), nrow = length(tk), ncol = 0, dimnames = list(tk, NULL))
+  tr <- b$trail
+  attr(M, "lc_trails") <- if (nrow(tr))
+    lapply(split(seq_len(nrow(tr)), tr$ticker), function(i)
+      data.frame(date = tr$date[i], state = tr$state[i], stringsAsFactors = FALSE)) else list()
+  coh_dates <- if (!is.null(b$run$coh_dates) && !is.na(b$run$coh_dates) && nzchar(b$run$coh_dates))
+                 strsplit(b$run$coh_dates, " ", fixed = TRUE)[[1]] else character(0)
+  qr <- suppressWarnings(as.integer(x$qs_rank))
+  list(M = M, dates = sort(unique(c(coh_dates, d$led$d))), tickers = tk,
+       entry_of = nm(as.character(x$entry_date)), exit_of = nm(as.character(x$exit_date)),
+       reason_of = nm(ifelse(is.na(x$exit_reason), "", as.character(x$exit_reason))), hz = 12L,
+       state_now = nm(as.character(x$state)), why_now = nm(as.character(x$why)),
+       mat_of = nm(suppressWarnings(as.Date(x$maturity_date))), src_of = nm(as.character(x$src)),
+       prov_of = nm(as.logical(x$proven)), wpct = nm(suppressWarnings(as.numeric(x$win_pct))),
+       board_ok = nm(as.logical(x$board_ok)), coh_dates = coh_dates,
+       coh_n = as.integer(b$run$coh_n), runs_of = nm(as.integer(x$run_days)),
+       runs_tot = as.integer(b$run$runs_tot),
+       # grades as derivedLC reads them (live, any graded name), queue as the run ranked it
+       qs_grade = if (!is.null(d$qs) && nrow(d$qs) > 0 && all(c("ticker", "grade") %in% names(d$qs)))
+                    setNames(suppressWarnings(as.numeric(d$qs$grade)), d$qs$ticker)
+                  else setNames(numeric(0), character(0)),
+       qs_buys = tk[!is.na(qr)][order(qr[!is.na(qr)])])
+}
+
 # Board-faithful trail for the chart overlay: the walk's daily state row
 # collapsed to its changes, but post-epoch buy/hold days are REPLAYED under the chip rule (monthly
 # majority x proven slot) instead of the raw per-run walk. The raw walk marks
@@ -632,6 +753,9 @@ lc_dl_of <- function(d, key) {
 # trail and chip agree.
 lc_board_trail <- function(M, dates, tk, led, epoch, prov, now_state,
                            hz = 12L, dl_d = as.Date(NA), rec = NULL) {
+  # board from the pipeline: the trail was computed (or frozen) there
+  stored <- attr(M, "lc_trails")
+  if (!is.null(stored)) return(stored[[tk]])
   # memo per load (M carries the load stamp): six readers ask for the same trails
   st  <- attr(M, "lc_memo")
   key <- if (!is.null(st) && identical(.lc_memo$trails_stamp, st))
@@ -7851,10 +7975,12 @@ server <- function(input, output, session) {
   # the "mystery" dev adopt batches of Aug 14-20. Removed 2026-08-21; manual
   # Add/Adopt/Sell/Archive remain the dashboard's write surface.
 
-  # Transition log: on each Generate, snapshot every tracked ticker's current
-  # state (buy/hold/sell/closed) to portfolio.state_history, upserted per
-  # (ticker, as_of, hz). Same-day re-Generate refreshes; new days accumulate ->
-  # the Buy->Hold->Sell trail per position. DB-backend only (needs the schema).
+  # Transition log: the user's own moves (paused / sold by user) go to
+  # portfolio.state_history, upserted per (ticker, as_of, hz). The engine's daily
+  # state is recorded by the pipeline (portfolio_sync for tracked names,
+  # monitoring.board_daily for every name); this observer used to write it too,
+  # overwriting the sync's row whenever the dashboard was open (2026-10-19).
+  # DB-backend only (needs the schema).
   observe({
     if (!identical(lc_backend(), "db")) return()
     dv <- tryCatch(derivedLC(), error = function(e) NULL); if (is.null(dv)) return()
@@ -7879,6 +8005,7 @@ server <- function(input, output, session) {
     soldtk <- toupper(p$ticker[sold])
     is2 <- rows$ticker %in% soldtk
     rows$state[is2] <- "sell"; rows$why[is2] <- "sold by user"
+    rows <- rows[ih | is2, , drop = FALSE]                                # user moves only
     rows <- rows[!is.na(rows$state) & nzchar(rows$state), , drop = FALSE]  # only what the board knows
     if (!nrow(rows)) return()
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return()
@@ -8346,11 +8473,8 @@ server <- function(input, output, session) {
     con <- tryCatch(get_con(input), error = function(e) NULL)
     if (is.null(con)) return(NULL)
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    inl <- paste(sprintf("'%s'", gsub("'", "''", universe, fixed = TRUE)), collapse = ",")
-    px <- tryCatch(dbGetQuery(con, sprintf(
-      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
-       WHERE ticker IN (%s,'SPY') AND date >= DATE '2026-06-01' ORDER BY ticker, date", inl)),
-      error = function(e) NULL)
+    px <- tryCatch(lc_px_get(con, c(universe, "SPY"), "2026-06-01", cap_spy = FALSE),
+                   error = function(e) NULL)
     if (is.null(px) || !nrow(px) || !any(toupper(px$ticker) == "SPY")) return(NULL)
     px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
     sp <- px[toupper(px$ticker) == "SPY", c("d", "px")]
@@ -8955,12 +9079,7 @@ server <- function(input, output, session) {
     if (!length(tks)) return(NULL)
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
-    px <- tryCatch(dbGetQuery(con, sprintf(
-      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
-       WHERE ticker IN (%s,'SPY') AND date >= '%s'
-         AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
-       ORDER BY ticker, date", inlist, format(anchor))), error = function(e) NULL)
+    px <- tryCatch(lc_px_get(con, c(tks, "SPY"), anchor), error = function(e) NULL)
     if (is.null(px) || !nrow(px)) return(NULL)
     px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
     asof <- function(df, dd) { s <- df[df$d <= dd, , drop = FALSE]
@@ -9141,12 +9260,7 @@ server <- function(input, output, session) {
   lc_price_lines <- function(tks, anchor) {
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(list())
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
-    px <- tryCatch(dbGetQuery(con, sprintf(
-      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
-       WHERE ticker IN (%s) AND date >= '%s'
-         AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
-       ORDER BY ticker, date", inlist, format(anchor))), error = function(e) NULL)
+    px <- tryCatch(lc_px_get(con, tks, anchor), error = function(e) NULL)
     if (is.null(px) || !nrow(px)) return(list())
     px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
     asof <- function(df, dd) { s <- df[df$d <= dd, , drop = FALSE]
@@ -9184,12 +9298,7 @@ server <- function(input, output, session) {
     dv <- tryCatch(derivedLC(), error = function(e) NULL)   # for the buy/hold/sell pins
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
-    px <- tryCatch(dbGetQuery(con, sprintf(
-      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
-       WHERE ticker IN (%s) AND date >= '%s'
-         AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
-       ORDER BY ticker, date", inlist, format(anchor))), error = function(e) NULL)
+    px <- tryCatch(lc_px_get(con, tks, anchor), error = function(e) NULL)
     if (is.null(px) || !nrow(px)) return(NULL)
     px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
     asof <- function(df, dd) { s <- df[df$d <= dd, , drop = FALSE]
@@ -9694,7 +9803,11 @@ server <- function(input, output, session) {
         error = function(e) NULL)
       # market-shift tags: display-only marker + market-creators view (see NC_TAG_VERSION)
       nc <- lc_load_category_tags(con)
+      # the day's board from the pipeline (NULL -> derivedLC walks it here)
+      board <- tryCatch(lc_board_load(con, max(led$d)), error = function(e) NULL)
+      if (!is.null(board)) rec_states <- lc_rec_with_board(rec_states, board$hist)
       dat <- list(led = led, gate = gate, meta = meta, meta_dl = lc_meta_dl(meta), sl = sl, coh = coh,
+                  board = board,
                   qs = qs, qscmp = qscmp, qscmp_detail = qscmp_detail, qscmp_anchor = qs_anchor,
                   nested = nested, rec_states = rec_states,
                   nc = nc,
@@ -9725,7 +9838,7 @@ server <- function(input, output, session) {
     # the load stamp so lc_board_trail can memo the trails of this walk
     mk <- if (!is.null(d$memo_stamp)) paste(d$memo_stamp, format(Sys.Date()), sep = "|")
     if (!is.null(mk) && identical(.lc_memo$dv_key, mk)) return(.lc_memo$dv)
-    dv <- (function() {
+    dv <- if (!is.null(d$board)) lc_dv_from_board(d$board, d) else (function() {
     hz <- 12L   # the board derives at the canonical 12-month gate horizon (holdLC retired 2026-08-26)
     led <- d$led
     ch  <- if (!is.null(d$coh) && nrow(d$coh) > 0)
@@ -10090,13 +10203,7 @@ server <- function(input, output, session) {
     tks <- lc_ml_names(); if (!length(tks)) return(NULL)
     con <- tryCatch(get_con(input), error = function(e) NULL); if (is.null(con)) return(NULL)
     on.exit({ if (DBI::dbIsValid(con)) dbDisconnect(con) }, add = TRUE)
-    inlist <- paste(sprintf("'%s'", gsub("'", "''", tks, fixed = TRUE)), collapse = ",")
-    px <- tryCatch(dbGetQuery(con, sprintf(
-      "SELECT ticker, date::text AS d, adj_close AS px FROM cdm.ingest_combined
-       WHERE ticker IN (%s) AND date >= '%s'
-         AND date <= (SELECT MAX(date) FROM cdm.ingest_combined WHERE ticker='SPY')
-       ORDER BY ticker, date", inlist, format(as.Date(d$qscmp_anchor)))),
-      error = function(e) NULL)
+    px <- tryCatch(lc_px_get(con, tks, as.Date(d$qscmp_anchor)), error = function(e) NULL)
     if (is.null(px) || !nrow(px)) return(NULL)
     px$ticker <- toupper(px$ticker); px$d <- as.Date(px$d); px$px <- as.numeric(px$px)
     px[!is.na(px$px) & px$px > 0, , drop = FALSE]
