@@ -213,6 +213,17 @@ class SecClient:
                 continue
             resp.raise_for_status()
 
+    def last_modified(self, url: str) -> datetime | None:
+        """HEAD request: the file's Last-Modified time, None if absent."""
+        self._throttle()
+        self.requests_made += 1
+        resp = self.session.head(url, timeout=HTTP_TIMEOUT_SECONDS, allow_redirects=True)
+        if resp.status_code == 403:
+            raise RuntimeError(f"SEC returned 403 for {url}. Check SEC_USER_AGENT and the request rate.")
+        resp.raise_for_status()
+        lm = resp.headers.get("Last-Modified")
+        return parsedate_to_datetime(lm) if lm else None
+
     def get_json(self, url: str) -> Any | None:
         resp = self.get(url)
         if resp is None:

@@ -77,6 +77,24 @@ sources:
           is complete; kept apart so no backtest uses them by accident.
       - name: load_runs
         description: One row per loader run (bulk or daily) with its window and counts.
+      # Full statements from SEC's Financial Statement and Notes data sets
+      # (tools/create_edgar_statements_schema.sql): splits, custom tags, layout.
+      - name: fsn_submissions
+        description: One row per XBRL filing in scope. accepted_at is a reliable New York acceptance time.
+      - name: fsn_numbers
+        description: >
+          Every number (period, unit, split) whose tag is a line on BS/IS/CF/EQ/CI of
+          that filing. dim_id 0 is the plain total. ddate is rounded by SEC to month end.
+      - name: fsn_presentation
+        description: Statement layout. One row per statement line (stmt, report, line, plabel).
+      - name: fsn_tags
+        description: Tags referenced by fsn_numbers / fsn_presentation, standard and custom.
+      - name: fsn_dimensions
+        description: Split definitions (axis=member pairs). dim_id 0 = no split.
+      - name: fsn_files
+        description: One row per loaded data-set zip.
+      - name: fsn_statement_lines
+        description: View joining all fsn tables into readable statement lines.
 
   - name: analysis
     database: "{{ env_var('DB_DATABASE', 'prod') }}"
