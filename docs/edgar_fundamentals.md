@@ -13,6 +13,7 @@ Raw only: no ratios, no tag mapping, no cleaning. The indicator layer
 | DAGs | `raw_ingest_edgar_bulk` (manual, once), `raw_ingest_edgar_daily` (05:30 Amsterdam) |
 | Tests | `tests/data_quality/test_edgar_raw.py`, `tests/ingestion/test_edgar_parsers.py` |
 | Open issues | `tools/edgar_open_issues.sql` |
+| Full statements | `tools/create_edgar_statements_schema.sql`, `edgar_statements_to_raw_etl.py`, DAG `raw_ingest_edgar_statements` (§7) |
 
 ---
 
@@ -59,7 +60,10 @@ what keep it out.
    16:00 close on their own filing date (51.6% of 11,414 filings checked
    against SEC's RSS acceptance times; only 12.8% land before the open). A
    strategy that trades at the close of `filed_date` would see the number
-   before the market did.
+   before the market did. A few filings (4 of 20,917 in 2024q4) carry
+   a filed date one to three days before SEC accepted them (SEC filing-date
+   adjustments). Where `edgar.fsn_submissions.accepted_at` is known, the safe
+   as-of date is the later of `filed_date` and the acceptance day.
 2. **Take the newest version filed on or before the as-of date.** Every
    restatement is its own row. Apple's FY2009 revenue was $36.5B in the
    10-K (filed 2009-10-27) and $42.9B in the 10-K/A (2010-01-25). On
@@ -195,3 +199,57 @@ recomputes them from the tables).
   dated near filing) and `us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding`.
 - Split-adjust per-share and share values. Apple's FY2019 diluted EPS is
   11.89 as first reported and 2.97 after the 2020 4:1 split; both rows exist.
+
+---
+
+## 7. Full statements (`fsn_*`)
+
+`edgar.facts` keeps every total line but drops three things: the splits
+inside a line (Apple's Products / Services, segment and region revenue),
+company-specific custom tags, and the layout (which statement, line order,
+the company's own label). The `fsn_*` tables add them from SEC's
+Financial Statement and Notes data sets.
+
+| table | one row per | notes |
+|---|---|---|
+| `edgar.fsn_submissions` | filing in scope | `accepted_at` is a **reliable** acceptance time (see below) |
+| `edgar.fsn_numbers` | number: filing x tag x period x unit x split | compact ids; `dim_id = 0` is the plain total |
+| `edgar.fsn_presentation` | line of a statement | `stmt` BS, IS, CF, EQ, CI; `line` order; `plabel` |
+| `edgar.fsn_tags`, `edgar.fsn_dimensions` | tag, split | `segments` like `ProductOrService=Product;` |
+| `edgar.fsn_files` | data-set zip | load bookkeeping |
+| `edgar.fsn_statement_lines` | view | everything joined, readable |
+
+Apple's FY2024 income statement as printed, with splits:
+
+```sql
+SELECT line, plabel, segments, value
+FROM edgar.fsn_statement_lines
+WHERE cik = '0000320193' AND form = '10-K' AND fy = 2024
+  AND stmt = 'IS' AND qtrs = 4 AND ddate = '2024-09-30' AND iprx = 0
+ORDER BY report, line, segments;
+```
+
+**Scope.** Filings by CIKs in `raw.ticker_metadata` or `edgar.company_tickers`.
+Every number whose tag is a line on one of the five statements, with all
+its splits, including splits shown only in the notes (segment revenue
+rides with the revenue line). Numbers that appear only in the notes are
+left out. Full history is ~225M numbers, ~40 GB.
+
+**Cadence.** SEC publishes one data set a month (quarterly before
+2025-10), so full statements trail the daily totals in `edgar.facts` by up
+to a month or so. The weekly DAG loads each new zip once; the first run is
+the backfill (79 zips, ~28 GB downloaded one at a time, several hours).
+
+**Point in time.**
+- `fsn_submissions.accepted_at` matches SEC's RSS acceptance time for
+  7,031 of 7,031 filings checked. About 0.02% of filings have a `filed` date
+  before their acceptance day (SEC date adjustments): use the later of the two. It is the right clock for intraday
+  rules, and it can also stand in for the unreliable
+  `edgar.filings.acceptance_datetime_raw` (join on `accession_number`).
+- `fy` / `fp` belong to the filing, as in `edgar.facts`.
+- SEC rounds `ddate` to the nearest month end and `qtrs` to whole quarters
+  (`datp` / `durp` hold the offsets) and `value` to 4 decimals.
+- `iprx = 0` is the primary fact; higher values repeat it at lower precision.
+- SEC's `prevrpt` flag (filing amended later) is not loaded: hindsight.
+- Same as `edgar.facts`: in 10-Qs the cash flow statement is year to date
+  (`qtrs` 2 and 3); Q4 is the year minus nine months.
