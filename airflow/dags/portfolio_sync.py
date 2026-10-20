@@ -4,7 +4,9 @@ Daily, after the ledger + gate + grades rebuild (triggered by
 qual_scorecards_on_entry), this task mirrors the dashboard's auto-seed and exit
 flow so the strategy-follower book maintains itself with no Generate click:
 
-  1. ADOPT   every current validated-board BUY (the dashboard's dv$qs_buys rule:
+  1. ADOPT   STOPPED for good 2026-10-20 (MODEL_BUYS_STOPPED below): nothing
+             is adopted and no buy prompt is sent. Before that: every
+             current validated-board BUY (the dashboard's dv$qs_buys rule:
              open ledger position + proven slot at the 12-month canonical
              horizon + monthly majority; vetoes excluded; grade ranks; max 5
              per cluster, 25 overall) that is not tracked, not dismissed and
@@ -62,6 +64,20 @@ QS_MIN_GRADE = 68          # adoption gate (mirrors app.R QS_MIN): only
                            # stay board-visible but are never adopted
 QS_MAX_AGE_DAYS = 150      # grade freshness (mirrors app.R)
 SELL_RECENT_DAYS = 30      # exits older than this are history, not action items
+
+# Model buys stopped for good (Kevin 2026-10-20) after the look-ahead audit
+# (elt-inference-models docs/lookahead_audit_2026-10-20.md): replayed with only
+# what was known at each date, no picker beat the stocks it chooses from. The
+# sync gets an EMPTY adopt queue: nothing is adopted and no "nothing bought" or
+# "says BUY again" prompt is sent, whatever '$ per new BUY' says. Snapshots,
+# archives, SELL and recoup pings for positions already held keep running, and
+# sync_runs still logs the board's queue as the parity record.
+MODEL_BUYS_STOPPED = True
+
+
+def adopt_queue(qs_buys):
+    """The queue sync_core may adopt from: empty while model buys are stopped."""
+    return [] if MODEL_BUYS_STOPPED else list(qs_buys)
 
 
 def _connect():
@@ -725,8 +741,10 @@ def run(dry=False):
         if not (thr >= 10):
             thr = 100.0
 
+        if MODEL_BUYS_STOPPED:
+            bad_amount = None      # the buy amount no longer matters: no warning ping
         adopts, snaps, archived, recoups, skipped, reentries = sync_core(
-            cur, bucket, grade, cluster, qs_buys, amount, thr, today, dry,
+            cur, bucket, grade, cluster, adopt_queue(qs_buys), amount, thr, today, dry,
             exit_of=exit_of)
         msgs = build_msgs(adopts, archived, recoups, amount, grade, cluster,
                           skipped, bad_amount=bad_amount, reentries=reentries)
