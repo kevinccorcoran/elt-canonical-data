@@ -19,6 +19,65 @@ sources:
       - name: api_data_ingestion_massive
       - name: ingest_massive_delisted_inc
 
+  # SEC EDGAR fundamentals, raw and as reported (tools/create_edgar_schema.sql,
+  # docs/edgar_fundamentals.md). facts and filings are insert-only: every
+  # version of a number is a row. Point-in-time rule: a fact version is usable
+  # from the trading day after its filed_date, never from period_end and never
+  # via frame.
+  - name: edgar
+    database: "{{ env_var('DB_DATABASE', 'prod') }}"
+    schema: edgar
+    tables:
+      - name: companies
+        description: One row per CIK with XBRL facts. Latest attributes only (not point-in-time).
+        columns:
+          - name: cik
+            description: 10-digit zero-padded CIK, same format as raw.ticker_metadata.cik.
+      - name: company_tickers
+        description: >
+          SEC's current ticker map (company_tickers.json), upserted each load.
+          last_seen_at older than the latest load means the mapping left the map.
+      - name: filings
+        description: >
+          One row per (cik, accession_number) from submissions, filed 2009 or later,
+          all forms. acceptance_datetime_raw is SEC's string as sent and is not a
+          reliable clock; use filing_date (plus one trading day) for timing.
+      - name: facts
+        description: >
+          Every version of every tagged number from companyfacts. A restated or
+          repeated number is a new row with its own accession_number and filed_date.
+          fiscal_year / fiscal_period belong to the filing, not the period.
+          frame is SEC hindsight and must not be used for as-of selection.
+        loaded_at_field: loaded_at
+        columns:
+          - name: cik
+          - name: taxonomy
+          - name: tag
+          - name: unit
+          - name: value
+          - name: period_start
+            description: NULL for instant facts (balances, share counts).
+          - name: period_end
+          - name: fiscal_year
+            description: Fiscal year of the filing the number came from.
+          - name: fiscal_period
+            description: Fiscal period of the filing the number came from (FY, Q1..Q4).
+          - name: form
+          - name: accession_number
+          - name: filed_date
+            description: >
+              EDGAR filing date. Usable from the next trading day: over half of
+              10-K / 10-Q filings arrive after the 16:00 close on this date.
+          - name: frame
+            description: Assigned by SEC after the fact to one version per calendar period. Hindsight.
+      - name: facts_quarantine
+        description: >
+          Same columns and key as facts, for the ~0.02% of facts whose period_end is
+          after their filed_date (SEC forecasts and context-date typos). Kept so raw
+          is complete; kept apart so no backtest uses them by accident.
+      - name: load_runs
+        description: One row per loader run (bulk or daily) with its window and counts.
+
   - name: analysis
     database: "{{ env_var('DB_DATABASE', 'prod') }}"
     schema: analysis
