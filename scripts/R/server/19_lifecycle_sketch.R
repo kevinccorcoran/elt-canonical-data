@@ -248,7 +248,6 @@
     # y values of what the pick lines draw, for the axis range (the flows replace them below)
     pl_y <- if (!is.null(pl) && length(pl$lines))
               unlist(lapply(pl$lines, function(x) x$ret), use.names = FALSE) else numeric(0)
-    flow_on <- FALSE
     if (!is.null(pl) && length(pl$lines) && identical(pl$mode, "nc")) {
       # market-creators view: every marked name as its own violet line with a
       # glyph end label; names off the master list dashed (chart only)
@@ -292,7 +291,6 @@
       flows <- if (isTRUE(lc_flow_mode()) && !is.null(grp))
                  lc_group_flows(pl$lines, grp[!(grp$label %in% hid), , drop = FALSE], cmp$d) else list()
       if (length(flows)) {
-        flow_on <- TRUE
         ids <- lc_live_ids()
         # short end labels: the right margin is 120px and SPY / Graded / QS share it
         short <- function(l) sub("^(Spiked|Dipped), then.*$", "\\1", sub(", ends.*$", "", l))
@@ -677,11 +675,12 @@
           ap_suffix, tp_suffix, pl_suffix, lead_suffix, if (smooth) " · smoothed" else ""),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       shapes = lead_shapes,
-      # with flows, the dates stay the window's: plotly widens an autoranged axis to
-      # fit end labels, and the flow labels pushed it past the last close
-      xaxis = c(list(title = "", color = "#cbd5e1", type = "date",
-                     gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
-                if (flow_on) list(range = format(range(cmp$d)))),
+      # the dates stay the window's, a day of room each side for edge markers:
+      # plotly widens an autoranged axis to fit annotations, so a flow label or a
+      # Low mark on the last day pushed it past the last close (to Nov 1)
+      xaxis = list(title = "", color = "#cbd5e1", type = "date",
+                   gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE,
+                   range = format(range(cmp$d) + c(-1, 1))),
       yaxis = yax,
       # legend tucked just under the date labels (was y = -0.35: ~120px of dead
       # space that the plot can use for the pins instead)
