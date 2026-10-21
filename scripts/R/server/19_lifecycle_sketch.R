@@ -24,22 +24,20 @@
   # only while one cluster draws its own name lines; on by default. Display only:
   # the line groups and the tables under the sketch stay as they are.
   lc_names_on <- reactiveVal(TRUE)
-  # Profile flows (lc_group_flows): with the pick lines on, two or more clusters
-  # ticked and grouping on, each line group draws as one flow instead of its
-  # names' lines. The same button then puts the names back, faint, behind the
-  # flows; off by default there, since the flows are the point of that view.
-  lc_flow_mode <- reactive(isTRUE(input$lcAllPickLines) && is.na(lc_single_cluster()) &&
-                           is.null(lc_nc_only()) && isTRUE(lc_group_on()))
-  lc_flow_lines_on <- reactiveVal(FALSE)
   observeEvent(input$lcNamesBtn, {
-    rv <- if (isTRUE(lc_flow_mode())) lc_flow_lines_on else lc_names_on
-    rv(!isTRUE(rv()))
-    session$sendCustomMessage("lcNamesState", isTRUE(rv()))
+    lc_names_on(!isTRUE(lc_names_on()))
+    session$sendCustomMessage("lcNamesState", isTRUE(lc_names_on()))
   })
+  # Profile flows (lc_group_flows): with two or more clusters ticked and grouping
+  # on, each line group draws as one flow. On by default there, no box needed
+  # (Kevin 2026-10-21, "there is nothing": behind the pick-lines box nobody found
+  # them). That box keeps its meaning, draw every pick line: here they draw faint
+  # behind the flows.
+  lc_flow_mode <- reactive(is.na(lc_single_cluster()) && is.null(lc_nc_only()) &&
+                           isTRUE(lc_group_on()))
   output$lcNamesBtnUI <- renderUI({
-    flow <- isTRUE(lc_flow_mode())
-    if (!flow && (is.na(lc_single_cluster()) || isTRUE(input$lcAllPickLines))) return(NULL)
-    on <- isTRUE(isolate(if (flow) lc_flow_lines_on() else lc_names_on()))
+    if (is.na(lc_single_cluster()) || isTRUE(input$lcAllPickLines)) return(NULL)
+    on <- isTRUE(isolate(lc_names_on()))
     actionButton("lcNamesBtn", if (on) "Ticker lines: on" else "Ticker lines: off",
                  class = if (on) "on" else NULL,
                  style = "padding:0.35rem 0.9rem !important; font-size:0.7rem !important;")
@@ -299,7 +297,7 @@
           sprintf("rgba(%d,%d,%d,%.2f)", v[1], v[2], v[3], a) }
         sm <- function(v) if (smooth) lc_smooth2(v) else v
         flow_y <- numeric(0)
-        if (isTRUE(lc_flow_lines_on())) for (nm in names(pl$lines)) {   # the names, faint, behind
+        if (isTRUE(input$lcAllPickLines)) for (nm in names(pl$lines)) {   # the names, faint, behind
           gi <- match(nm, grp$ticker)
           if (is.na(gi) || grp$label[gi] %in% hid) next
           ln <- if (smooth) lc_strong_line(pl$lines[[nm]]) else lc_soft_line(pl$lines[[nm]])
@@ -817,7 +815,8 @@
         " the group whose average line its own runs closest to, whatever its cluster id. Each group draws",
         " as one flow: the band holds the middle half of its names, the line is their average, and the",
         " arrow shows where it ends. The legend and the group list below give each flow's cluster ids.",
-        " Ticker lines above the chart puts the names back, faint, behind the flows.")
+        " Tick All qualstream pick lines to draw the names, faint, behind the flows; Group lines off",
+        " turns the flows off.")
       else if (isTRUE(input$lcAllPickLines))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;", "All qualstream pick lines on"),
