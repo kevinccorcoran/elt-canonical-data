@@ -182,7 +182,7 @@
     meta_dl <- if (!is.null(d$meta) && "delisted_date" %in% names(d$meta))
       setNames(suppressWarnings(as.Date(as.character(d$meta$delisted_date))), toupper(d$meta$ticker)) else NULL
     epoch <- as.Date(LEDGER_EPOCH)
-    rows <- list(); brows <- list()
+    eps_of <- list()
     for (tk in universe) {
       tp <- pmap[[tk]]; if (is.null(tp) || !nrow(tp)) next
       prov <- !is.null(dv$prov_of) && tk %in% names(dv$prov_of) && isTRUE(dv$prov_of[[tk]])
@@ -193,24 +193,18 @@
       so  <- if (!is.null(sold_map) && tk %in% names(sold_map)) sold_map[[tk]] else as.Date(NA)
       eps <- lc_trade_episodes(trail, so, last_d)
       eps <- Filter(function(e) !is.na(e$entry) && e$entry >= epoch, eps)
-      rr  <- lc_price_episodes(eps, tp, sp)
-      if (!is.null(rr) && nrow(rr)) { rr$ticker <- tk; rows[[length(rows) + 1]] <- rr }
       # buy-RUN windows (buy->hold / buy->sell / buy->now), each vs SPY same dates
       beps <- lc_buyrun_episodes(trail, so, last_d)
       beps <- Filter(function(e) !is.na(e$entry) && e$entry >= epoch, beps)
-      if (length(beps)) {
-        br <- lc_price_episodes(beps, tp, sp)
-        if (!is.null(br) && nrow(br)) {
-          br$kind <- vapply(beps, function(e) e$kind, ""); br$ticker <- tk
-          brows[[length(brows) + 1]] <- br }
-      }
+      eps_of[[tk]] <- list(tp = tp, eps = eps, beps = beps)
     }
-    if (!length(rows)) return(NULL)
-    A <- do.call(rbind, rows)
-    B <- if (length(brows)) do.call(rbind, brows) else NULL
-    # Whole-board record; the strip re-aggregates a cluster-filtered slice via
-    # lc_track_agg on A/B, so this reactive stays independent of the cluster filter.
-    c(lc_track_agg(A, B), list(asof = last_d, table = A, wtable = B))
+    tw <- lc_track_tables(eps_of, sp)
+    if (is.null(tw$A)) return(NULL)
+    A <- tw$A; B <- tw$B
+    # Whole-board record; the strip re-prices the episodes (eps) over the slider
+    # window and re-aggregates a cluster-filtered slice via lc_track_agg, so this
+    # reactive stays independent of the window and the cluster filter.
+    c(lc_track_agg(A, B), list(asof = last_d, table = A, wtable = B, eps = eps_of, sp = sp))
   })
 
   # Tracking basis for MODEL rows (radio next to the chart filter): "epoch" =

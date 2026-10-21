@@ -717,6 +717,44 @@ lc_price_episodes <- function(eps, tp, sp) {
   do.call(rbind, rows)
 }
 
+# Cut episodes to the sketch window (Kevin 2026-10-21: "range should dictate
+# calculations extant"): an episode already open at the window start enters
+# there; one still running at the window end is marked there as open, so a buy
+# run reads as still buying. Episodes wholly outside drop. NA ws / we = that end
+# is not cut, so the full window leaves the record as it was.
+lc_window_episodes <- function(eps, ws = as.Date(NA), we = as.Date(NA)) {
+  out <- lapply(eps, function(e) {
+    if (!is.na(we) && e$entry > we) return(NULL)
+    if (!is.na(ws) && (e$exit < ws || (e$entry < ws && e$exit <= ws))) return(NULL)
+    if (!is.na(ws) && e$entry < ws) e$entry <- ws
+    if (!is.na(we) && e$exit > we) {
+      e$exit <- we; e$open <- TRUE
+      if (!is.null(e$kind)) e$kind <- "current"
+    }
+    e
+  })
+  Filter(Negate(is.null), out)
+}
+
+# The strip's round-trip table (A) and buy-run window table (B), priced over a
+# window from the per-ticker episodes lc_track_record keeps (eps_of: ticker ->
+# list(tp, eps, beps)); sp = SPY's (d, px). No window = the whole record.
+lc_track_tables <- function(eps_of, sp, ws = as.Date(NA), we = as.Date(NA)) {
+  rows <- list(); brows <- list()
+  for (tk in names(eps_of)) {
+    x  <- eps_of[[tk]]
+    rr <- lc_price_episodes(lc_window_episodes(x$eps, ws, we), x$tp, sp)
+    if (!is.null(rr) && nrow(rr)) { rr$ticker <- tk; rows[[length(rows) + 1]] <- rr }
+    be <- lc_window_episodes(x$beps, ws, we)
+    br <- lc_price_episodes(be, x$tp, sp)
+    if (!is.null(br) && nrow(br)) {
+      br$kind <- vapply(be, function(e) e$kind, ""); br$ticker <- tk
+      brows[[length(brows) + 1]] <- br }
+  }
+  list(A = if (length(rows)) do.call(rbind, rows),
+       B = if (length(brows)) do.call(rbind, brows))
+}
+
 # Aggregate the round-trip table (A) and buy-run window table (B) into the strip's
 # summary numbers. Split out so the whole-board record (lc_track_record) and the
 # cluster-filtered view (the strip) compute identically. Windows are

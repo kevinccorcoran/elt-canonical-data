@@ -41,13 +41,16 @@ ui_tab_lifecycle <- tabPanel("Lifecycle",
         # "Smooth lines" button (strong display smoothing, lc_strong_line), on by
         # default: the server flips it per click and sends lcSmoothState to restyle it.
         # "Group lines" button beside it (lc_group_lines), also on by default.
+        # "Ticker lines" button (lcNamesBtnUI) only while one cluster is ticked: it
+        # hides or shows that cluster's own name lines.
         div(style = "display:flex; justify-content:flex-end; gap:0.4rem; margin:0.3rem 0 0.1rem;",
+            uiOutput("lcNamesBtnUI", inline = TRUE),
             actionButton("lcGroupBtn", "Group lines: on", class = "on",
                          style = "padding:0.35rem 0.9rem !important; font-size:0.7rem !important;"),
             actionButton("lcSmoothBtn", "Smooth lines: on", class = "on",
                          style = "padding:0.35rem 0.9rem !important; font-size:0.7rem !important;")),
         tags$style(HTML(paste(
-          "#lcSmoothBtn.on, #lcGroupBtn.on { background:#34d399 !important; }",
+          "#lcSmoothBtn.on, #lcGroupBtn.on, #lcNamesBtn.on { background:#34d399 !important; }",
           ".lc-groupbox { margin:0.25rem 0 0.7rem; }",
           ".lc-groupbox .shiny-input-container { margin-bottom:0; width:auto; }",
           ".lc-groupbox label.checkbox-inline { text-transform:none !important; letter-spacing:0 !important;",
@@ -65,6 +68,11 @@ ui_tab_lifecycle <- tabPanel("Lifecycle",
           "  var b = document.getElementById('lcGroupBtn'); if (!b) return;",
           "  b.classList.toggle('on', !!on);",
           "  b.textContent = on ? 'Group lines: on' : 'Group lines: off';",
+          "});",
+          "Shiny.addCustomMessageHandler('lcNamesState', function(on) {",
+          "  var b = document.getElementById('lcNamesBtn'); if (!b) return;",
+          "  b.classList.toggle('on', !!on);",
+          "  b.textContent = on ? 'Ticker lines: on' : 'Ticker lines: off';",
           "});"))),
         plotlyOutput("qsCompareLC", height = "760px"),
         uiOutput("lcLineGroupsLC"),

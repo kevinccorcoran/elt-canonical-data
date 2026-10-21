@@ -173,7 +173,8 @@
   # Universe follows the qualstream+picks filter (default on = qs-passed names only,
   # "only the qs are trades") AND, in the strip, the board's cluster-id view filter
   # (re-aggregated downstream) so the numbers match the master list / sketch you are
-  # viewing. The compounded "how much money" view is the portfolio panel below.
+  # viewing. Since 2026-10-21 every trade is also cut to the sketch's slider window.
+  # The compounded "how much money" view is the portfolio panel below.
   output$lcTrackStripLC <- renderUI({
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     d  <- tryCatch(app_dataLC(), error = function(e) NULL)
@@ -191,7 +192,19 @@
       # and re-aggregated. Filtering here (not in lc_track_record) keeps the price
       # query cached across cluster toggles.
       insel <- function(tk) unname(lc_in_sel(tk))
-      A <- tr$table; B <- tr$wtable
+      # The slider window (Kevin 2026-10-21: "range should dictate calculations
+      # extant"): every trade is cut to the sketch's dates and priced there, like
+      # its lines. The epoch floors the start; an open end runs to the last close.
+      epoch <- as.Date(LEDGER_EPOCH)
+      ds <- tryCatch(lc_sketch_data(), error = function(e) NULL)
+      ws <- max(if (!is.null(ds$qscmp_anchor)) as.Date(ds$qscmp_anchor) else epoch, epoch)
+      we <- if (!is.null(ds$qscmp_to)) as.Date(ds$qscmp_to) else as.Date(NA)
+      w_lbl <- sprintf("%s to %s, the slider window%s", format(ws, "%b %d"),
+                       format(if (is.na(we)) tr$asof else we, "%b %d"),
+                       if (is.null(ds$qscmp_anchor) || as.Date(ds$qscmp_anchor) < epoch)
+                         " (the record starts at the epoch)" else "")
+      tw <- lc_track_tables(tr$eps, tr$sp, ws, we)
+      A <- tw$A; B <- tw$B
       if (!is.null(A) && nrow(A)) A <- A[insel(A$ticker), , drop = FALSE]
       if (!is.null(B) && nrow(B)) B <- B[insel(B$ticker), , drop = FALSE]
       # Top-performers filter: when the box is on, the strip reflects the hindsight
@@ -211,7 +224,7 @@
                      "No board-traded names among the top performers (they may be pre-window holds or names never on the board)."
                    else if (!is.null(lc_nc_only()))
                      paste0("No board trades among the \u25c6 disruptors and ", NC_GEAR, " enablers (every cluster).")
-                   else "No board trades in the selected clusters - adjust the cluster-id filter."))
+                   else "No board trades in the selected clusters inside this window - widen the slider or adjust the cluster-id filter."))
       pill <- function(lab, big, sub, accent, valcol = "#e2e8f0")
         div(style = paste0("flex:1 1 0; min-width:120px; background:rgba(148,163,184,0.04);",
               " border:1px solid #1e293b; border-left:3px solid ", accent,
@@ -253,7 +266,9 @@
           pill("still buying", fmtpp(tr$vs_now),
                sprintf("%d windows · %d names", tr$n_now, tr$nm_now), "#3b82f6", signcol(tr$vs_now))),
         div(style = "color:#64748b; font-size:0.66rem; margin-top:0.35rem;",
-          sprintf(paste0("every %s %s since the %s epoch - small sample, read as directional not proof.",
+          sprintf(paste0("every %s %s, %s - small sample, read as directional not proof.",
+            " Every trade is cut to the window: one held at the start enters there, one held at the end",
+            " is marked there and counts as open (a buy run as still buying).",
             " Top row = full buy->sell round trips (one vote per position, holds held through). Bottom =",
             " each active-buy RUN vs SPY over its own dates, DURATION-WEIGHTED so a brief buy<->hold flip",
             " barely counts; a re-buy opens a new run, and 'windows vs names' shows the flip churn. buy->hold",
@@ -262,7 +277,7 @@
             if (isTRUE(input$lcBuyQSonly)) "qualstream+ name" else "board name",
             if (is.null(lc_nc_only())) "in the selected clusters"
             else paste0("among the \u25c6 disruptors and ", NC_GEAR, " enablers (every cluster)"),
-            format(as.Date(LEDGER_EPOCH), "%b %d"))))
+            w_lbl)))
     })
     # The buy/hold/sell kanban columns were retired 2026-08-26: they derived state
     # at the selected Hold-length (a 7mo lifecycle view) and were qualstream-hidden,
