@@ -375,6 +375,48 @@
       }
       ck_suffix <- sprintf(" · %d checked", length(ckl))
     }
+    # Lead over SPY marks (Kevin 2026-10-21: "on any range extent for what is
+    # selected ... time range highest average over spy vs lower, visually see
+    # where they sit"): the day the drawn average (passed >= 68, else graded)
+    # led SPY by the most and the day by the least, over the window and the
+    # selection, as the averages are. A dotted guide at each date and a bracket
+    # between the two lines at the gap, labelled in pp. Found on the real values;
+    # the window's first LEAD_WARMUP_DAYS trading days are skipped (every line
+    # restarts at 0 there, so the gap is small by construction and the low would
+    # always sit at the left edge); the bracket sits on the drawn lines, so it
+    # touches them when smoothing is on.
+    lead_suffix <- ""; lead_shapes <- list()
+    avg_col <- if (has_pass) "passed_pct" else if (has_graded) "graded_pct" else NULL
+    if (!is.null(avg_col) && nrow(cmp) > LEAD_WARMUP_DAYS + 1) {
+      gap <- cmp[[avg_col]] - cmp$spy_pct
+      ok  <- which(!is.na(gap)); ok <- ok[ok > LEAD_WARMUP_DAYS]
+      if (length(ok) >= 2) {
+        avg_lbl <- if (avg_col == "passed_pct") "Passed ≥68" else "All graded"
+        drawn <- function(col, i) if (!smooth) cmp[[col]][i] else {
+          oky <- !is.na(cmpL[[col]])
+          if (sum(oky) < 2) cmp[[col]][i]
+          else approx(as.numeric(cmpL$d)[oky], cmpL[[col]][oky], xout = as.numeric(cmp$d[i]), rule = 2)$y }
+        marks <- list(list(i = ok[which.max(gap[ok])], lab = "High", col = "#f8fafc"),
+                      list(i = ok[which.min(gap[ok])], lab = "Low",  col = "#fb7185"))
+        for (m in marks) {
+          i <- m$i; x <- cmp$d[i]; y0 <- drawn("spy_pct", i); y1 <- drawn(avg_col, i)
+          lead_shapes[[length(lead_shapes) + 1]] <- list(
+            type = "line", xref = "x", yref = "paper", x0 = format(x), x1 = format(x), y0 = 0, y1 = 1,
+            layer = "below", line = list(color = "rgba(248,250,252,0.35)", width = 1, dash = "dot"))
+          txt <- sprintf("Lead over SPY, %s: %+.1fpp on %s<br>%s %.1f%% · SPY %.1f%%",
+                         tolower(m$lab), gap[i], format(x, "%b %d"), avg_lbl, cmp[[avg_col]][i], cmp$spy_pct[i])
+          fig <- add_trace(fig, x = c(x, x), y = c(y0, y1), type = "scatter", mode = "lines+markers",
+            name = "Lead vs SPY: high / low", legendgroup = "lead", showlegend = identical(m$lab, "High"),
+            line = list(color = m$col, width = 2.5), marker = list(color = m$col, size = 6),
+            hovertext = c(txt, txt), hovertemplate = "%{hovertext}<extra></extra>")
+          endlabels[[length(endlabels) + 1]] <- list(
+            x = x, y = (y0 + y1) / 2, text = sprintf("%s %+.1fpp · %s", m$lab, gap[i], format(x, "%b %d")),
+            font = list(color = m$col, size = 9), showarrow = FALSE, xanchor = "left", yanchor = "middle",
+            xshift = 6, bgcolor = "rgba(11,18,32,0.75)")
+        }
+        lead_suffix <- " · lead vs SPY marks"
+      }
+    }
     ann <- list(); ap_yrange <- NULL
     # all-pins mode (rebuilt 2026-10-06, Kevin: "need better way to represent").
     # ONE pin per (day, state), not one per name: a big symbol on the green line
@@ -568,8 +610,9 @@
           "HINDSIGHT SKETCH (not a real score) - graded/passed vs benchmark, from %s%s",
           format(d$qscmp_anchor, "%b %d"),
           if (is.null(d$qscmp_to)) "" else format(d$qscmp_to, " to %b %d")), cl_suffix,
-          ap_suffix, tp_suffix, pl_suffix, if (smooth) " · smoothed" else ""),
+          ap_suffix, tp_suffix, pl_suffix, lead_suffix, if (smooth) " · smoothed" else ""),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
+      shapes = lead_shapes,
       xaxis = list(title = "", color = "#cbd5e1", type = "date",
                    gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
       yaxis = yax,
@@ -720,7 +763,16 @@
         "against the name's own path. The ", span(style = "color:#10b981;", "green line"),
         " is their average. Hover a line for its ticker and return; tick a row to draw it bright.")
       else NULL
-    tagList(ap_note, pl_note,
+    lead_note <- div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+      span(style = "color:#f8fafc; font-weight:700;", "Lead vs SPY marks"),
+      " - the day the average (passed ≥ 68, else all graded) led SPY by the most (",
+      span(style = "color:#f8fafc;", "High"), ") and by the least (",
+      span(style = "color:#fb7185;", "Low"),
+      ") over the window and the selection: a dotted guide at the date and a bracket between",
+      " the two lines at the gap, in pp. ",
+      sprintf("The window's first %d trading days are skipped: every line restarts at 0%% there.",
+              LEAD_WARMUP_DAYS))
+    tagList(ap_note, pl_note, lead_note,
     div(style = "color:#64748b; font-size:0.72rem; margin:0.15rem 0 0.6rem;",
       sprintf(paste("Descriptive, not a walk-forward test: one retroactive grade run (%s) applied",
                     "backward, so membership is hindsight-picked - trust green-vs-orange, not either",

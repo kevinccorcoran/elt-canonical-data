@@ -470,6 +470,9 @@ lc_board_trail_replay <- function(M, dates, tk, led, epoch, prov, now_state,
 # k = 5 to 7 give the same pins, k = 10 leaves 12 names unsettled. Re-check k
 # after another quarter of capture. Comparison is dwell >= PIN_DWELL_RUNDAYS.
 PIN_DWELL_RUNDAYS <- 5L
+# Lead-over-SPY marks on the sketch skip the window's first trading days: every
+# line restarts at 0 there, so the gap is small by construction (2026-10-21).
+LEAD_WARMUP_DAYS <- 5L
 lc_pin_reason <- function(why) {
   w <- tolower(ifelse(is.na(why), "", why))
   ifelse(grepl("unproven", w), "de-proved at re-mint, votes unchanged",
