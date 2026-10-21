@@ -167,10 +167,12 @@
     # exactly one cluster is ticked, so the status of each name in that cluster
     # can be read against its own path and not only the green average. The
     # market-creators view always draws its own lines (mode "nc", below).
+    # The profile flows (two or more clusters, grouping on) need the lines too.
     nc_set <- lc_nc_only()
     one_cl <- lc_single_cluster()
     auto <- !isTRUE(input$lcAllPickLines) && !is.na(one_cl)
-    if (is.null(nc_set) && !isTRUE(input$lcAllPickLines) && !auto) return(NULL)
+    if (is.null(nc_set) && !isTRUE(input$lcAllPickLines) && !auto && !isTRUE(lc_flow_mode()))
+      return(NULL)
     if (is.null(input$db_pass) || input$db_pass == "") return(NULL)
     dv <- tryCatch(derivedLC(), error = function(e) NULL)
     if (is.null(dv) || is.null(dv$M)) return(NULL)
