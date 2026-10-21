@@ -1,4 +1,4 @@
-"""3838 dashboard tab map: a ring of the dashboard's ten tabs.
+"""3838 dashboard tab map: a ring of the dashboard's eleven tabs.
 
 Keeps the hand sketch's ring-of-nodes idea but treats it as a designed piece:
 the tabs are arranged in workflow order and grouped into the four stages they
@@ -42,6 +42,7 @@ TABS = [
     ("clusters",  "Clusters",         "groups lookalike items",          ANALY),
     ("range",     "Transition Range", "the likely range ahead",          ANALY),
     ("bars",      "Shortlist",        "top-ranked by reliability",       ANALY),
+    ("flow",      "ID Flow",          "one group from cells to ranks",   ANALY),
     ("levels",    "Rank Stability",   "do rankings hold over time",      VALID),
     ("check",     "Model Validation", "tested on unseen history",        VALID),
     ("target",    "Predictions",      "the current selections",          DECIDE),
@@ -98,6 +99,11 @@ def _icon(ax, key, x, y):
         ax.add_patch(FancyArrowPatch((x - 0.15, y - 0.12), (x + 0.16, y + 0.14),
                      arrowstyle="-|>", mutation_scale=11, lw=2.4,
                      color=ko, shrinkA=0, shrinkB=0, zorder=z))
+    elif key == "flow":                               # one group fans out to its ranks
+        for yo in (0.12, 0.0, -0.12):
+            line([x - 0.11, x + 0.10], [y, y + yo])
+            dot(x + 0.12, y + yo, 0.035)
+        dot(x - 0.12, y, 0.05)
     elif key == "loop":
         ax.add_patch(Arc((x, y), 0.30, 0.30, angle=0, theta1=-50, theta2=210,
                          color=ko, lw=2.4, zorder=z))
@@ -152,7 +158,7 @@ def build(ax):
             fontsize=34, fontweight="bold", zorder=5)
     ax.text(0, -0.30, "dashboard map", ha="center", va="center", color=MUTED,
             fontsize=11, zorder=5)
-    ax.text(0, -0.92, "ten views · one workflow", ha="center", va="center",
+    ax.text(0, -0.92, "eleven views · one workflow", ha="center", va="center",
             color=FAINT, fontsize=8.5, style="italic", zorder=5)
 
     # stage legend along the bottom
