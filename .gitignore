@@ -131,6 +131,12 @@ docker/airflow/.env*
 docker/dbt-docs-canonical/.env*
 !docker/dbt-docs-canonical/.env.example
 
+# Docker staging-postgres and staging Airflow local envs (Secrets)
+docker/staging-postgres/.env*
+!docker/staging-postgres/.env.example
+docker/airflow-staging/.env*
+!docker/airflow-staging/.env.example
+
 # local test creds
 tests/.env
 !tests/.env.example

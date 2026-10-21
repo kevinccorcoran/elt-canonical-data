@@ -1,0 +1,40 @@
+# Staging: a copy of prod on the same Postgres as prod (18.6). This Mac only.
+#   docker compose -f docker/staging-postgres/docker-compose.yml up -d
+# tools/staging_refresh.sh loads a full copy of prod by hand, and each Saturday copies the price days that changed.
+# It took over the old Homebrew postgresql@14 server's address and login (127.0.0.1:5432, user
+# postgres, the same password), so dbt's staging target, the DAGs' DATABASE_URL_STAGING and the
+# dashboard's Staging preset reach it unchanged. The dev, airflow_db and board_test databases moved
+# here from Homebrew with it.
+services:
+  staging-postgres:
+    image: postgres:18.6@sha256:1267c7e692de235fda2a50dbcdbcbca4672ea6a0298576a6bd9d07cafc319b32
+    container_name: staging-postgres
+    restart: unless-stopped
+    shm_size: 1g
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/staging-postgres/.env}
+    # Tuned for the bulk restore of a full copy: fewer checkpoints, more memory for index builds.
+    command: ["postgres", "-c", "shared_buffers=1GB", "-c", "maintenance_work_mem=1GB",
+              "-c", "max_wal_size=8GB", "-c", "checkpoint_timeout=30min"]
+    # The one-time move from Homebrew dials the host's server by this name; OrbStack needs it mapped.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Postgres 18 images keep PGDATA under /var/lib/postgresql/18/docker, so mount the parent.
+      - staging-pgdata:/var/lib/postgresql
+      # The newest prod dump. Outside every repo, and outside DigitalOcean.
+      - ${STAGING_DUMP_DIR:?set STAGING_DUMP_DIR in docker/staging-postgres/.env}:/dumps
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    ports:
+      # Loopback-only, as every service here.
+      - "127.0.0.1:${STAGING_PORT:-5432}:5432"
+
+volumes:
+  staging-pgdata:
+    name: staging-pgdata
