@@ -1,0 +1,10 @@
+# What AlphaStream needs on a Mac:  brew bundle --file tools/mac/Brewfile  (tools/mac/new_mac.sh runs it)
+brew "git"
+brew "gh"
+brew "direnv"        # the repos' .envrc files
+brew "pyenv"         # Python 3.11.6, which alphastream-conformance's venv uses
+brew "python@3.11"   # the app's and the scripts' venvs
+brew "node"          # the Allure report builder
+brew "openjdk@11"    # Allure needs Java
+brew "libpq"         # psql and pg_dump at Postgres 18, like prod
+cask "orbstack"      # Docker: staging, staging's Airflow, the report, the dashboard
