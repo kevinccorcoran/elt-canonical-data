@@ -18,6 +18,23 @@
     lc_group_on(!isTRUE(lc_group_on()))
     session$sendCustomMessage("lcGroupState", isTRUE(lc_group_on()))
   })
+
+  # "Ticker lines" button (Kevin 2026-10-21: "when only one cluster selected the
+  # user should be able to toggle off the underlying individual tickers"): shown
+  # only while one cluster draws its own name lines; on by default. Display only:
+  # the line groups and the tables under the sketch stay as they are.
+  lc_names_on <- reactiveVal(TRUE)
+  observeEvent(input$lcNamesBtn, {
+    lc_names_on(!isTRUE(lc_names_on()))
+    session$sendCustomMessage("lcNamesState", isTRUE(lc_names_on()))
+  })
+  output$lcNamesBtnUI <- renderUI({
+    if (is.na(lc_single_cluster()) || isTRUE(input$lcAllPickLines)) return(NULL)
+    on <- isTRUE(isolate(lc_names_on()))
+    actionButton("lcNamesBtn", if (on) "Ticker lines: on" else "Ticker lines: off",
+                 class = if (on) "on" else NULL,
+                 style = "padding:0.35rem 0.9rem !important; font-size:0.7rem !important;")
+  })
   # The groups for the lines on screen: the cluster lines or the pick lines (the
   # marks view keeps its own violet styling), cut to the window like the chart.
   lc_line_groups <- reactive({
@@ -215,6 +232,9 @@
       pl$lines <- lapply(pl$lines, lc_win_cut, we = d$qscmp_to)
       pl$lines <- pl$lines[vapply(pl$lines, nrow, integer(1)) > 0]
     }
+    # Ticker lines off (one cluster ticked): the name lines are not drawn, so the
+    # y-axis fits what is left; every drawn line still stays in range
+    if (!is.null(pl) && isTRUE(pl$auto) && !isTRUE(lc_names_on())) pl <- NULL
     pl_suffix <- ""
     if (!is.null(pl) && length(pl$lines) && identical(pl$mode, "nc")) {
       # market-creators view: every marked name as its own violet line with a
@@ -684,6 +704,12 @@
         "The ", span(style = "color:#10b981;", "green line"),
         " is their average - these are the paths behind it. Click a chip to brighten ",
         "one out of the pack.")
+      else if (!is.na(lc_single_cluster()) && !isTRUE(lc_names_on()))
+      div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+        span(style = "color:#f8fafc; font-weight:700;",
+             sprintf("Cluster %d selected", lc_single_cluster())),
+        " - its ticker lines are off. The ", span(style = "color:#10b981;", "green line"),
+        " is their average. Ticker lines above the chart brings them back.")
       else if (!is.na(lc_single_cluster()))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;",
