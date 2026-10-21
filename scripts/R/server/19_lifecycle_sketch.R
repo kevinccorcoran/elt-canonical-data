@@ -24,13 +24,22 @@
   # only while one cluster draws its own name lines; on by default. Display only:
   # the line groups and the tables under the sketch stay as they are.
   lc_names_on <- reactiveVal(TRUE)
+  # Profile flows (lc_group_flows): with the pick lines on, two or more clusters
+  # ticked and grouping on, each line group draws as one flow instead of its
+  # names' lines. The same button then puts the names back, faint, behind the
+  # flows; off by default there, since the flows are the point of that view.
+  lc_flow_mode <- reactive(isTRUE(input$lcAllPickLines) && is.na(lc_single_cluster()) &&
+                           is.null(lc_nc_only()) && isTRUE(lc_group_on()))
+  lc_flow_lines_on <- reactiveVal(FALSE)
   observeEvent(input$lcNamesBtn, {
-    lc_names_on(!isTRUE(lc_names_on()))
-    session$sendCustomMessage("lcNamesState", isTRUE(lc_names_on()))
+    rv <- if (isTRUE(lc_flow_mode())) lc_flow_lines_on else lc_names_on
+    rv(!isTRUE(rv()))
+    session$sendCustomMessage("lcNamesState", isTRUE(rv()))
   })
   output$lcNamesBtnUI <- renderUI({
-    if (is.na(lc_single_cluster()) || isTRUE(input$lcAllPickLines)) return(NULL)
-    on <- isTRUE(isolate(lc_names_on()))
+    flow <- isTRUE(lc_flow_mode())
+    if (!flow && (is.na(lc_single_cluster()) || isTRUE(input$lcAllPickLines))) return(NULL)
+    on <- isTRUE(isolate(if (flow) lc_flow_lines_on() else lc_names_on()))
     actionButton("lcNamesBtn", if (on) "Ticker lines: on" else "Ticker lines: off",
                  class = if (on) "on" else NULL,
                  style = "padding:0.35rem 0.9rem !important; font-size:0.7rem !important;")
@@ -236,6 +245,10 @@
     # y-axis fits what is left; every drawn line still stays in range
     if (!is.null(pl) && isTRUE(pl$auto) && !isTRUE(lc_names_on())) pl <- NULL
     pl_suffix <- ""
+    # y values of what the pick lines draw, for the axis range (the flows replace them below)
+    pl_y <- if (!is.null(pl) && length(pl$lines))
+              unlist(lapply(pl$lines, function(x) x$ret), use.names = FALSE) else numeric(0)
+    flow_on <- FALSE
     if (!is.null(pl) && length(pl$lines) && identical(pl$mode, "nc")) {
       # market-creators view: every marked name as its own violet line with a
       # glyph end label; names off the master list dashed (chart only)
@@ -275,7 +288,57 @@
                  else sprintf("Qualstream pick lines (%d)", pl$n)
       grp <- tryCatch(lc_line_groups(), error = function(e) NULL); seen <- character(0)
       hid <- if (is.null(grp)) character(0) else lc_group_hidden()
-      for (nm in names(pl$lines)) {
+      # profile flows: each line group as one shape, the names off unless asked for
+      flows <- if (isTRUE(lc_flow_mode()) && !is.null(grp))
+                 lc_group_flows(pl$lines, grp[!(grp$label %in% hid), , drop = FALSE], cmp$d) else list()
+      if (length(flows)) {
+        flow_on <- TRUE
+        ids <- lc_live_ids()
+        # short end labels: the right margin is 120px and SPY / Graded / QS share it
+        short <- function(l) sub("^(Spiked|Dipped), then.*$", "\\1", sub(", ends.*$", "", l))
+        idlab <- function(tk) { i <- unname(ids[toupper(tk)]); ifelse(is.na(i), tk, sprintf("%s (%d)", tk, i)) }
+        rgba <- function(hex, a) { v <- grDevices::col2rgb(hex)[, 1]
+          sprintf("rgba(%d,%d,%d,%.2f)", v[1], v[2], v[3], a) }
+        sm <- function(v) if (smooth) lc_smooth2(v) else v
+        flow_y <- numeric(0)
+        if (isTRUE(lc_flow_lines_on())) for (nm in names(pl$lines)) {   # the names, faint, behind
+          gi <- match(nm, grp$ticker)
+          if (is.na(gi) || grp$label[gi] %in% hid) next
+          ln <- if (smooth) lc_strong_line(pl$lines[[nm]]) else lc_soft_line(pl$lines[[nm]])
+          fig <- add_trace(fig, x = ln$d, y = ln$ret, type = "scatter", mode = "lines",
+            legendgroup = paste0("flow_", grp$rank[gi]), showlegend = FALSE, opacity = 0.4,
+            line = lc_line(color = grp$col[gi], width = 0.8),
+            hovertext = sprintf("%s · %s", idlab(nm), grp$label[gi]), customdata = ln$raw,
+            hovertemplate = paste0("%{hovertext}<br>%{x|%b %d}: %{customdata:.1f}%<extra></extra>"))
+          flow_y <- c(flow_y, pl$lines[[nm]]$ret)
+        }
+        for (f in flows) {
+          n_f <- length(f$tickers)
+          mix <- paste(sort(unique(stats::na.omit(unname(ids[toupper(f$tickers)])))), collapse = ", ")
+          who <- sprintf("%s (%d) · ids %s", f$label, n_f, mix)
+          mid <- sm(f$mid); lo <- sm(f$lo); hi <- sm(f$hi)
+          fig <- add_trace(fig, x = c(f$d, rev(f$d)), y = c(hi, rev(lo)), type = "scatter", mode = "lines",
+            fill = "toself", fillcolor = rgba(f$col, 0.16), line = list(width = 0, color = rgba(f$col, 0)),
+            legendgroup = paste0("flow_", f$rank), showlegend = FALSE, hoverinfo = "skip")
+          fig <- add_trace(fig, x = f$d, y = mid, type = "scatter", mode = "lines", name = who,
+            legendgroup = paste0("flow_", f$rank), legendrank = 1000 + f$rank,
+            line = lc_line(color = f$col, width = 3.5), customdata = f$mid,
+            hovertext = rep(who, length(f$d)),
+            hovertemplate = "%{hovertext}<br>%{x|%b %d}: average %{customdata:.1f}%<extra></extra>")
+          k <- length(f$d); k0 <- max(1L, k - 3L)
+          endlabels[[length(endlabels) + 1]] <- list(     # the arrowhead, along the last stretch
+            x = format(f$d[k]), y = mid[k], ax = format(f$d[k0]), ay = mid[k0], xref = "x", yref = "y",
+            axref = "x", ayref = "y", text = "", showarrow = TRUE, arrowhead = 2, arrowsize = 1.2,
+            arrowwidth = 3.5, arrowcolor = f$col)
+          endlabels[[length(endlabels) + 1]] <- list(
+            x = format(f$d[k]), y = mid[k], text = sprintf("%s · %d", short(f$label), n_f),
+            font = list(color = f$col, size = 9), showarrow = FALSE, xanchor = "left", yanchor = "middle",
+            xshift = 10)
+          flow_y <- c(flow_y, f$lo, f$hi)
+        }
+        pl_y <- flow_y
+      }
+      if (!length(flows)) for (nm in names(pl$lines)) {
         gi <- if (is.null(grp)) NA_integer_ else match(nm, grp$ticker)
         if (!is.na(gi) && grp$label[gi] %in% hid) next   # unticked group: not drawn
         ln <- if (smooth) lc_strong_line(pl$lines[[nm]]) else lc_soft_line(pl$lines[[nm]])
@@ -309,9 +372,11 @@
             if (!is.na(gi)) list(font = list(color = grp$col[gi])))
         }
       }
-      pl_suffix <- paste0(if (pl_auto) sprintf(" · cluster %d lines", pl$cluster)
-                          else sprintf(" · %d pick lines", pl$n),
-                          if (!is.null(grp)) " grouped" else "")
+      pl_suffix <- if (length(flows))
+          sprintf(" · %d names in %d profile flows", sum(lengths(lapply(flows, `[[`, "tickers"))), length(flows))
+        else paste0(if (pl_auto) sprintf(" · cluster %d lines", pl$cluster)
+                    else sprintf(" · %d pick lines", pl$n),
+                    if (!is.null(grp)) " grouped" else "")
     }
     # Checked master-list names: each ticked row draws its own rebased return line
     # in a distinct color, with a legend entry, so you can compare a handful of
@@ -524,8 +589,7 @@
       # y-range from every drawn line (checked / pick / top-performer lines too,
       # so a name that dips below 0 or spikes high never clips)
       tpret <- if (!is.null(tp) && !is.null(tp$line)) tp$line$ret else numeric(0)
-      plret <- if (!is.null(pl) && length(pl$lines))
-                 unlist(lapply(pl$lines, function(x) x$ret), use.names = FALSE) else numeric(0)
+      plret <- pl_y
       ckret <- if (!is.null(ckl) && length(ckl))
                  unlist(lapply(ckl, function(x) x$line$ret), use.names = FALSE) else numeric(0)
       yhi <- max(c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct, G$y, tpret, plret, ckret), na.rm = TRUE)
@@ -600,7 +664,7 @@
     else if (smooth) {                                    # no zoom on toggle: the real lines' range
       rawy <- c(cmp$spy_pct, cmp$graded_pct, cmp$passed_pct,
                 if (!is.null(tp) && !is.null(tp$line)) tp$line$ret,
-                if (!is.null(pl) && length(pl$lines)) unlist(lapply(pl$lines, function(x) x$ret), use.names = FALSE),
+                pl_y,
                 if (!is.null(ckl) && length(ckl)) unlist(lapply(ckl, function(x) x$line$ret), use.names = FALSE))
       ylo <- min(c(rawy, 0), na.rm = TRUE); yhi <- max(rawy, na.rm = TRUE); ysp <- max(yhi - ylo, 1)
       yax$range <- c(ylo - ysp * 0.05, yhi + ysp * 0.06)
@@ -613,8 +677,11 @@
           ap_suffix, tp_suffix, pl_suffix, lead_suffix, if (smooth) " · smoothed" else ""),
         font = list(color = "#f8fafc", size = 13), x = 0.5),
       shapes = lead_shapes,
-      xaxis = list(title = "", color = "#cbd5e1", type = "date",
-                   gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
+      # with flows, the dates stay the window's: plotly widens an autoranged axis to
+      # fit end labels, and the flow labels pushed it past the last close
+      xaxis = c(list(title = "", color = "#cbd5e1", type = "date",
+                     gridcolor = "rgba(148,163,184,0.10)", zeroline = FALSE),
+                if (flow_on) list(range = format(range(cmp$d)))),
       yaxis = yax,
       # legend tucked just under the date labels (was y = -0.35: ~120px of dead
       # space that the plot can use for the pins instead)
@@ -636,17 +703,23 @@
     g <- g[order(g$rank), , drop = FALSE]
     labs <- unique(g$label)
     hidden <- isolate(lc_group_hidden())
+    # across clusters, each ticker carries its cluster id, so a group mixing ids reads at a glance
+    multi <- is.na(lc_single_cluster())
+    ids <- lc_live_ids()
+    tk_lab <- function(tks) { i <- unname(ids[toupper(tks)])
+      paste(if (multi) ifelse(is.na(i), tks, sprintf("%s (%d)", tks, i)) else tks, collapse = ", ") }
     div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.2rem;",
         span(style = "color:#f8fafc; font-weight:700;", "Line groups"),
         sprintf(paste(" from %s%s, by how close each name's line runs to SPY's and to the others",
-                      "(level and shape over the window, at most 4 groups). Untick a group to hide its lines."),
+                      "(level and shape over the window, at most 4 groups). Untick a group to hide its lines.%s"),
                 format(as.Date(d$qscmp_anchor), "%b %d"),
-                if (is.null(d$qscmp_to)) "" else format(as.Date(d$qscmp_to), " to %b %d")),
+                if (is.null(d$qscmp_to)) "" else format(as.Date(d$qscmp_to), " to %b %d"),
+                if (multi) " Groups cut across clusters; the number after each ticker is its cluster id." else ""),
         div(class = "lc-groupbox",
             checkboxGroupInput("lcGroupShow", NULL, inline = TRUE,
               choiceNames = lapply(labs, function(l) tags$span(
                 style = sprintf("color:%s;", g$col[g$label == l][1]),
-                tags$b(l), paste0(": ", paste(g$ticker[g$label == l], collapse = ", ")))),
+                tags$b(l), paste0(": ", tk_lab(g$ticker[g$label == l])))),
               choiceValues = labs, selected = setdiff(labs, hidden))))
   })
 
@@ -738,7 +811,15 @@
         if (tp_gone) span(style = "color:#fb923c;",
           " Top performers needs 4 or more marked names with a graded series; this view has ",
           sprintf("%d.", n_ser)))
-    }) else if (isTRUE(input$lcAllPickLines))
+    }) else if (isTRUE(lc_flow_mode()))
+      div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
+        span(style = "color:#f8fafc; font-weight:700;", "Profile flows"),
+        ": the pick lines are grouped by their profile over the window, across clusters. A name joins",
+        " the group whose average line its own runs closest to, whatever its cluster id. Each group draws",
+        " as one flow: the band holds the middle half of its names, the line is their average, and the",
+        " arrow shows where it ends. The legend and the group list below give each flow's cluster ids.",
+        " Ticker lines above the chart puts the names back, faint, behind the flows.")
+      else if (isTRUE(input$lcAllPickLines))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;", "All qualstream pick lines on"),
         " - every passed-qualstream (>= 68) board name as its own ",
@@ -751,7 +832,7 @@
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
         span(style = "color:#f8fafc; font-weight:700;",
              sprintf("Cluster %d selected", lc_single_cluster())),
-        " - its ticker lines are off. The ", span(style = "color:#10b981;", "green line"),
+        ": its ticker lines are off. The ", span(style = "color:#10b981;", "green line"),
         " is their average. Ticker lines above the chart brings them back.")
       else if (!is.na(lc_single_cluster()))
       div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
@@ -765,7 +846,7 @@
       else NULL
     lead_note <- div(style = "color:#94a3b8; font-size:0.72rem; margin:0.1rem 0 0.4rem;",
       span(style = "color:#f8fafc; font-weight:700;", "Lead vs SPY marks"),
-      " - the day the average (passed ≥ 68, else all graded) led SPY by the most (",
+      ": the day the average (passed ≥ 68, else all graded) led SPY by the most (",
       span(style = "color:#f8fafc;", "High"), ") and by the least (",
       span(style = "color:#fb7185;", "Low"),
       ") over the window and the selection: a dotted guide at the date and a bracket between",

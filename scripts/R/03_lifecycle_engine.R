@@ -598,6 +598,29 @@ lc_group_lines <- function(lines, spy_d, spy_ret, k_max = 4L) {
   data.frame(ticker = rownames(Y), grp = a, label = lab[a], col = col[a], rank = match(a, c(1L, others)),
              end_gap = endg[a], stringsAsFactors = FALSE)
 }
+
+# Profile flows (Kevin 2026-10-21: "a better way to represent the individual
+# tickers ... should each category be a flow arrow; when all selected, cluster id
+# does not matter, group id 3 and 6 together if some of their tickers have similar
+# profiles"). The line groups above already cut across clusters; a flow draws each
+# group as one shape: its members' average line and a band holding the middle half
+# of them (25th to 75th percentile per day), on the same weekday grid the grouping
+# uses. grp = lc_group_lines output (hidden groups already dropped). Display only.
+lc_group_flows <- function(lines, grp, spy_d) {
+  grid <- sort(unique(as.Date(spy_d))); grid <- grid[as.integer(format(grid, "%u")) <= 5]
+  if (is.null(grp) || !nrow(grp) || length(grid) < 3) return(list())
+  gx <- as.numeric(grid)
+  at <- function(ln) { ok <- !is.na(ln$ret)
+    approx(as.numeric(as.Date(ln$d))[ok], ln$ret[ok], xout = gx, rule = 2)$y }
+  out <- lapply(split(grp, grp$rank), function(g) {
+    tks <- intersect(g$ticker, names(lines)); if (!length(tks)) return(NULL)
+    Y <- do.call(rbind, lapply(lines[tks], at))
+    q <- function(p) apply(Y, 2, stats::quantile, probs = p, names = FALSE)
+    list(label = g$label[1], col = g$col[1], rank = g$rank[1], tickers = tks,
+         d = grid, mid = colMeans(Y), lo = q(0.25), hi = q(0.75))
+  })
+  Filter(Negate(is.null), out)
+}
 lc_pin_debounce <- function(ev, run_d, last_d, min_days = PIN_DWELL_RUNDAYS,
                             every = FALSE, why_of = NULL) {
   if (is.null(ev) || !nrow(ev)) return(ev)
