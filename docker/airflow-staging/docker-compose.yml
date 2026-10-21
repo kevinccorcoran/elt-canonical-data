@@ -1,0 +1,98 @@
+# Staging Airflow: prod's DAGs and code, run on this Mac against the staging database only.
+#   tools/staging_refresh.sh airflow     sets it up (once) and starts it; after that it restarts on its own
+# Its settings (.env, from .env.example) hold staging's login and the prices API key and nothing of prod's:
+# no PROD_DB_*, no DATABASE_URL_PROD. Its metadata database (airflow_staging on staging-postgres) started empty,
+# so no Variable from prod or from the old local scheduler (prod passwords, Telegram keys) exists here, and a
+# failure sends no alert. Every DAG starts paused and no schedule runs here: a DAG runs only when started by hand.
+# tools/staging_refresh.sh airflow switches on the price and model chain so they can be started; grading (LLM
+# spend), portfolio sync and the notifier stay off. The weekly sync in tools/staging_refresh.sh keeps prices current.
+# It runs whatever the Mac's checkouts hold, which is the point of staging.
+x-staging-common: &staging-common
+  image: alphastream-airflow:staging
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    # Nothing runs on a schedule here; a DAG started by hand still runs. It keeps the Mac light.
+    AIRFLOW__SCHEDULER__USE_JOB_SCHEDULE: "false"
+    AIRFLOW__CORE__PARALLELISM: 4
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: 2
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:${STAGING_DB_PASSWORD}@host.docker.internal:5432/airflow_staging
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    AIRFLOW__WEBSERVER__WEB_SERVER_HOST: 0.0.0.0
+    PROJECT_ROOT: /opt/elt-canonical-data
+    PYTHONPATH: /opt/elt-canonical-data/src
+    QUALSTREAM_ROOT: /opt/qualstream
+    # Staging, and only staging. Every way the DAGs pick a database points here.
+    ENV: staging
+    AIRFLOW_VAR_ENV: staging
+    DB_DATABASE: staging
+    DB_HOST: host.docker.internal
+    DB_PORT: "5432"
+    DB_USER: postgres
+    DB_PASSWORD: ${STAGING_DB_PASSWORD}
+    DATABASE_URL: postgresql://postgres:${STAGING_DB_PASSWORD}@host.docker.internal:5432/staging
+    DATABASE_URL_STAGING: postgresql://postgres:${STAGING_DB_PASSWORD}@host.docker.internal:5432/staging
+    # The dbt helpers read their password from this Variable whatever the environment. Here it is staging's.
+    AIRFLOW_VAR_DB_PASSWORD_PROD: ${STAGING_DB_PASSWORD}
+  volumes:
+    - ../../airflow/dags:/opt/airflow/dags
+    - ../../src:/opt/elt-canonical-data/src
+    - ../../dbt:/opt/elt-canonical-data/dbt
+    - ../../tools:/opt/elt-canonical-data/tools
+    - ../../.dbt:/home/airflow/.dbt
+    - ../../../elt-inference-models:/opt/elt-inference-models
+    - ../../../qualstream:/opt/qualstream
+    - ../../scripts:/opt/airflow/scripts
+    - airflow-staging-logs:/opt/airflow/logs
+
+services:
+  airflow-staging-init:
+    <<: *staging-common
+    container_name: airflow-staging-init
+    restart: "no"
+    command: bash -c "airflow db migrate"
+
+  airflow-staging-scheduler:
+    <<: *staging-common
+    container_name: airflow-staging-scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-staging-init:
+        condition: service_completed_successfully
+    command: bash -c "airflow scheduler"
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
+
+  airflow-staging-webserver:
+    <<: *staging-common
+    container_name: airflow-staging-webserver
+    restart: unless-stopped
+    depends_on:
+      airflow-staging-init:
+        condition: service_completed_successfully
+    command: bash -c "airflow webserver"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 8 http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    ports:
+      # Loopback-only. 8080 is prod's UI through the tunnel and 8081 the manual's tunnel port, so 8082.
+      - "127.0.0.1:8082:8080"
+
+volumes:
+  airflow-staging-logs:
+    name: airflow-staging-logs

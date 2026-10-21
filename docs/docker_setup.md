@@ -23,6 +23,38 @@ The **Airflow UI (8080)** is served by a separate long-running webserver contain
 not a service in this compose (the `airflow-webserver` service was removed — see the
 comment in the compose — because a combined container already owns host 8080).
 
+Local only (this Mac), each in its own compose:
+
+| Container | Published | Bind | Purpose |
+|---|---|---|---|
+| `staging-postgres` | 5432 -> 5432 | 127.0.0.1 | staging: Postgres 18.6 like prod, a copy of prod checked against it weekly (`docker/staging-postgres`) |
+| `airflow-staging-scheduler` | — | — | prod's DAGs against staging only (`docker/airflow-staging`) |
+| `airflow-staging-webserver` | 8082 -> 8080 | 127.0.0.1 | the staging Airflow UI |
+
+### Staging
+
+Staging starts as a full copy of prod. Once a week the days prod added or changed in the price tables are
+copied over. Nothing else runs on it, so it stays light on the Mac.
+
+- **The weekly sync.** `tools/staging_refresh.sh on` sets a timer on Saturdays at 13:00. For each price table
+  (the Massive bars, the delisted bars and `cdm.ingest_combined`) it counts and hashes the rows per day, on
+  prod (read-only) and on staging. Days that match are left alone. Days that differ or are missing are copied
+  from prod in one transaction per table, and nothing else: no provider calls, no model runs. Saturday 13:00,
+  because prod has landed Friday's session by noon and stays still all weekend.
+  `DRY_RUN=1 tools/staging_refresh.sh sync` reports without copying.
+- **The full copy, by hand.** `tools/staging_refresh.sh copy` dumps prod (read-only, never during prod's 03:00
+  to 12:00 chain or on the 1st and 2nd) and loads it into the `staging` database. History comes along: the call
+  ledger, grades and positions match prod as of the copy, and stay so until the next copy. Only the newest
+  dump is kept, in `STAGING_DUMP_DIR`; it is a copy of prod off DigitalOcean as old as the last full copy.
+- **Nothing runs on its own.** The staging scheduler has its schedules switched off. It holds prod's DAGs so a
+  change can be tested on staging data: start the DAG by hand from its UI. Model tables, the call ledger,
+  grades and positions stay as of the last full copy. Grading, portfolio sync and the notifier stay paused
+  there: they spend money or message you.
+- **Staging only.** The staging scheduler's settings hold staging's login and the prices key, nothing of
+  prod's, and its own metadata database has no Variables. It cannot reach prod.
+- `tools/staging_refresh.sh status` shows the copy's age and the last sync. `alphastream-allure` checks
+  weekly that staging matches prod.
+
 Notes:
 - Everything in this compose is loopback-only; reach the dashboard remotely via SSH
   tunnel (it is unauthenticated).
