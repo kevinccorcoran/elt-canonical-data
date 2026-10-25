@@ -27,8 +27,10 @@
 # While a copy loads, staging is down (about an hour); the Mac has no room for two copies.
 # The body sits in one block, so bash reads all of it before running: an edit during a run cannot change it.
 {
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")/.."
+# A failing command ends the run; say so in the log instead of dying with no word.
+trap 'log "stopped: a command failed (exit $?)"' ERR
 here="$(pwd -P)"
 compose=(docker compose -f docker/staging-postgres/docker-compose.yml)
 c=staging-postgres
@@ -122,7 +124,9 @@ sync() {        # copy from prod the days staging lacks or holds differently, an
       "$tmp/staging" "$tmp/prod" > "$tmp/days"
     n=$(wc -l < "$tmp/days" | tr -d ' ')
     if [ "$n" = 0 ]; then log "sync: $t matches prod"; continue; fi
-    first=$(cut -d'|' -f1 "$tmp/days" | sort | head -1); last=$(cut -d'|' -f1 "$tmp/days" | sort | tail -1)
+    # sed reads the whole list. head -1 would close the pipe after one line; with thousands of days sort then gets
+    # a broken pipe, and under pipefail that ended the run with exit 141 before a single day was copied.
+    first=$(cut -d'|' -f1 "$tmp/days" | sort | sed -n 1p); last=$(cut -d'|' -f1 "$tmp/days" | sort | sed -n '$p')
     if [ "${DRY_RUN:-0}" = 1 ]; then
       log "sync: $t differs from prod on $n days, $first to $last; DRY_RUN, nothing copied"; continue
     fi
