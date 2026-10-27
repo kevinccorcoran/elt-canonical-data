@@ -44,12 +44,14 @@ raw.api_data_ingestion_massive_delisted     ← daily bars (1990 → delist date
 cdm.ingest_massive_delisted_inc
    │  unioned (include_for_backtest = TRUE only) into …
    ▼
-cdm.ingest_massive_staging  ─▶  cdm.ingest_combined  ─▶  inference / dashboards (3838, 8890)
+cdm.ingest_massive_staging  ─▶  cdm.ingest_massive_total_return  ─▶  cdm.ingest_combined  ─▶  inference / dashboards (3838, 8890)
 ```
 
 Delisted bars enter the warehouse through **`ingest_massive_staging`**
 (tagged `source = 'massive_delisted'`), *not* directly into
-`ingest_combined`. `ingest_combined`'s `massive` CTE passes the `source`
+`ingest_combined`. `ingest_massive_total_return` adds the dividends
+(`raw.massive_dividends`, loaded by `massive_corporate_actions`) and
+`ingest_combined`'s `massive` CTE reads it; both pass the `source`
 through, so the tag survives downstream. Delisted tickers are **not** in
 the index-membership allowlist (`ticker_index_summary`), so downstream
 inference models that join the allowlist still ignore them — live signals
@@ -102,7 +104,7 @@ SPACs and shells are excluded — not investable as normal equity.
 | Phase 1.5 | `src/datapipeline/ingestion/massive_enrich_ticker_details.py` | Ticker-details endpoint → fills `sic_code` + `list_date` so the classifier can categorize. `--where "<sql>"`. |
 | Phase 2 | `src/datapipeline/ingestion/massive_backfill_delisted_aggregates.py` | For `delisted_utc IS NOT NULL AND aggregates_fetched=FALSE AND type IN ('CS','ADRC')`: fetch daily bars `1990 → delisted_utc`, write bars, flip `aggregates_fetched=TRUE`. `--limit`, `--resume-from`, `--exchanges XNYS,XNAS`, `--min-delisted-since`, `--dry-run`. |
 | Classify | `tools/classify_delisting_categories.sql` | Pure SQL, idempotent — derives `delisting_category` from `sic_code` + `name` + last close. |
-| Transform | dbt `ingest_massive_delisted_inc` → `ingest_massive_staging` → `ingest_combined` | Adds `include_for_backtest`, folds delisted into the combined feed. |
+| Transform | dbt `ingest_massive_delisted_inc` → `ingest_massive_staging` → `ingest_massive_total_return` → `ingest_combined` | Adds `include_for_backtest`, folds delisted into the combined feed. |
 | Orchestration | `airflow/dags/raw_ingest_delisted_monthly.py` | Monthly DAG chaining all of the above. |
 | Docs | `docker/dbt-docs-canonical/` | dbt docs site on **:8890** (lineage graph). |
 
@@ -152,8 +154,9 @@ python -m datapipeline.ingestion.massive_enrich_ticker_details \
     --where "delisted_utc IS NOT NULL AND aggregates_fetched = TRUE AND sic_code IS NULL"
 psql "$DATABASE_URL" -f tools/classify_delisting_categories.sql
 
-# 4. build cdm + combined
-dbt run --select ingest_massive_delisted_inc ingest_massive_staging ingest_combined
+# 4. dividends for the new names, then build cdm + combined
+python -m datapipeline.ingestion.massive_corporate_actions --full
+dbt run --select ingest_massive_delisted_inc ingest_massive_staging ingest_massive_total_return ingest_combined
 ```
 
 **Re-running is safe.** Phase 2 skips `aggregates_fetched=TRUE`, so it only
@@ -196,7 +199,8 @@ dashboards.** They have no `delisting_category` yet →
 `include_for_backtest=FALSE` → filtered out. Run **classify + dbt**:
 ```bash
 psql "$DATABASE_URL" -f tools/classify_delisting_categories.sql
-dbt run --select ingest_massive_delisted_inc ingest_massive_staging ingest_combined
+python -m datapipeline.ingestion.massive_corporate_actions --full
+dbt run --select ingest_massive_delisted_inc ingest_massive_staging ingest_massive_total_return ingest_combined
 ```
 
 **Some tickers return no bars (`empty`).** Expected — pre-2003 delistings

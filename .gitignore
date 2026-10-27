@@ -17,6 +17,8 @@
 *.dump
 *.parquet
 *.csv
+# dbt seeds are source, not exports
+!dbt/src/app/seeds/*.csv
 *.txt
 yfinance_dump.sql
 chunks_slim/

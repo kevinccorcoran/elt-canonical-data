@@ -42,6 +42,14 @@ TRANSFORM_SCRIPT = (
     / "api_data_ingestion_massive.py"
 )
 
+CORPORATE_ACTIONS_SCRIPT = (
+    REPO_ROOT
+    / "src"
+    / "datapipeline"
+    / "ingestion"
+    / "massive_corporate_actions.py"
+)
+
 
 # ──────────────────────────────────────────────
 # CONFIG
@@ -165,6 +173,30 @@ with DAG(
             previous_task = task
 
     # ──────────────────────────────────────────
+    # Dividends and splits
+    # ──────────────────────────────────────────
+
+    # The massive bars are adjusted for splits only; ingest_massive_total_return
+    # folds these dividends in. A full refresh of every ticker (~3 min, ~13k
+    # calls) instead of a recent-dates top-up also picks up the history of
+    # newly added tickers and the vendor's late corrections. With the vendor
+    # down it would retry every ticker for hours, so it is cut at 30 min and
+    # not retried: the prices then build on the dividends already loaded.
+    ingest_corporate_actions = BashOperator(
+        task_id="ingest_corporate_actions",
+        bash_command=(
+            "set -euo pipefail && "
+            f'export PYTHONPATH="{REPO_ROOT}/src" && '
+            f"python {CORPORATE_ACTIONS_SCRIPT} --full"
+        ),
+        env=get_db_env_vars(runtime_env),
+        append_env=True,
+        do_xcom_push=False,
+        execution_timeout=timedelta(minutes=30),
+        retries=0,
+    )
+
+    # ──────────────────────────────────────────
     # DBT: reference / lookup models
     # ──────────────────────────────────────────
 
@@ -247,6 +279,38 @@ with DAG(
     )
 
     # ──────────────────────────────────────────
+    # DBT total-return basis
+    # ──────────────────────────────────────────
+
+    # SPY's dividends before the massive feed (42 rows, fixed); reloading
+    # them every run keeps a fresh database from failing the factor model
+    seed_cmd, seed_env = get_dbt_bash_command(
+        runtime_env, "spy_dividends_pre_massive"
+    )
+    dbt_seed_spy_dividends = BashOperator(
+        task_id="dbt_seed_spy_dividends",
+        bash_command=seed_cmd.replace("dbt run --select", "dbt seed --select"),
+        env=seed_env,
+        append_env=True,
+        do_xcom_push=False,
+    )
+
+    bash_command, env_vars = get_dbt_bash_command(
+        runtime_env, "ingest_massive_total_return spy_proxy_total_return_factor"
+    )
+
+    # all_done: a failed dividend refresh (alerted on its own) must not stop
+    # the day's prices; a failed staging model still stops ingest_combined
+    dbt_run_total_return = BashOperator(
+        task_id="dbt_run_total_return",
+        bash_command=bash_command,
+        env=env_vars,
+        append_env=True,
+        do_xcom_push=False,
+        trigger_rule="all_done",
+    )
+
+    # ──────────────────────────────────────────
     # DBT downstream aggregation
     # ──────────────────────────────────────────
 
@@ -306,12 +370,24 @@ with DAG(
     dbt_run_massive_staging >> dbt_run_excluded_massive
     dbt_run_yfinance_staging >> dbt_run_excluded_yfinance
 
+    # Dividends need the day's ticker list; the total-return models need the
+    # staged bars, the day's dividends and the SPY seed
+    ingestion_group >> ingest_corporate_actions
+    dbt_deps >> dbt_seed_spy_dividends
+    [
+        dbt_run_massive_staging,
+        dbt_run_yfinance_staging,
+        ingest_corporate_actions,
+        dbt_seed_spy_dividends,
+    ] >> dbt_run_total_return
+
     # Final aggregation requires all upstream preparation
     [
         dbt_run_massive_staging,
         dbt_run_yfinance_staging,
         dbt_run_excluded_massive,
         dbt_run_excluded_yfinance,
+        dbt_run_total_return,
     ] >> dbt_run_combined
 
     # Trigger metrics computation once canonical data is ready;
