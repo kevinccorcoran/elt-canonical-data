@@ -42,7 +42,10 @@ WITH run_time AS (
     SELECT NOW() AS ts
 ),
 
--- PRIMARY PROVIDER: Massive (preferred when not in a bad range)
+-- PRIMARY PROVIDER: Massive (preferred when not in a bad range), on a
+-- total-return basis like the yfinance history it is joined to
+-- (ingest_massive_total_return: dividends reinvested; the data_quality rules
+-- still read the split-only ingest_massive_staging)
 massive AS (
     SELECT
         "date",
@@ -51,7 +54,7 @@ massive AS (
         processed_at,
         ticker_date_id,
         source
-    FROM {{ ref('ingest_massive_staging') }}
+    FROM {{ ref('ingest_massive_total_return') }}
 ),
 
 -- Per-(ticker, date-range) bad-data exclusions from the data_quality model
@@ -71,20 +74,70 @@ manual_excluded AS (
     SELECT ticker FROM {{ ref('manual_excluded_tickers') }}
 ),
 
--- SECONDARY PROVIDER: YFinance (with special-case mapping for ^GSPC → SPY)
+-- yfinance closes carry dividends up to each ticker's last yfinance date (the
+-- fetch), the massive bars up to today. This is the massive dividend factor
+-- on the first massive bar on or after that date: the dividends paid since
+-- (with no massive bar in between there is no dividend in between). It puts
+-- both providers on one basis, so the basis rescale below sees only real
+-- breaks again; measured on the overlap instead, the dividends since the
+-- fetch (often under its 2% guard) became a step at each hand-over.
+yfinance_dividend_anchor AS (
+    SELECT a.ticker, COALESCE(m.dividend_factor, 1.0) AS dividend_factor
+    FROM (
+        SELECT ticker, MAX("date") AS last_date
+        FROM {{ ref('ingest_yfinance_staging') }}
+        WHERE ticker <> '^GSPC'
+          AND (date_type = 'natural' OR date_type IS NULL)
+        GROUP BY ticker
+    ) a
+    LEFT JOIN LATERAL (
+        SELECT t.dividend_factor
+        FROM {{ ref('ingest_massive_total_return') }} t
+        WHERE t.ticker = a.ticker
+          AND t."date" >= a.last_date
+        ORDER BY t."date"
+        LIMIT 1
+    ) m ON TRUE
+),
+
+-- SECONDARY PROVIDER: YFinance (with special-case mapping for ^GSPC → SPY).
+-- The ^GSPC rows are the S&P 500 price index; spy_proxy_total_return_factor
+-- adds SPY's dividends from 1993 so they match the total-return massive SPY.
 yfinance AS (
     SELECT
-        "date",
-        CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END AS ticker,
-        CASE WHEN ticker = '^GSPC' THEN adj_close / 10.0 ELSE adj_close END AS adj_close,
+        yf."date",
+        yf.ticker,
+        yf.adj_close * COALESCE(da.dividend_factor, 1.0) AS adj_close,
         'yfinance' AS source,
-        (CASE WHEN ticker = '^GSPC' THEN 'SPY' ELSE ticker END || '_' || "date") AS ticker_date_id
+        (yf.ticker || '_' || yf."date") AS ticker_date_id
     FROM {{ ref('ingest_yfinance_staging') }} yf
-    WHERE NOT EXISTS (
-        SELECT 1 FROM yfinance_bad_ranges br
-        WHERE br.ticker = CASE WHEN yf.ticker = '^GSPC' THEN 'SPY' ELSE yf.ticker END
-          AND yf."date" BETWEEN br.bad_start AND br.bad_end
-    )
+    LEFT JOIN yfinance_dividend_anchor da
+      ON da.ticker = yf.ticker
+    WHERE yf.ticker <> '^GSPC'
+      AND NOT EXISTS (
+          SELECT 1 FROM yfinance_bad_ranges br
+          WHERE br.ticker = yf.ticker
+            AND yf."date" BETWEEN br.bad_start AND br.bad_end
+      )
+
+    UNION ALL
+
+    SELECT
+        yf."date",
+        'SPY' AS ticker,
+        yf.adj_close / 10.0 * COALESCE(sp.factor, 1.0) AS adj_close,
+        'yfinance' AS source,
+        ('SPY_' || yf."date") AS ticker_date_id
+    FROM {{ ref('ingest_yfinance_staging') }} yf
+    LEFT JOIN {{ ref('spy_proxy_total_return_factor') }} sp
+      ON yf."date" < sp.valid_to
+     AND (sp.valid_from IS NULL OR yf."date" >= sp.valid_from)
+    WHERE yf.ticker = '^GSPC'
+      AND NOT EXISTS (
+          SELECT 1 FROM yfinance_bad_ranges br
+          WHERE br.ticker = 'SPY'
+            AND yf."date" BETWEEN br.bad_start AND br.bad_end
+      )
 ),
 
 -- BASIS RESCALE (2026-08-24): the two providers adjust prices on different

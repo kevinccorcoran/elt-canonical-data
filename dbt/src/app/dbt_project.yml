@@ -35,3 +35,13 @@ models:
 
   elt_inference_models:
     +database: "{{ env_var('DB_DATABASE', 'prod') }}"
+
+# Seeds: small fixed reference tables, loaded with `dbt seed`
+seeds:
+  dbt_project:
+    +database: "{{ env_var('DB_DATABASE', 'prod') }}"
+    +schema: cdm
+    spy_dividends_pre_massive:
+      +column_types:
+        ex_date: date
+        cash_amount: double precision
