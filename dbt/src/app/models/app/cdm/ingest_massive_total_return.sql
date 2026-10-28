@@ -10,7 +10,8 @@
 
     post_hook = [
       """
-      CREATE INDEX IF NOT EXISTS idx_{{ this.identifier }}_ticker_date
+      DROP INDEX IF EXISTS {{ this.schema }}.idx_{{ this.identifier }}_ticker_date;
+      CREATE INDEX idx_{{ this.identifier }}_ticker_date
         ON {{ this }} (ticker, date);
       """
     ]
@@ -41,6 +42,11 @@
 -- Synthetic (weekend / holiday) bars hold the NEXT session's close, so each
 -- dividend is dated the day after the last natural session before its ex
 -- date: the synthetic bars in between already trade without it.
+--
+-- The post_hook drops the index before creating it. It runs while dbt's
+-- backup of the old table still holds the index name, so CREATE INDEX IF NOT
+-- EXISTS skipped, and dropping the backup took the index with it on every
+-- second build (ingest_combined's anchor lookup needs it).
 -- --------------------------------------------------------------
 
 WITH splits AS (
