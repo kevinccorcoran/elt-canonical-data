@@ -34,7 +34,11 @@
 --
 -- Dividends come from raw.massive_dividends (massive_corporate_actions.py).
 -- The vendor's amounts are as declared, so each is scaled by every later
--- split (raw.massive_splits) to match the split-adjusted closes. Kept: cash,
+-- split (raw.massive_splits) the stored closes already carry: dated on or
+-- before the ticker's last fetch (MAX(processed_at)). The vendor lists splits
+-- before they happen, and a delisted ticker's bars are fetched once, so a
+-- split dated after the fetch is not in the bars; counting it moved CFNB's
+-- dividends 50x and dropped PARA's (audit 2026-10-30). Kept: cash,
 -- USD, ex date inside the bar history (an announced future dividend is
 -- skipped), and a yield above 0 and below 50% of the prior close (larger is a
 -- data error).
@@ -67,22 +71,30 @@ dividends AS (
     GROUP BY ticker, ex_dividend_date
 ),
 
+span AS (
+    -- fetched_date: the vendor adjusts the bars only for splits up to the
+    -- fetch; a delisted ticker's bars can carry splits after its last bar
+    SELECT
+        ticker,
+        MAX("date") AS last_date,
+        MAX(processed_at)::date AS fetched_date
+    FROM {{ ref('ingest_massive_staging') }}
+    GROUP BY ticker
+),
+
 dividends_split_adj AS (
     SELECT
         d.ticker,
         d.ex_date,
         d.cash * COALESCE(EXP(SUM(LN(s.f))), 1.0) AS cash
     FROM dividends d
+    JOIN span sp
+      ON sp.ticker = d.ticker
     LEFT JOIN splits s
       ON s.ticker = d.ticker
      AND s.execution_date > d.ex_date
+     AND s.execution_date <= sp.fetched_date
     GROUP BY d.ticker, d.ex_date, d.cash
-),
-
-span AS (
-    SELECT ticker, MAX("date") AS last_date
-    FROM {{ ref('ingest_massive_staging') }}
-    GROUP BY ticker
 ),
 
 candidates AS MATERIALIZED (
