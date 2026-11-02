@@ -39,6 +39,9 @@ x-staging-common: &staging-common
     DB_DATABASE: staging
     DB_HOST: host.docker.internal
     DB_PORT: "5432"
+    # The local server has no TLS. Without this the gate archive and the model run default to sslmode=require
+    # and cannot connect, so a scheduled run fails where a hand run with DB_SSLMODE=disable passed.
+    DB_SSLMODE: prefer
     DB_USER: postgres
     DB_PASSWORD: ${STAGING_DB_PASSWORD}
     DATABASE_URL: postgresql://postgres:${STAGING_DB_PASSWORD}@host.docker.internal:5432/staging
