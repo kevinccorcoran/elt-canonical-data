@@ -18,6 +18,7 @@ from datetime import timedelta
 import pendulum
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.timetables.trigger import CronTriggerTimetable
 
 from utils.alerting import notify, on_failure_telegram
 
@@ -78,7 +79,8 @@ def fill_gaps(**_):
 with DAG(
     dag_id="raw_gap_fill_weekly",
     description="Weekly: fetch again every missing day of the raw price table",
-    schedule="0 7 * * 6",
+    # At the clock time itself (a plain cron schedule would wait a whole week before its first run).
+    schedule=CronTriggerTimetable("0 7 * * 6", timezone=LOCAL_TZ),
     start_date=pendulum.datetime(2026, 11, 1, tz=LOCAL_TZ),
     catchup=False,
     max_active_runs=1,
