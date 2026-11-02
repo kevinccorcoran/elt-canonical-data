@@ -711,8 +711,11 @@ def run(dry=False):
             "ENV is set neither in the environment nor as an Airflow "
             "Variable - refusing to guess (a prod container missing ENV "
             "would silently skip the daily sync). Set ENV=prod|dev|staging.")
-    if env != "prod" and not dry:
-        log.info("ENV=%s - portfolio_sync only runs on prod; skipping.", env)
+    # ALPHASTREAM_LIVE=1 marks the one environment that acts (adopts, pings). Since 2026-11-02 that is
+    # staging on the Mac, which took over prod's chain before the droplet was retired.
+    live = env == "prod" or os.environ.get("ALPHASTREAM_LIVE") == "1"
+    if not live and not dry:
+        log.info("ENV=%s - portfolio_sync only runs on the live environment; skipping.", env)
         return
 
     today = date.today()

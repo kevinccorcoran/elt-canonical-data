@@ -14,6 +14,11 @@
 # Telegram creds come from Airflow Variables (survive container recreation).
 # Max one delivered alert per 6h (state file). Runs from root crontab hourly:
 #   17 * * * * /opt/elt-canonical-data/tools/pipeline_watch.sh >> /var/log/alphastream_pipeline_watch.log 2>&1
+# On the Mac (staging runs prod's chain since 2026-11-02) a launchd job runs it hourly with
+# SCHEDULER=airflow-staging-scheduler WEBSERVER=airflow-staging-webserver DISK=/System/Volumes/Data.
+SCHEDULER=${SCHEDULER:-airflow-scheduler}
+WEBSERVER=${WEBSERVER:-airflow-webserver}
+DISK=${DISK:-/}
 STATE=/var/tmp/alphastream_pipeline_watch.last
 if [ -f "$STATE" ] && [ $(( $(date +%s) - $(cat "$STATE") )) -lt 21600 ]; then
   echo "$(date -u +%FT%TZ) SKIP (alerted <6h ago)"; exit 0
@@ -21,7 +26,7 @@ fi
 # Host disk fills silently and takes EVERY DAG down at once - the daily-chain
 # stale alert would only notice hours later. Check the host filesystem (this
 # script runs on the droplet, not in a container) and pass it into the alert.
-HOST_DISK_PCT=$(df -P / | awk 'NR==2{gsub("%","",$5); print $5}')
+HOST_DISK_PCT=$(df -P "$DISK" | awk 'NR==2{gsub("%","",$5); print $5}')
 # The check body is held in a variable so it can run against EITHER container:
 # scheduler first, webserver as fallback (audit 2026-08-28: with the body glued
 # to the scheduler exec, a down scheduler - the primary failure class this
@@ -105,14 +110,14 @@ PY
 run_watch() {  # $1 = container name
   printf '%s' "$PYCODE" | docker exec -i -e HOST_DISK_PCT="$HOST_DISK_PCT" "$1" python3 - 2>/dev/null
 }
-OUT=$(run_watch airflow-scheduler)
+OUT=$(run_watch "$SCHEDULER")
 if [ -z "$OUT" ]; then
   # scheduler exec failed - that is itself an incident. Run the checks via the
   # webserver AND ping about the dead scheduler through it (utils.alerting
   # resolves creds itself; same pattern as portfolio_deadman.sh).
-  OUT=$(run_watch airflow-webserver)
+  OUT=$(run_watch "$WEBSERVER")
   if [ -n "$OUT" ]; then
-    docker exec airflow-webserver python3 -c '
+    docker exec "$WEBSERVER" python3 -c '
 import sys; sys.path.insert(0, "/opt/airflow/dags")
 from utils.alerting import notify
 notify("\U0001F6A8 [prod] pipeline watch: airflow-scheduler container exec FAILED - checks ran via webserver; the scheduler is likely down, no DAGs are running")

@@ -1,12 +1,13 @@
 # Staging Airflow: prod's DAGs and code, run on this Mac against the staging database only.
 #   tools/staging_refresh.sh airflow     sets it up (once) and starts it; after that it restarts on its own
-# Its settings (.env, from .env.example) hold staging's login and the prices API key and nothing of prod's:
-# no PROD_DB_*, no DATABASE_URL_PROD. Its metadata database (airflow_staging on staging-postgres) started empty,
-# so no Variable from prod or from the old local scheduler (prod passwords, Telegram keys) exists here, and a
-# failure sends no alert. Every DAG starts paused and no schedule runs here: a DAG runs only when started by hand.
-# tools/staging_refresh.sh airflow switches on the price and model chain so they can be started; grading (LLM
-# spend), portfolio sync and the notifier stay off. The weekly sync in tools/staging_refresh.sh keeps prices current.
-# It runs whatever the Mac's checkouts hold, which is the point of staging.
+# Since 2026-11-02 staging is the live system. It took over prod's chain before the droplet and the managed
+# database were retired. The schedule runs and the same DAGs are on as were on prod. portfolio_sync acts
+# (ALPHASTREAM_LIVE=1) and failures ping Telegram (the TELEGRAM_* Variables, copied from prod's scheduler).
+# Its settings (.env, from .env.example) hold staging's login, the prices API key, the grading key and the
+# WhatsApp keys. Still nothing of prod's login: no PROD_DB_*, no DATABASE_URL_PROD. The weekly copy from prod is
+# off, and tools/staging_refresh.sh refuses to replace a live staging. Two launchd jobs run the watch scripts
+# that ran from the droplet's crontab (tools/pipeline_watch.sh hourly, tools/portfolio_deadman.sh daily).
+# It runs whatever the Mac's checkouts hold.
 x-staging-common: &staging-common
   image: alphastream-airflow:staging
   build:
@@ -20,8 +21,8 @@ x-staging-common: &staging-common
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
-    # Nothing runs on a schedule here; a DAG started by hand still runs. It keeps the Mac light.
-    AIRFLOW__SCHEDULER__USE_JOB_SCHEDULE: "false"
+    # The schedule runs: staging is the live system since 2026-11-02.
+    AIRFLOW__SCHEDULER__USE_JOB_SCHEDULE: "true"
     AIRFLOW__CORE__PARALLELISM: 4
     AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: 2
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:${STAGING_DB_PASSWORD}@host.docker.internal:5432/airflow_staging
@@ -33,6 +34,8 @@ x-staging-common: &staging-common
     # Staging, and only staging. Every way the DAGs pick a database points here.
     ENV: staging
     AIRFLOW_VAR_ENV: staging
+    # The one environment that acts: portfolio_sync adopts and pings here.
+    ALPHASTREAM_LIVE: "1"
     DB_DATABASE: staging
     DB_HOST: host.docker.internal
     DB_PORT: "5432"

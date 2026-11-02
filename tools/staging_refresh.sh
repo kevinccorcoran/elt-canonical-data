@@ -16,6 +16,8 @@
 #
 # Between syncs staging runs nothing on its own: its scheduler has schedules switched off, so only a DAG started
 # by hand runs there. The sync keeps the price tables equal to prod; the rest stays as of the last full copy.
+# Since 2026-11-02 staging is the live system (prod retired): the timer is off, and load, run, sync, copy and now
+# refuse to replace it. REPLACE_LIVE=1 overrides.
 # Why Saturday 13:00: prod's chain has landed Friday's session by noon and prod stays still all weekend, so the
 # copy is complete before Sunday's 14:00 conformance run checks it.
 # Prod is only read. pg_dump runs inside the container as Postgres 18 (the Mac's pg_dump is 14 and cannot dump an 18
@@ -280,6 +282,18 @@ PY
   log "staging Airflow at http://localhost:8082 (user kevin, password in $dir/.env)"
 }
 
+live_since() {   # set when staging became the live system; a copy of prod would overwrite its own days
+  sql "select shobj_description(oid, 'pg_database') from pg_database where datname = '$db'" 2>/dev/null |
+    python3 -c 'import json, sys
+try: print(json.loads(sys.stdin.read()).get("live_since", ""))
+except Exception: print("")'
+}
+case "${1:-status}" in load|run|sync|copy|now)
+  since=$(live_since || true)
+  if [ -n "$since" ] && [ "${REPLACE_LIVE:-0}" != 1 ]; then
+    log "refused: staging is the live system since $since; REPLACE_LIVE=1 overrides"; exit 1
+  fi ;;
+esac
 case "${1:-status}" in
   airflow)
     staging_airflow ;;
