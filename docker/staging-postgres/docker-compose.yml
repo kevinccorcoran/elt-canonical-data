@@ -16,7 +16,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/staging-postgres/.env}
     # Tuned for the bulk restore of a full copy: fewer checkpoints, more memory for index builds.
     command: ["postgres", "-c", "shared_buffers=1GB", "-c", "maintenance_work_mem=1GB",
-              "-c", "max_wal_size=8GB", "-c", "checkpoint_timeout=30min"]
+              "-c", "max_wal_size=2GB", "-c", "checkpoint_timeout=30min"]
     # The one-time move from Homebrew dials the host's server by this name; OrbStack needs it mapped.
     extra_hosts:
       - "host.docker.internal:host-gateway"
