@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Nightly database backup to iCloud Drive (tools/db_backup.sh). Daily at 12:30, after the
+     nightly chain. If the Mac sleeps through 12:30, launchd runs it once on wake.
+     Install:  cp tools/launchd/com.alphastream.db-backup.plist ~/Library/LaunchAgents/
+               launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.alphastream.db-backup.plist
+     Run now:  launchctl kickstart gui/$(id -u)/com.alphastream.db-backup -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.alphastream.db-backup</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>/Users/kevin/repos/elt-canonical-data/tools/db_backup.sh</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>/Users/kevin/Library/Logs/alphastream-db-backup.log</string>
+  <key>StandardErrorPath</key><string>/Users/kevin/Library/Logs/alphastream-db-backup.log</string>
+</dict>
+</plist>

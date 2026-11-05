@@ -6,7 +6,7 @@ AlphaStream turns market data into stock calls and tests each call against histo
 
 ## Status
 
-The build is done and runs in the cloud on a schedule.
+The build is done and runs locally on a schedule. The cloud environment was retired in November 2026.
 
 An audit in October 2026 found that the backtest could see past its own cutoff dates. On honest data the stock picker shows no proven edge. The group signal holds up: falling groups keep losing. Picking winners inside the rising groups is what fails. Model buys are stopped.
 
@@ -102,7 +102,7 @@ Compares each group's past moves with what came next.
 ### Backend
 - **2024.** Jobs move onto a scheduler.
 - **2026 Q3.** AI grader added. The board runs itself each day. Every stage sends alerts. Watchdogs catch stalled runs and missed syncs.
-- **2026 Q4.** Model buys stopped. The monthly replay now pauses the daily model run.
+- **2026 Q4.** Model buys stopped. The monthly replay now pauses the daily model run. The current model is in observation, with a verdict due February 2027.
 
 ### Frontend
 - **2026 Q2.** First views for ranges, coverage and clusters.
@@ -113,7 +113,7 @@ Compares each group's past moves with what came next.
 - **2024.** Separate dev and staging databases.
 - **2025.** Jobs move to the cloud.
 - **2026 Q1.** Everything runs in containers. Hosting moves to DigitalOcean with a managed database.
-- **2026 Q4.** The front end gets its own container.
+- **2026 Q4.** The front end gets its own container. Prod retired. Everything runs locally.
 
 ### Dev tools
 - **2024.** Python, dbt and Airflow.
@@ -121,6 +121,7 @@ Compares each group's past moves with what came next.
 - **2026 Q3.** Test rules written down before each test runs.
 
 ### Next
+- alphastream-next: a quantamental model on fundamentals and volume, in development on a new system.
 - Build valuation and quality measures from the fundamentals.
 - Test them for an edge with the same look-ahead rules.
 
