@@ -28,7 +28,9 @@ DB_ENVIRONMENTS <- list(
                     port = Sys.getenv("LOCAL_DB_PORT", "5432"),
                     user = Sys.getenv("LOCAL_DB_USER", "postgres"),
                     dbname = "dev", sslmode = "prefer", pass_env = "DB_PASSWORD"))
-DB_ENV_DEFAULT <- "Production"
+# Staging is the live database since 2026-11-02 (it took over prod's chain), and the
+# DigitalOcean Production database was deleted on 2026-11-11, so the app opens on Staging.
+DB_ENV_DEFAULT <- "Staging"
 
 # ─── Helper: the ONE shared connection bar (rendered once in the navbar header) ───
 # Replaces the old per-tab connection forms: pick env, type the password once,
