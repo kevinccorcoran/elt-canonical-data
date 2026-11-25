@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The Sunday run (tools/sunday_run.sh): the old system's chain once a week from Sunday 01:00, with Telegram before
+     and after, then every old container but the database stops. The Mac wakes for it at 00:55:
+               sudo pmset repeat wakeorpoweron U 00:55:00
+     A run missed while the Mac sleeps starts when it wakes. The script skips a start at 08:00 or later and says so.
+     Install:  cp tools/launchd/com.alphastream.sunday-run.plist ~/Library/LaunchAgents/
+               launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.alphastream.sunday-run.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.alphastream.sunday-run</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>/Users/kevin/repos/elt-canonical-data/tools/sunday_run.sh</string></array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>1</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/kevin/Library/Logs/alphastream-sunday-run.log</string>
+  <key>StandardErrorPath</key><string>/Users/kevin/Library/Logs/alphastream-sunday-run.log</string>
+</dict>
+</plist>
