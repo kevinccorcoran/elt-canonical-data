@@ -8,6 +8,9 @@
 # off, and tools/staging_refresh.sh refuses to replace a live staging. Two launchd jobs run the watch scripts
 # that ran from the droplet's crontab (tools/pipeline_watch.sh hourly, tools/portfolio_deadman.sh daily).
 # It runs whatever the Mac's checkouts hold.
+# Since 2026-11-11 it is off between runs, to save the Mac's memory. tools/sunday_run.sh starts it each Sunday at
+# 01:00, runs the chain once with Telegram before and after, and stops it again. Every timed job stays paused
+# between Sundays, so starting it by hand runs nothing on its own.
 x-staging-common: &staging-common
   image: alphastream-airflow:staging
   build:
