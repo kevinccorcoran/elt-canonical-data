@@ -51,7 +51,8 @@ JOBS=(
 )
 # Timed jobs that never run here: SEC filings and statements come from alphastream-next since 2026-11-26 (Kevin:
 # "alphastream should not ingest edgar"). They stay paused, so neither this run nor Airflow's own timer starts them.
-OFF=(raw_ingest_edgar_daily raw_ingest_edgar_statements)
+# The bulk load has no timer; paused, a run started by hand waits until someone unpauses it.
+OFF=(raw_ingest_edgar_daily raw_ingest_edgar_statements raw_ingest_edgar_bulk)
 # The jobs that only another job starts. cdm_ingest_massive sets them off in this order.
 TRIGGERED=(
   "metrics_dbt_models|Metrics"
