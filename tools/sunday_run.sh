@@ -41,8 +41,6 @@ LOCK=/tmp/alphastream-sunday-run.lock
 JOBS=(
   "raw_ingest_massive_daily|Prices, the last 60 days"
   "raw_gap_fill_weekly|Missing price days"
-  "raw_ingest_edgar_daily|New filings"
-  "raw_ingest_edgar_statements|Financial statements"
   "raw_ingest_delisted_monthly|Delisted stocks (monthly)"
   "walk_forward_dbt_models|Walk-forward models (monthly)"
   "qual_scorecards_4monthly|Scorecards (every four months)"
@@ -51,6 +49,9 @@ JOBS=(
   "gate_snapshot_archive|Snapshot"
   "qual_category_tags|Category tags"
 )
+# Timed jobs that never run here: SEC filings and statements come from alphastream-next since 2026-11-26 (Kevin:
+# "alphastream should not ingest edgar"). They stay paused, so neither this run nor Airflow's own timer starts them.
+OFF=(raw_ingest_edgar_daily raw_ingest_edgar_statements)
 # The jobs that only another job starts. cdm_ingest_massive sets them off in this order.
 TRIGGERED=(
   "metrics_dbt_models|Metrics"
@@ -280,7 +281,7 @@ if [ "$DRY" = 1 ]; then
   for j in "${JOBS[@]}"; do n=$((n + 1)); msg+=$'\n'"$n. $(label_of "$j")"; done
   msg+=$'\n'"It stops by ${STOP_AT}:00 at the latest. Then everything old but the database switches off."
   say "$msg"
-  log "database running: $(running "$DB" && echo yes || echo no). Would pause: ${CRON_DAGS[*]}. Would unpause: ${TRIGGERED_DAGS[*]}"
+  log "database running: $(running "$DB" && echo yes || echo no). Would pause: ${CRON_DAGS[*]} ${OFF[*]}. Would unpause: ${TRIGGERED_DAGS[*]}"
   log "stops waiting at $(date -r "$stop_epoch" '+%H:%M'); skips a start at ${LATEST_START}:00 or later"
   DONE=1
   exit 0
@@ -303,7 +304,7 @@ if [ "$hour" -ge "$LATEST_START" ]; then
   exit 0
 fi
 
-[ "$(helper pause "${CRON_DAGS[@]}")" = "ok" ] || fail "the timed jobs could not be paused"
+[ "$(helper pause "${CRON_DAGS[@]}" "${OFF[@]}")" = "ok" ] || fail "the timed jobs could not be paused"
 [ "$(helper unpause "${TRIGGERED_DAGS[@]}")" = "ok" ] || fail "the chained jobs could not be unpaused"
 left=$(helper leftover)
 [ -n "$left" ] && log "runs left from before: $left"
